@@ -98,6 +98,7 @@ fn fx8_ab_delete_creates_change_request() {
     )
     .unwrap();
     assert_eq!(production["finalStatus"], "committed");
+    let delete_id = new_thread_obligation_id(&chapter_id, 2);
 
     let connection = state
         .manager
@@ -148,12 +149,8 @@ fn fx8_ab_delete_creates_change_request() {
     let delete_b_revision = ai_novel_production_system_core::repositories::narrative::NarrativeRepository::project_revision(&connection, project_id).unwrap();
     drop(connection);
 
-    let mut delete_b = responsibility_adjustment_request(
-        project_id,
-        "promise:rv33-delete",
-        "DELETE",
-        delete_b_revision,
-    );
+    let mut delete_b =
+        responsibility_adjustment_request(project_id, &delete_id, "DELETE", delete_b_revision);
     delete_b["commandId"] = json!("cmd:fx8:delete-b");
     delete_b["idempotencyKey"] = json!("key:fx8:delete-b");
     let delete_b_replay_request = delete_b.clone();
@@ -172,8 +169,8 @@ fn fx8_ab_delete_creates_change_request() {
         .unwrap();
     let b_lifecycle: String = connection
         .query_row(
-            "SELECT lifecycle FROM narrative_obligations WHERE project_id=?1 AND obligation_id='promise:rv33-delete'",
-            [project_id],
+            "SELECT lifecycle FROM narrative_obligations WHERE project_id=?1 AND obligation_id=?2",
+            libsql_rusqlite::params![project_id, delete_id],
             |row| row.get(0),
         )
         .unwrap();
@@ -395,12 +392,14 @@ fn b08_rv33_audit_added_b_downgrade_and_delete_remain_available() {
     )
     .unwrap();
     assert_eq!(production["finalStatus"], "committed");
+    let downgrade_id = new_thread_obligation_id(&chapter_id, 1);
+    let delete_id = new_thread_obligation_id(&chapter_id, 2);
 
     let downgraded = execute_command_impl(
         &state,
         responsibility_adjustment_request(
             project_id,
-            "promise:rv33-downgrade",
+            &downgrade_id,
             "DOWNGRADE",
             production["receipt"]["afterRevision"].as_i64().unwrap(),
         ),
@@ -413,8 +412,8 @@ fn b08_rv33_audit_added_b_downgrade_and_delete_remain_available() {
         .unwrap();
     let (level_after_downgrade, lifecycle_after_downgrade): (String, String) = connection
         .query_row(
-            "SELECT authority_level,lifecycle FROM narrative_obligations WHERE project_id=?1 AND obligation_id='promise:rv33-downgrade'",
-            [project_id],
+            "SELECT authority_level,lifecycle FROM narrative_obligations WHERE project_id=?1 AND obligation_id=?2",
+            libsql_rusqlite::params![project_id, downgrade_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
@@ -429,7 +428,7 @@ fn b08_rv33_audit_added_b_downgrade_and_delete_remain_available() {
 
     let mut upgrade_request = responsibility_adjustment_request(
         project_id,
-        "promise:rv33-downgrade",
+        &downgrade_id,
         "UPGRADE",
         downgraded["receipt"]["afterRevision"].as_i64().unwrap(),
     );
@@ -441,7 +440,7 @@ fn b08_rv33_audit_added_b_downgrade_and_delete_remain_available() {
         &state,
         responsibility_adjustment_request(
             project_id,
-            "promise:rv33-delete",
+            &delete_id,
             "DELETE",
             upgraded["receipt"]["afterRevision"].as_i64().unwrap(),
         ),
@@ -450,7 +449,7 @@ fn b08_rv33_audit_added_b_downgrade_and_delete_remain_available() {
     assert_eq!(deleted["finalStatus"], "committed");
     let mut delete_after_upgrade_request = responsibility_adjustment_request(
         project_id,
-        "promise:rv33-downgrade",
+        &downgrade_id,
         "DELETE",
         deleted["receipt"]["afterRevision"].as_i64().unwrap(),
     );
@@ -464,12 +463,12 @@ fn b08_rv33_audit_added_b_downgrade_and_delete_remain_available() {
         .open(project_id, "RV33 audit source", NOW)
         .unwrap();
     let (upgraded_then_deleted_level, upgraded_then_deleted_lifecycle): (String, String) = connection.query_row(
-        "SELECT authority_level,lifecycle FROM narrative_obligations WHERE project_id=?1 AND obligation_id='promise:rv33-downgrade'",
-        [project_id], |row| Ok((row.get(0)?, row.get(1)?))
+        "SELECT authority_level,lifecycle FROM narrative_obligations WHERE project_id=?1 AND obligation_id=?2",
+        libsql_rusqlite::params![project_id, downgrade_id], |row| Ok((row.get(0)?, row.get(1)?))
     ).unwrap();
     let (deleted_level, deleted_lifecycle): (String, String) = connection.query_row(
-        "SELECT authority_level,lifecycle FROM narrative_obligations WHERE project_id=?1 AND obligation_id='promise:rv33-delete'",
-        [project_id], |row| Ok((row.get(0)?, row.get(1)?))
+        "SELECT authority_level,lifecycle FROM narrative_obligations WHERE project_id=?1 AND obligation_id=?2",
+        libsql_rusqlite::params![project_id, delete_id], |row| Ok((row.get(0)?, row.get(1)?))
     ).unwrap();
     assert_eq!(
         (

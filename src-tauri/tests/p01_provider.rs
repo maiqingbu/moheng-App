@@ -5,8 +5,8 @@ use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::project_db::ProjectManager;
 use ai_novel_production_system_core::provider::OpenAiCompatibleProvider;
 use ai_novel_production_system_core::provider::{
-    ProviderAdapter, ProviderConfig, ProviderError, ProviderErrorKind, ProviderRequest,
-    ProviderResponse, ProviderUsage, ScriptedProvider,
+    ProviderAdapter, ProviderAttemptPhase, ProviderConfig, ProviderError, ProviderErrorKind,
+    ProviderRequest, ProviderResponse, ProviderResponseRead, ProviderUsage, ScriptedProvider,
 };
 use ai_novel_production_system_core::repositories::provider::ProviderSettingsRepository;
 #[cfg(target_os = "macos")]
@@ -44,6 +44,7 @@ fn p01_provider_adapter_maps_usage_and_typed_errors() {
             provider_reported_cost_cents: Some(4),
         },
         provider_request_id: Some("req:p01".into()),
+        diagnostic: None,
     }));
     let response = provider
         .invoke(
@@ -52,6 +53,7 @@ fn p01_provider_adapter_maps_usage_and_typed_errors() {
                 model_id: "fixture-model".into(),
                 prompt: "bounded".into(),
                 timeout_ms: 1000,
+                thinking: None,
             },
             "fixture-token-ephemeral",
         )
@@ -67,6 +69,7 @@ fn p01_provider_adapter_maps_usage_and_typed_errors() {
                 model_id: "fixture-model".into(),
                 prompt: String::new(),
                 timeout_ms: 1000,
+                thinking: None,
             },
             "invalid-fixture-token",
         )
@@ -92,6 +95,7 @@ fn p01_configured_gateway_requires_secret_and_never_returns_it() {
             raw_response: json!({"ok":true}).to_string(),
             usage: ProviderUsage::default(),
             provider_request_id: None,
+            diagnostic: None,
         }))),
         Arc::new(secret_store.clone()),
     );
@@ -126,6 +130,7 @@ fn p01_provider_settings_are_non_secret_and_budget_gate_precedes_invocation() {
             model_id: settings.model_id.clone(),
             prompt: String::new(),
             timeout_ms: settings.timeout_ms,
+            thinking: None,
         },
         "fixture-token",
         true,
@@ -164,6 +169,7 @@ fn p01_settings_persist_without_api_key_and_provider_adapter_maps_transport_erro
                 model_id: "fixture-model".into(),
                 prompt: "ping".into(),
                 timeout_ms: 500,
+                thinking: None,
             },
             "fixture-token",
         )
@@ -238,6 +244,25 @@ fn local_provider_server_with_calls(status: u16, body: &'static str) -> (String,
     (format!("http://{address}"), calls)
 }
 
+fn local_provider_server_with_header(
+    status: u16,
+    body: &'static str,
+    response_header: &'static str,
+) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        read_local_http_request(&mut stream);
+        let response = format!(
+            "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\n{response_header}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+    });
+    format!("http://{address}")
+}
+
 fn local_provider_server_with_truncated_body() -> (String, Arc<AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -265,6 +290,7 @@ fn p01_provider_502_503_504_and_body_read_failure_are_unknown_without_retry() {
                     model_id: "fixture-model".into(),
                     prompt: "ping".into(),
                     timeout_ms: 2_000,
+                    thinking: None,
                 },
                 "fixture-token-ephemeral",
             )
@@ -285,12 +311,120 @@ fn p01_provider_502_503_504_and_body_read_failure_are_unknown_without_retry() {
                 model_id: "fixture-model".into(),
                 prompt: "body read failure".into(),
                 timeout_ms: 2_000,
+                thinking: None,
             },
             "fixture-token-ephemeral",
         )
         .unwrap_err();
     assert_eq!(error.kind, ProviderErrorKind::UnknownRemoteOutcome);
+    let diagnostic = error
+        .diagnostic
+        .as_ref()
+        .expect("provider attempt diagnostic");
+    assert_eq!(diagnostic.http_status, Some(200));
+    assert_eq!(diagnostic.phase, ProviderAttemptPhase::ResponseBodyRead);
+    assert_eq!(diagnostic.response_read, ProviderResponseRead::Failed);
+    assert!(diagnostic.provider_request_id.is_none());
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn p01_transport_diagnostic_captures_redacted_status_timeout_and_request_id() {
+    let endpoint = local_provider_server_with_header(
+        503,
+        r#"{"error":"private-response-body"}"#,
+        "x-acs-request-id: acs-fixture-123",
+    );
+    let error = OpenAiCompatibleProvider::new(endpoint)
+        .invoke(
+            &ProviderRequest {
+                capability: "TEST_PROVIDER".into(),
+                model_id: "fixture-model".into(),
+                prompt: "private-prompt-canary".into(),
+                timeout_ms: 1_500,
+                thinking: None,
+            },
+            "private-api-key-canary",
+        )
+        .unwrap_err();
+
+    assert_eq!(error.kind, ProviderErrorKind::UnknownRemoteOutcome);
+    let diagnostic = error
+        .diagnostic
+        .as_ref()
+        .expect("provider attempt diagnostic");
+    assert_eq!(diagnostic.timeout_ms, 1_500);
+    assert_eq!(diagnostic.client_timeout_ms, 2_000);
+    assert_eq!(diagnostic.phase, ProviderAttemptPhase::ResponseReceived);
+    assert_eq!(diagnostic.http_status, Some(503));
+    assert_eq!(diagnostic.response_read, ProviderResponseRead::Complete);
+    assert!(diagnostic.response_bytes.unwrap_or_default() > 0);
+    assert_eq!(
+        diagnostic.provider_request_id.as_deref(),
+        Some("acs-fixture-123")
+    );
+    assert_eq!(
+        diagnostic.provider_error_code.as_deref(),
+        Some("UNKNOWN_REMOTE_OUTCOME")
+    );
+    let serialized_error = serde_json::to_string(&error).unwrap();
+    for sensitive_value in [
+        "private-api-key-canary",
+        "private-prompt-canary",
+        "private-response-body",
+    ] {
+        assert!(!serialized_error.contains(sensitive_value));
+    }
+
+    let endpoint = local_provider_server_with_header(
+        200,
+        r#"{"ok":true}"#,
+        "x-request-id: private-api-key-canary",
+    );
+    let response = OpenAiCompatibleProvider::new(endpoint)
+        .invoke(
+            &ProviderRequest {
+                capability: "TEST_PROVIDER".into(),
+                model_id: "fixture-model".into(),
+                prompt: "safe request".into(),
+                timeout_ms: 1_000,
+                thinking: None,
+            },
+            "private-api-key-canary",
+        )
+        .unwrap();
+    assert_eq!(
+        response
+            .diagnostic
+            .and_then(|diagnostic| diagnostic.provider_request_id),
+        None
+    );
+
+    let endpoint = local_provider_server(
+        502,
+        r#"{"request_id":"provider-error-request-456","error":"upstream"}"#,
+        Duration::ZERO,
+    );
+    let error = OpenAiCompatibleProvider::new(endpoint)
+        .invoke(
+            &ProviderRequest {
+                capability: "TEST_PROVIDER".into(),
+                model_id: "fixture-model".into(),
+                prompt: "ping".into(),
+                timeout_ms: 1_000,
+                thinking: None,
+            },
+            "fixture-token-ephemeral",
+        )
+        .unwrap_err();
+    assert_eq!(error.kind, ProviderErrorKind::UnknownRemoteOutcome);
+    assert_eq!(
+        error
+            .diagnostic
+            .and_then(|diagnostic| diagnostic.provider_request_id)
+            .as_deref(),
+        None
+    );
 }
 
 fn disconnect_after_provider_request() -> String {
@@ -535,6 +669,7 @@ fn p01_b205_provider_canary_stays_out_of_child_argv_and_environment() {
         model_id: "fixture-model".into(),
         prompt: "local secret-boundary fixture".into(),
         timeout_ms: 4_000,
+        thinking: None,
     };
     let secret = canary.clone();
     let invocation = thread::spawn(move || provider.invoke(&request, &secret));
@@ -750,10 +885,10 @@ fn p01_b205_keychain_reopen_child() {
 
 #[test]
 fn p01_openai_compatible_adapter_maps_real_http_success_auth_and_timeout() {
-    let success_endpoint = local_provider_server(
+    let success_endpoint = local_provider_server_with_header(
         200,
         r#"{"id":"req:local","choices":[{"message":{"content":"{\"ok\":true}"}}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}"#,
-        Duration::ZERO,
+        "x-request-id: req:local",
     );
     let response = OpenAiCompatibleProvider::new(success_endpoint)
         .invoke(
@@ -762,6 +897,7 @@ fn p01_openai_compatible_adapter_maps_real_http_success_auth_and_timeout() {
                 model_id: "fixture-model".into(),
                 prompt: "ping".into(),
                 timeout_ms: 2_000,
+                thinking: None,
             },
             "fixture-token-ephemeral",
         )
@@ -772,6 +908,14 @@ fn p01_openai_compatible_adapter_maps_real_http_success_auth_and_timeout() {
     );
     assert_eq!(response.usage, ProviderUsage::default());
     assert_eq!(response.provider_request_id, None);
+    let diagnostic = response
+        .diagnostic
+        .as_ref()
+        .expect("provider attempt diagnostic");
+    assert_eq!(diagnostic.http_status, Some(200));
+    assert_eq!(diagnostic.timeout_ms, 2_000);
+    assert_eq!(diagnostic.client_timeout_ms, 2_000);
+    assert_eq!(diagnostic.provider_request_id.as_deref(), Some("req:local"));
 
     let auth_endpoint = local_provider_server(401, r#"{"error":"unauthorized"}"#, Duration::ZERO);
     let auth_error = OpenAiCompatibleProvider::new(auth_endpoint)
@@ -781,6 +925,7 @@ fn p01_openai_compatible_adapter_maps_real_http_success_auth_and_timeout() {
                 model_id: "fixture-model".into(),
                 prompt: "ping".into(),
                 timeout_ms: 2_000,
+                thinking: None,
             },
             "fixture-token-ephemeral",
         )
@@ -795,11 +940,21 @@ fn p01_openai_compatible_adapter_maps_real_http_success_auth_and_timeout() {
                 model_id: "fixture-model".into(),
                 prompt: "ping".into(),
                 timeout_ms: 500,
+                thinking: None,
             },
             "fixture-token-ephemeral",
         )
         .unwrap_err();
     assert_eq!(timeout_error.kind, ProviderErrorKind::Timeout);
+    let diagnostic = timeout_error
+        .diagnostic
+        .as_ref()
+        .expect("provider timeout diagnostic");
+    assert_eq!(diagnostic.timeout_ms, 500);
+    assert_eq!(diagnostic.client_timeout_ms, 1_000);
+    assert_eq!(diagnostic.phase, ProviderAttemptPhase::RequestSend);
+    assert_eq!(diagnostic.http_status, None);
+    assert_eq!(diagnostic.provider_error_code.as_deref(), Some("TIMEOUT"));
 }
 
 #[test]
@@ -813,6 +968,7 @@ fn p01_openai_compatible_adapter_maps_post_send_disconnect_to_unknown_remote_out
                 model_id: "fixture-model".into(),
                 prompt: "disconnect after request body is received".into(),
                 timeout_ms: 2_000,
+                thinking: None,
             },
             &canary,
         )
@@ -840,6 +996,7 @@ impl FormalProvider {
                     ..ProviderUsage::default()
                 },
                 provider_request_id: Some("p01-formal-request".into()),
+                diagnostic: None,
             }),
             calls,
         }
@@ -1338,4 +1495,89 @@ fn p01_formal_real_openai_compatible_usage_settles_after_exact_raw_persist() {
         project_files_scanned, project_canary_file_matches
     );
     assert_eq!(project_canary_file_matches, 0);
+}
+
+#[test]
+fn craft_step_model_settings_are_saved_and_used_only_for_their_step() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = AppPaths::new(temp.path());
+    let settings = |render_model: &str, audit_model: &str| {
+        json!({
+            "providerId":"fixture","provider":"OpenAI Compatible",
+            "modelId":"plan-model","model":"plan-model",
+            "renderModelId":render_model,"auditModelId":audit_model,
+            "endpoint":"http://127.0.0.1:1","enabled":true
+        })
+    };
+    ProviderSettingsRepository::write_global(&paths, &settings("writer-model", "audit-model"))
+        .unwrap();
+    let saved = ProviderSettingsRepository::read_global(&paths).unwrap();
+    assert_eq!(saved["renderModelId"], "writer-model");
+    assert_eq!(saved["auditModelId"], "audit-model");
+    let gateway = ConfiguredProductionGateway::for_desktop(paths.clone());
+    let model = |capability: &str| gateway.resolve_step_profile(capability).unwrap().model;
+    assert_eq!(gateway.resolve_profile().unwrap().model, "plan-model");
+    assert_eq!(model("PLAN_STRATEGY"), "plan-model");
+    assert_eq!(model("RENDER_CHAPTER"), "writer-model");
+    assert_eq!(model("AUDIT_EXTRACT"), "audit-model");
+    // Owner decision (2026-10-24): r2 chapter plans use the audit model.
+    assert_eq!(model("PLAN_CHAPTER_CRAFT"), "audit-model");
+    assert_eq!(
+        gateway
+            .resolve_step_profile("RENDER_CHAPTER")
+            .unwrap()
+            .endpoint,
+        "http://127.0.0.1:1"
+    );
+    // Blank step models fall back to the main model.
+    ProviderSettingsRepository::write_global(&paths, &settings("  ", "")).unwrap();
+    assert_eq!(model("RENDER_CHAPTER"), "plan-model");
+    assert_eq!(model("AUDIT_EXTRACT"), "plan-model");
+    assert_eq!(model("PLAN_CHAPTER_CRAFT"), "plan-model");
+}
+
+#[test]
+fn p4_each_steps_thinking_is_saved_and_goes_with_its_model() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = AppPaths::new(temp.path());
+    ProviderSettingsRepository::write_global(
+        &paths,
+        &json!({
+            "providerId":"fixture","provider":"OpenAI Compatible","modelId":"plan-model",
+            "endpoint":"http://127.0.0.1:1","enabled":true,
+            "thinking":{
+                "render":{"enabled":true,"effort":"max"},
+                "audit":{"enabled":"yes"},
+                "default":{"enabled":false,"effort":"extreme"},
+                "other":{"enabled":true}
+            }
+        }),
+    )
+    .unwrap();
+    let saved = ProviderSettingsRepository::read_global(&paths).unwrap();
+    // Only the three steps, a boolean switch and a known effort are kept.
+    assert_eq!(
+        saved["thinking"],
+        json!({"render":{"enabled":true,"effort":"max"},"default":{"enabled":false}})
+    );
+    use ai_novel_production_system_core::production::step_thinking;
+    use ai_novel_production_system_core::provider::Thinking;
+    assert_eq!(
+        step_thinking(&saved, "RENDER_CHAPTER"),
+        Some(Thinking { enabled: true, effort: Some("max".into()) })
+    );
+    // Real run round 30: the craft writer, length adjustment and cuts use
+    // the writing model, so they take its thinking too.
+    for capability in ["RENDER_CHAPTER_CRAFT", "ADJUST_CHAPTER_LENGTH", "CUT_CHAPTER", "REWRITE_PASSAGES"] {
+        assert_eq!(
+            step_thinking(&saved, capability),
+            Some(Thinking { enabled: true, effort: Some("max".into()) }),
+            "{capability}"
+        );
+    }
+    assert_eq!(step_thinking(&saved, "AUDIT_EXTRACT"), None);
+    assert_eq!(
+        step_thinking(&saved, "PLAN_STRATEGY"),
+        Some(Thinking { enabled: false, effort: None })
+    );
 }

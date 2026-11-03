@@ -4,6 +4,8 @@ import { useRoute, useRouter } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import MetricCard from '../components/MetricCard.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
+import ChapterLengthPicker from '../components/ChapterLengthPicker.vue'
+import { withChapterLengthRange, type ChapterLengthRange } from '../presentation/chapterLength'
 import { useProjectStore } from '../stores/projectStore'
 import ContinuityPanel from '../components/ContinuityPanel.vue'
 import type { ContinuityThreadViewProjection, VolumeDetailProjection } from '../../application/contracts'
@@ -136,6 +138,8 @@ async function prepareNextChapter() {
   if (chapter) await store.loadPlanningRoute(volumeId.value, true)
 }
 
+// FX-18: a long-form chapter's length range is fixed when its plan is made.
+const chapterLengthRange = ref<ChapterLengthRange | null>(null)
 async function compileNextChapterPlan(adjustScope = false) {
   const chapter = nextChapter.value
   if (!chapterActionsAvailable.value || !chapter || chapterPlanningBusy(chapterPlanState.value.status)) return
@@ -148,11 +152,11 @@ async function compileNextChapterPlan(adjustScope = false) {
   await store.runCommand('chapter-plan-compile', {
     type: 'planning_compile_chapter_plan',
     projectId: store.currentProjectId ?? undefined,
-    payload: {
+    payload: withChapterLengthRange({
       chapterId: chapter.id,
       chapterGoalHint: '推进当前卷任务，并让真实选择产生可核对后果。',
       ...(scopeSelection ? { scopeSelection } : {}),
-    },
+    }, chapterLengthRange.value),
   })
   await store.loadPlanningRoute(volumeId.value, true)
 }
@@ -230,6 +234,7 @@ onUnmounted(() => {
       <div class="card-head"><div><h2 class="card-title">下一章正式生产</h2><p class="card-subtitle">先准备当前章节并生成计划，再到“创作”页检查和开始生产。</p></div><span class="badge">当前章计划</span></div>
       <CommandFeedback :state="chapterPrepareState" @confirm="store.confirmCommandResult('chapter-prepare')" />
       <CommandFeedback :state="chapterPlanState" @confirm="store.confirmCommandResult('chapter-plan-compile')" />
+      <ChapterLengthPicker v-if="nextChapter" v-model="chapterLengthRange" allow-default :default-range="store.settings?.chapterLengthRange ?? null" :label="`第 ${nextChapter.number} 章字数区间（生成计划时生效）`" style="margin-top:14px" />
       <div v-if="!nextChapter" class="actions" style="margin-top:14px"><button class="btn primary" data-action="prepare" :disabled="chapterPlanningBusy(chapterPrepareState.status)" @click="performAction(prepareNextChapter)">准备下一章</button><span class="muted" style="font-size:12px">以正式提交的章节为起点，准备当前章。</span></div>
       <div v-else-if="!currentChapterPlan" class="actions" style="margin-top:14px"><div><strong>第 {{ nextChapter.number }} 章 · {{ nextChapter.title }}</strong><div class="muted" style="font-size:12px;margin-top:4px">章节已准备，尚未生成当前章计划。</div></div><button class="btn primary" data-action="compile" :disabled="chapterPlanningBusy(chapterPlanState.status)" @click="performAction(compileNextChapterPlan)">生成当前章节计划</button></div>
       <div v-else class="actions" style="margin-top:14px"><div><strong>第 {{ nextChapter.number }} 章计划已绑定</strong><div class="muted" style="font-size:12px;margin-top:4px">第 {{ currentChapterPlan.version }} 版 · 执行有效性以生产前检查为准</div></div><span class="muted" style="font-size:12px">请在“创作”页从正式 UI 启动本章生产。</span></div>

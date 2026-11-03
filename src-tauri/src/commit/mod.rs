@@ -54,6 +54,10 @@ pub enum CommitError {
     Artifact(#[from] ArtifactError),
     #[error("sqlite: {0}")]
     Sqlite(#[from] libsql_rusqlite::Error),
+    /// A constraint a delta broke, with which delta it was (real run round
+    /// 30: "FOREIGN KEY constraint failed" alone named nothing).
+    #[error("sqlite: {0}")]
+    DeltaConstraint(String),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
 }

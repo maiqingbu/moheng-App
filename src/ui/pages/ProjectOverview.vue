@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projectStore'
 import { phaseLabel } from '../presentation/projectLabels'
+import RuntimeBanner from '../components/RuntimeBanner.vue'
 
 const store = useProjectStore()
 const router = useRouter()
@@ -42,11 +43,14 @@ const nextChapterLabel = computed(() => recentChapters.value.length ? `继续第
 
 <template>
   <div v-if="project && overview" class="prototype-overview">
-    <div class="prototype-pagehead"><div><h2>总览</h2><p>继续写作、掌握当前卷状态，并优先处理真正会影响后续创作的问题。</p></div><button class="prototype-btn" type="button" @click="router.push(`/projects/${id}/assistant`)">页面帮助</button></div>
+    <div class="prototype-pagehead"><div><h2>总览</h2><p>继续写作、掌握当前卷状态，并优先处理真正会影响后续创作的问题。</p></div></div>
 
-    <div v-if="project.runState === 'IDLE'" class="prototype-notice"><strong>等待开始</strong><span>项目已经准备好，尚未启动新的生产任务。</span></div>
+    <RuntimeBanner :state="project.runState" :reason="project.blockReason">
+      <button v-if="project.runState === 'ACTIVE'" class="prototype-btn primary" type="button" @click="router.push(`/projects/${id}/production`)">查看创作进度</button>
+      <button v-if="store.pendingDecisionCount" class="prototype-btn primary" type="button" @click="router.push(`/projects/${id}/decisions`)">去处理 {{ store.pendingDecisionCount }} 项决定</button>
+    </RuntimeBanner>
 
-    <div class="prototype-grid3" :style="project.runState === 'IDLE' ? 'margin-top:16px' : ''">
+    <div class="prototype-grid3" style="margin-top:16px">
       <div class="prototype-panel"><div class="prototype-metric">{{ project.committedChapters }}</div><div class="prototype-metric-label">已完成章节</div></div>
       <div class="prototype-panel"><div class="prototype-metric">{{ currentVolume ? `第 ${currentVolume.number} 卷` : phaseLabel(project.phase) }}</div><div class="prototype-metric-label">当前创作阶段</div></div>
       <div class="prototype-panel"><div class="prototype-metric warning">{{ store.pendingDecisionCount }}</div><div class="prototype-metric-label">需要优先处理</div></div>
@@ -55,7 +59,7 @@ const nextChapterLabel = computed(() => recentChapters.value.length ? `继续第
     <div class="prototype-grid" style="margin-top:16px">
       <section class="prototype-panel">
         <h3>继续创作</h3>
-        <div class="prototype-item"><div><strong>{{ nextChapterLabel }}</strong><small>{{ recentChapters.length ? '最近正式章节已经确认，可以继续准备下一章。' : '先完成故事方向与第一章准备，再开始正式创作。' }}</small></div><button class="prototype-badge brand" type="button" @click="router.push(nextAction.to)">{{ nextAction.label }}</button></div>
+        <div class="prototype-item"><div><strong>{{ nextChapterLabel }}</strong><small>{{ recentChapters.length ? '最近正式章节已经确认，可以继续准备下一章。' : '先完成故事方向与第一章准备，再开始正式创作。' }}</small></div><button class="prototype-btn primary" type="button" @click="router.push(nextAction.to)">{{ nextAction.label }}</button></div>
         <div style="height:10px" />
         <h3>最近章节</h3>
         <div v-if="recentChapters.length" class="prototype-list"><div v-for="chapter in recentChapters.slice(0, 3)" :key="chapter.id" class="prototype-item"><div><strong>第 {{ chapter.number }} 章 · {{ chapter.title }}</strong><small>已确认 · {{ chapter.wordCount.toLocaleString() }} 字</small></div></div></div>
@@ -64,11 +68,11 @@ const nextChapterLabel = computed(() => recentChapters.value.length ? `继续第
 
       <aside class="prototype-panel">
         <h3>需要处理</h3>
-        <div v-if="store.pendingDecisionCount" class="prototype-list"><div class="prototype-item"><div><strong>有 {{ store.pendingDecisionCount }} 项内容需要确认</strong><small>它们会在确认后影响下一步创作安排。</small></div><span class="prototype-badge danger">需要处理</span></div></div>
+        <div v-if="store.pendingDecisionCount" class="prototype-list"><div class="prototype-item"><div><strong>有 {{ store.pendingDecisionCount }} 项内容需要确认</strong><small>它们会在确认后影响下一步创作安排。</small></div><button class="prototype-btn" type="button" @click="router.push(`/projects/${id}/decisions`)">去处理</button></div></div>
         <div v-else class="prototype-list"><div class="prototype-item"><div><strong>当前没有待确认事项</strong><small>需要确认、修改或重新检查的内容会集中显示在这里。</small></div><span class="prototype-badge brand">正常</span></div></div>
         <div style="height:16px" />
         <h3>长篇状态</h3>
-        <div class="prototype-item"><div><strong>{{ healthTitle }}</strong><small>{{ healthNote }}</small></div><span class="prototype-badge" :class="healthClass">{{ healthBadge }}</span></div>
+        <div class="prototype-item"><div><strong>{{ healthTitle }}</strong><small>{{ healthNote }}</small></div><span class="prototype-badge" :class="healthClass">{{ healthBadge }}</span><button class="prototype-btn" type="button" @click="router.push(`/projects/${id}/health`)">查看</button></div>
       </aside>
     </div>
   </div>

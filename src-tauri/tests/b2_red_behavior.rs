@@ -9,7 +9,7 @@ use ai_novel_production_system_core::production::{
 };
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use serde_json::{json, Value};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 const NOW: &str = "2026-09-13T12:00:00Z";
@@ -17,6 +17,26 @@ const NOW: &str = "2026-09-13T12:00:00Z";
 struct BehaviorGateway {
     audit_calls: AtomicUsize,
     planning_contexts: Mutex<Vec<Value>>,
+    /// VD-1a: plans the book's direction after signing, with a chapter
+    /// table in every reply when `table_directions` is set.
+    plans_directions: bool,
+    table_directions: bool,
+    direction_inputs: Mutex<Vec<Value>>,
+    /// Round 19: the first audit reports no change; set when it was asked
+    /// again with feedback.
+    blank_audit_once: AtomicBool,
+    /// Chapter 1's first audit has one fact with an unregistered predicate,
+    /// and the follow-up round comes back empty.
+    blank_feedback_once: AtomicBool,
+    audit_feedback: Mutex<Vec<Value>>,
+    /// P1: chapter 1 opens a thread, chapter 2 advances it and chapter 3
+    /// resolves it, by the ref the audit is shown.
+    threads: AtomicBool,
+    /// The chapter-1 thread is a planted hint (a foreshadow).
+    thread_foreshadows: AtomicBool,
+    open_threads_seen: Mutex<Vec<Value>>,
+    /// Every model input, by capability.
+    inputs: Mutex<Vec<(String, Value)>>,
 }
 
 impl BehaviorGateway {
@@ -102,7 +122,15 @@ impl ProductionModelGateway for BehaviorGateway {
         })
     }
 
+    fn plans_book_direction(&self) -> bool {
+        self.plans_directions
+    }
+
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        self.inputs
+            .lock()
+            .unwrap()
+            .push((capability.to_owned(), input.clone()));
         if capability == "PLAN_STRATEGY" {
             self.planning_contexts
                 .lock()
@@ -153,7 +181,30 @@ impl ProductionModelGateway for BehaviorGateway {
                 let chapter_no = self.audit_calls.load(Ordering::SeqCst) + 1;
                 json!({"body":Self::quote(chapter_no)})
             }
+            "AUDIT_EXTRACT" if self.blank_audit_once.swap(false, Ordering::SeqCst) => json!({
+                "qualityFindings":[],"canonCandidates":[],"knowledgeCandidates":[],
+                "continuityCandidates":[],"taskProgressCandidates":[],
+                "revealedReservationRefs":[],"evidenceRanges":[],
+                "auditCompleteness":"COMPLETE_NO_CHANGE","unresolvedHard":false
+            }),
+            "AUDIT_EXTRACT"
+                if input.get("auditFeedback").is_some()
+                    && self.blank_feedback_once.swap(false, Ordering::SeqCst) =>
+            {
+                json!({
+                    "qualityFindings":[],"canonCandidates":[],"knowledgeCandidates":[],
+                    "continuityCandidates":[],"taskProgressCandidates":[],
+                    "revealedReservationRefs":[],"evidenceRanges":[],
+                    "auditCompleteness":"COMPLETE_NO_CHANGE","unresolvedHard":false
+                })
+            }
             "AUDIT_EXTRACT" => {
+                if input.get("auditFeedback").is_some() {
+                    self.audit_feedback
+                        .lock()
+                        .unwrap()
+                        .push(input["auditFeedback"].clone());
+                }
                 let chapter_no = self.audit_calls.fetch_add(1, Ordering::SeqCst) + 1;
                 let quote = Self::quote(chapter_no);
                 let evidence = json!({
@@ -196,6 +247,17 @@ impl ProductionModelGateway for BehaviorGateway {
                         "authorityLevel":"C",
                         "evidence":evidence
                     }));
+                    // Real run round 23: a relation to someone named only
+                    // by a title, who is no entity.
+                    canon_candidates.push(json!({
+                        "factId":"fact:b2:red:relation-unknown",
+                        "subjectId":"entity:b02:linzhou",
+                        "entityId":"entity:b02:linzhou",
+                        "predicate":"relationship",
+                        "objectJson":{"objectId":"师父","state":"敬畏"},
+                        "authorityLevel":"C",
+                        "evidence":evidence
+                    }));
                 }
                 if chapter_no == 3 {
                     canon_candidates.push(json!({
@@ -223,11 +285,36 @@ impl ProductionModelGateway for BehaviorGateway {
                 } else {
                     Vec::new()
                 };
+                if chapter_no == 1 && self.blank_feedback_once.load(Ordering::SeqCst) {
+                    canon_candidates.push(json!({
+                        "factId":"fact:b2:red:unregistered",
+                        "subjectId":"entity:b02:linzhou",
+                        "entityId":"entity:b02:linzhou",
+                        "predicate":"has_unregistered_mood",
+                        "objectJson":{"mood":"烦躁"},
+                        "authorityLevel":"C",
+                        "evidence":evidence
+                    }));
+                }
+                let continuity_candidates = if !self.threads.load(Ordering::SeqCst) {
+                    Vec::new()
+                } else if chapter_no == 1 {
+                    vec![json!({"disposition":"ADVANCE","description":"账本缺的那一页去了哪里","evidence":evidence,"fulfillmentObject":"缺页","promotionSignals":{"foreshadowRecoveryResponsibility":self.thread_foreshadows.load(Ordering::SeqCst)}})]
+                } else {
+                    self.open_threads_seen.lock().unwrap().push(input["openThreads"].clone());
+                    input["openThreads"][0]["threadRef"]
+                        .as_str()
+                        .map(|thread| {
+                            let disposition = if chapter_no == 2 { "ADVANCE" } else { "RESOLVE" };
+                            vec![json!({"threadRef":thread,"disposition":disposition,"evidence":evidence})]
+                        })
+                        .unwrap_or_default()
+                };
                 json!({
                     "qualityFindings":[],
                     "canonCandidates":canon_candidates,
                     "knowledgeCandidates":knowledge_candidates,
-                    "continuityCandidates":[],
+                    "continuityCandidates":continuity_candidates,
                     "taskProgressCandidates":[],
                     "revealedReservationRefs":[],
                     "evidenceRanges":[evidence],
@@ -236,17 +323,80 @@ impl ProductionModelGateway for BehaviorGateway {
                 })
             }
             "OPENING_SIGNING_EVALUATION" => Self::signing_evaluation(input),
+            "PLAN_BOOK_DIRECTION" => {
+                self.direction_inputs.lock().unwrap().push(input.clone());
+                let mut direction = direction_reply(input);
+                if self.table_directions {
+                    direction["chapters"] = json!([{"no":4,"goal":"林舟去渡口"}]);
+                }
+                direction
+            }
+            "PLAN_VOLUME_DIRECTION" => {
+                self.direction_inputs.lock().unwrap().push(input.clone());
+                let room = input["volume"]["chapters"].as_i64().unwrap();
+                let stage = |goal: &str, chapters: i64| json!({"goal":goal,"pressure":"旧秩序的人抢先烧掉账页","cast":[],"turn":"账本的主人现身","estimatedChapters":chapters,"steps":["先找线人","再查底册","最后对质"]});
+                let mut direction = json!({
+                    "description":"林舟离开县城，去府城追查账本的来路",
+                    "stages":[
+                        stage("林舟进府城找到当年的账房", room / 3),
+                        stage("林舟拿到账本的底册", room / 3),
+                        stage("林舟当堂对质", room - 2 * (room / 3))
+                    ],
+                    "climax":"林舟在府衙当堂对质"
+                });
+                if self.table_directions {
+                    direction["chapters"] = json!([{"no":40}]);
+                }
+                direction
+            }
             other => return Err(format!("unexpected behavior-test capability: {other}")),
         };
         Ok(ProductionModelResponse::deterministic(output))
     }
 }
 
+/// A direction whose three stages fill the first volume after the opening.
+fn direction_reply(input: &Value) -> Value {
+    let room = input["firstVolume"]["chaptersAfterOpening"]
+        .as_i64()
+        .unwrap();
+    let stage = |goal: &str, chapters: i64| json!({"goal":goal,"pressure":"旧秩序的人抢先烧掉账页","cast":[],"turn":"缺页的主人现身","estimatedChapters":chapters,"steps":["先找线人","再查底册","最后对质"]});
+    json!({
+        "protagonistMacroDirection":"林舟从躲债的学徒走到替全城重算旧账的人",
+        "mustAchieve":[{"volumeNo":1,"description":"林舟找回失踪账本的缺页"}],
+        "relationshipMacroDirections":[],
+        "majorMysteryGoals":[{"layer":1,"answerInVolume":1,"description":"缺页记的是谁的债"}],
+        "futureReservations":[{"description":"账本的来源","notBeforeVolumeNo":2}],
+        "volumeIntentSeeds":[{"volumeNo":1,"description":"追回缺页，逼出改账的人","stages":[
+            stage("林舟查清缺页落在谁手里", room / 3),
+            stage("林舟拿到改账的证据", room / 3),
+            stage("林舟当众对账", room - 2 * (room / 3))
+        ],"climax":"林舟在城门口当众对账"}]
+    })
+}
+
 fn state() -> (KernelState, tempfile::TempDir, Arc<BehaviorGateway>) {
+    state_with(false, false)
+}
+
+fn state_with(
+    plans_directions: bool,
+    table_directions: bool,
+) -> (KernelState, tempfile::TempDir, Arc<BehaviorGateway>) {
     let temp = tempfile::tempdir().expect("project directory");
     let gateway = Arc::new(BehaviorGateway {
         audit_calls: AtomicUsize::new(0),
         planning_contexts: Mutex::new(Vec::new()),
+        plans_directions,
+        table_directions,
+        direction_inputs: Mutex::new(Vec::new()),
+        blank_audit_once: AtomicBool::new(false),
+        blank_feedback_once: AtomicBool::new(false),
+        audit_feedback: Mutex::new(Vec::new()),
+        threads: AtomicBool::new(false),
+        thread_foreshadows: AtomicBool::new(false),
+        open_threads_seen: Mutex::new(Vec::new()),
+        inputs: Mutex::new(Vec::new()),
     });
     let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
     (state, temp, gateway)
@@ -793,4 +943,626 @@ fn rv30_long_form_plan_input_keeps_canon_once_and_omits_evidence_quotes() {
             "HARD Plan input contains raw evidence quote from opening chapter {chapter_no}"
         );
     }
+}
+
+#[test]
+fn vd1a_a_direction_planned_after_signing_fills_the_approved_book_plan() {
+    let (state, _temp, gateway) = state_with(true, false);
+    let (project_id, approved) = create_approved_book_plan(&state);
+    let inputs = gateway.direction_inputs.lock().unwrap().clone();
+    assert_eq!(inputs.len(), 1);
+    assert!(
+        inputs[0]["firstVolume"]["chaptersAfterOpening"]
+            .as_i64()
+            .unwrap()
+            > 0
+    );
+    assert!(!inputs[0]["signing"]["verdict"].as_str().unwrap().is_empty());
+    assert_eq!(
+        approved["protagonistMacroDirection"],
+        "林舟从躲债的学徒走到替全城重算旧账的人"
+    );
+    assert_eq!(
+        approved["mustAchieve"],
+        json!([{"id":"goal:book:1","volumeNo":1,"description":"林舟找回失踪账本的缺页"}])
+    );
+    let seed = &approved["volumeIntentSeeds"][0];
+    assert_eq!(seed["seedId"], "volume-1");
+    assert_eq!(seed["stages"].as_array().unwrap().len(), 3);
+    assert_eq!(seed["stages"][2]["goal"], "林舟当众对账");
+    assert_eq!(approved["futureReservations"][0]["mayReveal"], false);
+    // The opening's facts still bind the plan as a rule, not as a goal.
+    assert!(approved["mustNotBreak"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|rule| rule["description"] == "开篇已提交事实不得违背；以 Canon 为准。"));
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let runs: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM model_runs WHERE capability='PLAN_BOOK_DIRECTION'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(runs, 1);
+    drop(connection);
+    // VD-1b: the volume route follows the stages.
+    let volumes = query_volume_list_impl(&state, json!({"projectId":project_id,"pageSize":20}))
+        .expect("volume list after approval");
+    let volume_id = volumes["items"][0]["id"].as_str().expect("volume id");
+    for (step, command_type) in [
+        ("volume-intent", "planning_create_volume_intent"),
+        ("volume-plan", "planning_create_volume_plan"),
+    ] {
+        command(
+            &state,
+            &project_id,
+            &format!("vd1a:{step}"),
+            command_type,
+            json!({"volumeId":volume_id}),
+        );
+    }
+    let route = query_plan_route_impl(&state, json!({"projectId":project_id,"volumeId":volume_id}))
+        .expect("volume route");
+    let required = route["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|task| task["class"] == "REQUIRED")
+        .map(|task| task["objective"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    // VD-1h: one task per step, three steps a stage, then the book goal.
+    assert_eq!(required.len(), 10, "{required:?}");
+    // Real run round 25: steps are route tasks only; the volume's goals,
+    // part of every chapter's hard context, are its stages and book goal.
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let intent_goals: String = connection
+        .query_row(
+            "SELECT json_extract(p.payload_json,'$.mustAchieve') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='VolumeIntent'",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(connection);
+    let intent_goals: Value = serde_json::from_str(&intent_goals).unwrap();
+    assert_eq!(intent_goals.as_array().unwrap().len(), 4, "{intent_goals}");
+    assert_eq!(required[..3], ["先找线人", "再查底册", "最后对质"]);
+    assert_eq!(required[9], "林舟找回失踪账本的缺页");
+    // VD-1c: chapter 4 is planned at the start of the first stage.
+    let prepared = command(
+        &state,
+        &project_id,
+        "vd1c:chapter-four-prepare",
+        "planning_prepare_next_chapter",
+        json!({"volumeId":volume_id}),
+    );
+    let chapter_id = prepared["chapter"]["chapterId"].as_str().unwrap();
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let direction = ai_novel_production_system_core::book_direction::for_chapter(
+        &connection,
+        &project_id,
+        chapter_id,
+        4,
+    )
+    .unwrap()
+    .expect("a direction for chapter 4");
+    // VD-1h: the planner sees the first step, not the stage's end.
+    assert_eq!(direction["currentStage"]["goal"], "先找线人");
+    assert_eq!(direction["currentStage"]["step"], 1);
+    assert_eq!(direction["currentStage"]["stepCount"], 3);
+    assert_eq!(direction["currentStage"]["chaptersSoFar"], 0);
+    assert!(direction["currentStage"]["taskId"]
+        .as_str()
+        .unwrap()
+        .starts_with("task:required:goal:"));
+    assert_eq!(direction["climax"], "林舟在城门口当众对账");
+}
+
+#[test]
+fn vd1a_a_direction_that_keeps_listing_chapters_leaves_the_template_and_a_reminder() {
+    let (state, _temp, gateway) = state_with(true, true);
+    let (project_id, approved) = create_approved_book_plan(&state);
+    let inputs = gateway.direction_inputs.lock().unwrap().clone();
+    assert_eq!(inputs.len(), 3, "one direction and two feedback rounds");
+    assert!(inputs[2]["planFeedback"]["problems"][0]
+        .as_str()
+        .unwrap()
+        .contains("不要写章表"));
+    assert!(approved["mustAchieve"][0]["id"]
+        .as_str()
+        .unwrap()
+        .starts_with("goal:opening-reality:"));
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let (reason, payload): (String, String) = connection
+        .query_row(
+            "SELECT reason, payload_json FROM decisions WHERE project_id=?1 AND decision_type='AUDIT_REMINDER' AND outcome='OPEN'",
+            [&project_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(
+        reason.starts_with("全书方向没有生成，沿用了模板："),
+        "{reason}"
+    );
+    assert!(payload.contains("规划提醒"), "{payload}");
+}
+
+/// VD-2: opens volume 2 after volume 1 (as the handoff does) and plans it.
+fn open_volume_two(state: &KernelState, project_id: &str) -> (String, Value) {
+    use ai_novel_production_system_core::repositories::volume_lifecycle::VolumeLifecycleRepository;
+    let connection = state.manager.open(project_id, "", NOW).unwrap();
+    let (book_id, end): (String, i64) = connection
+        .query_row(
+            "SELECT book_id, chapter_end FROM volumes WHERE project_id=?1 AND volume_no=1",
+            [project_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let volume_id = "vol:2d2d2d2d2d2d2d2d2d2d2d2d".to_string();
+    VolumeLifecycleRepository::insert_next_volume(
+        &connection,
+        project_id,
+        &volume_id,
+        &book_id,
+        2,
+        "第二卷",
+        end + 1,
+        end + 30,
+        90_000,
+        NOW,
+    )
+    .unwrap();
+    drop(connection);
+    let planned = ai_novel_production_system_core::commands::direct_volume(
+        state,
+        project_id,
+        &volume_id,
+        "vd2:direct",
+        "vd2:direct:key",
+        NOW,
+    )
+    .unwrap();
+    (volume_id, planned)
+}
+
+#[test]
+fn vd2_an_opened_volume_is_planned_from_the_one_before_and_its_route_follows() {
+    let (state, _temp, gateway) = state_with(true, false);
+    let (project_id, _) = create_approved_book_plan(&state);
+    let (volume_id, planned) = open_volume_two(&state, &project_id);
+    assert_eq!(planned, "PLANNED");
+    let inputs = gateway.direction_inputs.lock().unwrap().clone();
+    let input = inputs.last().unwrap();
+    assert_eq!(
+        input["volume"],
+        json!({"volumeNo":2,"chapters":30,"stageChapters":{"min":15,"max":30}})
+    );
+    assert_eq!(
+        input["book"]["storyPromise"],
+        approved_story_promise(&state, &project_id)
+    );
+    let (_, _, book_plan) = current_book_plan_payload(&state, &project_id);
+    let seed = book_plan["volumeIntentSeeds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|seed| seed["seedId"] == "volume-2")
+        .unwrap()
+        .clone();
+    assert_eq!(seed["description"], "林舟离开县城，去府城追查账本的来路");
+    assert_eq!(seed["stages"][0]["id"], "stage:2:1");
+    let route = query_plan_route_impl(&state, json!({"projectId":project_id,"volumeId":volume_id}))
+        .expect("volume 2 route");
+    let required = route["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|task| task["class"] == "REQUIRED")
+        .map(|task| task["objective"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(required.len(), 9, "{required:?}");
+    assert_eq!(required[..3], ["先找线人", "再查底册", "最后对质"]);
+}
+
+#[test]
+fn vd2_a_volume_direction_that_keeps_listing_chapters_leaves_a_reminder() {
+    let (state, _temp, _gateway) = state_with(true, true);
+    let (project_id, _) = create_approved_book_plan(&state);
+    let (_, planned) = open_volume_two(&state, &project_id);
+    assert_eq!(planned, "TEMPLATE");
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let reason: String = connection
+        .query_row(
+            "SELECT reason FROM decisions WHERE project_id=?1 AND decision_type='AUDIT_REMINDER' AND reason LIKE '第 2 卷方向%'",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        reason.starts_with("第 2 卷方向没有生成，沿用了模板："),
+        "{reason}"
+    );
+}
+
+fn approved_story_promise(state: &KernelState, project_id: &str) -> Value {
+    current_book_plan_payload(state, project_id).2["storyPromise"].clone()
+}
+
+#[test]
+fn an_opening_audit_that_records_nothing_is_asked_again_so_signing_can_read_the_chapter() {
+    // Real run round 19: chapter 2's audit reported no change and signing
+    // found no committed facts for it.
+    let (state, _temp, gateway) = state_with(false, false);
+    gateway.blank_audit_once.store(true, Ordering::SeqCst);
+    let (_project_id, approved) = create_approved_book_plan(&state);
+    assert_eq!(approved["planningMaturity"], "APPROVED");
+    let feedback = gateway.audit_feedback.lock().unwrap().clone();
+    assert_eq!(feedback.len(), 1, "{feedback:?}");
+    assert_eq!(
+        feedback[0]["rejectedFor"],
+        "B08_AUDIT_OPENING_CANON_REQUIRED"
+    );
+}
+
+#[test]
+fn p1_an_opening_records_its_events_and_relations() {
+    // P1 (real run round 20): ten chapters left canon_events and
+    // canon_relations empty.
+    let (state, _temp, _gateway) = state();
+    let (project_id, _) = create_approved_book_plan(&state);
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let count = |table: &str| -> i64 {
+        connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table} WHERE project_id=?1"), [&project_id], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    };
+    assert!(count("canon_events") > 0, "an event-typed fact is an event");
+    let (subject, predicate, object): (String, String, String) = connection
+        .query_row(
+            "SELECT subject_id, predicate, object_id FROM canon_relations WHERE project_id=?1",
+            [&project_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("a fact about another person is a relation");
+    assert_eq!(
+        (subject.as_str(), predicate.as_str(), object.as_str()),
+        ("entity:b02:linzhou", "distrusts", "entity:b02:guqing")
+    );
+    // A relation to someone who is no entity stays a fact only.
+    assert_eq!(count("canon_relations"), 1);
+}
+
+#[test]
+fn p1_a_proposed_thread_later_chapters_take_up_is_advanced_then_resolved() {
+    // P1 (real run round 20): 24 threads stayed PROPOSED, never shown to a
+    // later chapter nor allowed to move outside its plan.
+    let (state, _temp, gateway) = state();
+    gateway.threads.store(true, Ordering::SeqCst);
+    let (project_id, _) = create_approved_book_plan(&state);
+    let seen = gateway.open_threads_seen.lock().unwrap().clone();
+    assert_eq!(seen[0][0]["description"], "账本缺的那一页去了哪里", "{seen:?}");
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let lifecycle: String = connection
+        .query_row(
+            "SELECT lifecycle FROM narrative_obligations WHERE project_id=?1 AND description='账本缺的那一页去了哪里'",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(lifecycle, "RESOLVED");
+}
+
+#[test]
+fn p1_a_hint_a_chapter_plants_is_a_foreshadow_until_a_later_chapter_recovers_it() {
+    // P1 (real run round 20): the foreshadow table stayed empty.
+    let (state, _temp, gateway) = state();
+    gateway.threads.store(true, Ordering::SeqCst);
+    gateway.thread_foreshadows.store(true, Ordering::SeqCst);
+    let (project_id, _) = create_approved_book_plan(&state);
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let (status, intent, payoff): (String, String, Option<String>) = connection
+        .query_row(
+            "SELECT status,intent,secret_payload_ref FROM foreshadows WHERE project_id=?1",
+            [&project_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!((status.as_str(), intent.as_str(), payoff.as_deref()), ("RECOVERED", "账本缺的那一页去了哪里", Some("缺页")));
+}
+
+#[test]
+fn p1_the_approved_book_plan_records_each_mystery_layer() {
+    // P1 (real run round 20): no mystery was ever recorded, so the climax
+    // task's MYSTERY_RESOLVED condition had nothing to resolve.
+    let (state, _temp, _gateway) = state_with(true, false);
+    let (project_id, _) = create_approved_book_plan(&state);
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let mut statement = connection
+        .prepare("SELECT obligation_id,lifecycle,description FROM narrative_obligations WHERE project_id=?1 AND obligation_type='MYSTERY'")
+        .unwrap();
+    let mysteries = statement
+        .query_map([&project_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        mysteries,
+        [("mystery:book:1".to_owned(), "APPROVED".to_owned(), "第 1 层：缺页记的是谁的债".to_owned())]
+    );
+    // A chapter may answer it without its plan naming it.
+    use ai_novel_production_system_core::repositories::narrative::NarrativeRepository;
+    let open = NarrativeRepository::open_candidate_threads(&connection, &project_id, 8).unwrap();
+    assert!(open.iter().any(|thread| thread["threadRef"] == "thread:mystery:book:1"), "{open:?}");
+    assert!(NarrativeRepository::is_open_candidate_thread(&connection, &project_id, "mystery:book:1").unwrap());
+}
+
+#[test]
+fn p2_the_setup_and_direction_steps_are_given_their_skills() {
+    // P2: story directions and the book and volume directions never called
+    // a skill (the story bible: craft_v3_setup).
+    let (state, _temp, gateway) = state_with(true, false);
+    let (project_id, _) = create_approved_book_plan(&state);
+    open_volume_two(&state, &project_id);
+    let inputs = gateway.inputs.lock().unwrap().clone();
+    for (capability, stage, resident) in [
+        ("GENERATE_STORY_DIRECTIONS", "story_directions", "S09"),
+        ("PLAN_BOOK_DIRECTION", "book_plan", "S02"),
+        ("PLAN_VOLUME_DIRECTION", "volume_plan", "S17"),
+    ] {
+        let (_, input) = inputs
+            .iter()
+            .find(|(called, _)| called == capability)
+            .unwrap_or_else(|| panic!("{capability} was not called"));
+        let guidance = if input["craftGuidance"].is_null() {
+            &input["input"]["craftGuidance"]
+        } else {
+            &input["craftGuidance"]
+        };
+        assert_eq!(guidance["stage"], stage, "{capability}");
+        let skills = guidance["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|skill| skill["skillId"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(skills.contains(&resident), "{capability}: {skills:?}");
+    }
+}
+
+#[test]
+fn an_empty_follow_up_audit_does_not_wipe_the_facts_the_first_one_found() {
+    // Real run round 24: chapters 1 and 2's follow-up audits came back
+    // COMPLETE_NO_CHANGE and were committed, so signing found no facts.
+    let (state, _temp, gateway) = state();
+    gateway.blank_feedback_once.store(true, Ordering::SeqCst);
+    let (project_id, approved) = create_approved_book_plan(&state);
+    assert_eq!(approved["planningMaturity"], "APPROVED");
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let chapter_one_facts: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM canon_facts f JOIN chapters c ON c.chapter_id=f.valid_from_chapter_id WHERE f.project_id=?1 AND c.chapter_no=1",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(chapter_one_facts > 0, "chapter 1 keeps the facts its first audit found");
+    let unregistered: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM canon_facts WHERE project_id=?1 AND predicate='has_unregistered_mood'",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(unregistered, 0, "the fact the ledger cannot take is held back");
+}
+
+#[test]
+fn a_chapter_plan_sees_the_next_steps_not_the_whole_route() {
+    // Real run round 25: 26 step tasks and every other route task went into
+    // chapter 4's context, over the hard budget.
+    let (state, _temp, gateway) = state_with(true, false);
+    let (project_id, _) = create_approved_book_plan(&state);
+    let volumes = query_volume_list_impl(&state, json!({"projectId":project_id,"pageSize":20}))
+        .expect("volume list after approval");
+    let volume_id = volumes["items"][0]["id"].as_str().expect("volume id").to_owned();
+    for (step, command_type) in [
+        ("volume-intent", "planning_create_volume_intent"),
+        ("volume-plan", "planning_create_volume_plan"),
+    ] {
+        command(&state, &project_id, &format!("ctx:{step}"), command_type, json!({"volumeId":volume_id}));
+    }
+    let prepared = command(
+        &state,
+        &project_id,
+        "ctx:chapter-four-prepare",
+        "planning_prepare_next_chapter",
+        json!({"volumeId":volume_id}),
+    );
+    let chapter_id = prepared["chapter"]["chapterId"].as_str().unwrap().to_owned();
+    command(
+        &state,
+        &project_id,
+        "ctx:chapter-four-plan",
+        "planning_compile_chapter_plan",
+        json!({"chapterId":chapter_id,"chapterGoalHint":"追查账本缺页的去向。"}),
+    );
+    let contexts = gateway.planning_contexts.lock().unwrap();
+    let context = contexts
+        .iter()
+        .rev()
+        .find(|context| context["executionMode"] == "LONG_FORM")
+        .expect("LONG_FORM Plan input");
+    let required = context["planTaskContexts"]
+        .as_array()
+        .expect("plan task contexts")
+        .iter()
+        .filter(|task| task["contract"]["class"] == "REQUIRED")
+        .filter_map(|task| task["taskRef"].as_str())
+        .collect::<Vec<_>>();
+    // Nine steps and the book goal are required; the chapter sees the next few.
+    assert_eq!(required.len(), 4, "{required:?}");
+    assert!(required[0].ends_with(":step:1:1:1"), "{required:?}");
+}
+
+#[test]
+fn after_a_step_is_done_the_next_chapter_works_on_the_next_step() {
+    // Real run round 26: once step 1 was satisfied it left the context, its
+    // state with it, so step 2 never looked ready and chapters 5-10 worked
+    // only on an optional task.
+    let (state, _temp, _gateway) = state_with(true, false);
+    let (project_id, _) = create_approved_book_plan(&state);
+    let volumes = query_volume_list_impl(&state, json!({"projectId":project_id,"pageSize":20}))
+        .expect("volume list after approval");
+    let volume_id = volumes["items"][0]["id"].as_str().expect("volume id").to_owned();
+    for (step, command_type) in [
+        ("volume-intent", "planning_create_volume_intent"),
+        ("volume-plan", "planning_create_volume_plan"),
+    ] {
+        command(&state, &project_id, &format!("next:{step}"), command_type, json!({"volumeId":volume_id}));
+    }
+    let route = query_plan_route_impl(&state, json!({"projectId":project_id,"volumeId":volume_id}))
+        .expect("volume route");
+    let steps = route["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|task| task["class"] == "REQUIRED")
+        .filter_map(|task| task["taskId"].as_str().map(ToOwned::to_owned))
+        .collect::<Vec<_>>();
+    {
+        let connection = state.manager.open(&project_id, "", NOW).unwrap();
+        let chapter_three: String = connection
+            .query_row("SELECT chapter_id FROM chapters WHERE project_id=?1 AND chapter_no=3", [&project_id], |row| row.get(0))
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO state_deltas(state_id,project_id,state_type,value_json,chapter_id,payload_json,created_at,updated_at) VALUES (?1,?2,'volume.task.progress',?3,?4,'{}',?5,?5)",
+                libsql_rusqlite::params![
+                    steps[0],
+                    project_id,
+                    json!({"taskId":steps[0],"status":"SATISFIED"}).to_string(),
+                    chapter_three,
+                    NOW
+                ],
+            )
+            .unwrap();
+    }
+    let prepared = command(
+        &state,
+        &project_id,
+        "next:chapter-four-prepare",
+        "planning_prepare_next_chapter",
+        json!({"volumeId":volume_id}),
+    );
+    let chapter_id = prepared["chapter"]["chapterId"].as_str().unwrap().to_owned();
+    command(
+        &state,
+        &project_id,
+        "next:chapter-four-plan",
+        "planning_compile_chapter_plan",
+        json!({"chapterId":chapter_id,"chapterGoalHint":"追查账本缺页的去向。"}),
+    );
+    let (_, _, plan) = {
+        let connection = state.manager.open(&project_id, "", NOW).unwrap();
+        let raw: String = connection
+            .query_row(
+                "SELECT p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='ChapterPlan' AND h.scope_key LIKE '%'||?2||'%'",
+                libsql_rusqlite::params![project_id, chapter_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        ((), (), serde_json::from_str::<Value>(&raw).unwrap())
+    };
+    let active = plan["activeTaskRefs"].as_array().unwrap();
+    assert!(active.iter().any(|task| task == &json!(steps[1])), "{active:?}");
+}
+
+#[test]
+fn a_chapter_whose_audit_marks_no_event_still_records_its_main_event() {
+    // Real runs rounds 26-27: 455 facts, not one marked as an event by the
+    // audit; the system marks each chapter's main event itself.
+    let (state, _temp, _gateway) = state();
+    let (project_id, _) = create_approved_book_plan(&state);
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let events: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM canon_events e JOIN chapters c ON c.chapter_id=e.chapter_id WHERE e.project_id=?1 AND c.chapter_no=1",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    // Chapter 1's audit marks no event.
+    assert_eq!(events, 1);
+}
+
+#[test]
+fn the_owner_rewrites_and_abandons_a_foreshadow_and_a_finished_one_stays() {
+    // Owner decision 2026-11-03: a foreshadow from the audit is changed by
+    // the owner directly, like a C-level thread, with a receipt.
+    let (state, _temp, _gateway) = state();
+    let (project_id, _) = create_approved_book_plan(&state);
+    {
+        let connection = state.manager.open(&project_id, "", NOW).unwrap();
+        connection
+            .execute(
+                "INSERT INTO foreshadows(foreshadow_id,project_id,intent,secret_payload_ref,status,source_authority,created_at,updated_at) VALUES ('thread-fs-1',?1,'他按了按。','缺页','PLANTED','B08_ACTUAL_NARRATIVE',?2,?2)",
+                libsql_rusqlite::params![project_id, NOW],
+            )
+            .unwrap();
+    }
+    let foreshadow = |state: &KernelState| -> (String, Option<String>, String) {
+        let connection = state.manager.open(&project_id, "", NOW).unwrap();
+        connection
+            .query_row(
+                "SELECT intent,secret_payload_ref,status FROM foreshadows WHERE project_id=?1 AND foreshadow_id='thread-fs-1'",
+                [&project_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+    };
+    // The production center lists the open foreshadows to change.
+    let center = query_production_center_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
+    )
+    .unwrap();
+    assert_eq!(
+        center["openForeshadows"],
+        json!([{"threadRef":"thread:thread-fs-1","intent":"他按了按。","payoff":"缺页","recoverWindowEndChapter":null,"status":"PLANTED"}])
+    );
+    let edited = command(
+        &state,
+        &project_id,
+        "fs:edit",
+        "thread_responsibility_adjust",
+        json!({"threadRef":"thread:thread-fs-1","action":"EDIT","intent":"账本缺的那一页记着谁的债","fulfillmentObject":"缺页上的名字"}),
+    );
+    assert_eq!(edited["finalStatus"], "committed");
+    assert_eq!(
+        foreshadow(&state),
+        ("账本缺的那一页记着谁的债".to_owned(), Some("缺页上的名字".to_owned()), "PLANTED".to_owned())
+    );
+    command(
+        &state,
+        &project_id,
+        "fs:abandon",
+        "thread_responsibility_adjust",
+        json!({"threadRef":"thread:thread-fs-1","action":"DELETE"}),
+    );
+    assert_eq!(foreshadow(&state).2, "ABANDONED");
+    let error = execute_command_impl(
+        &state,
+        json!({
+            "type":"thread_responsibility_adjust","commandId":"fs:again","idempotencyKey":"fs:again:key",
+            "projectId":project_id,"expectedRevision":revision(&state, &project_id),"requestedAt":NOW,
+            "payload":{"threadRef":"thread:thread-fs-1","action":"EDIT","intent":"再改一次"}
+        }),
+    )
+    .unwrap_err();
+    assert!(error.contains("B08_FORESHADOW_NOT_ACTIVE"), "{error}");
 }

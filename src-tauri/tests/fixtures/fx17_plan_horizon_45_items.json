@@ -1,0 +1,185 @@
+{
+ "source": "real PLAN_STRATEGY response, qwen3.8-flash, 2026-10-16 (horizonPreview only)",
+ "horizonPreview": [
+  {
+   "tentative": true,
+   "description": "主角的选择导致局部世界逻辑出现BUG，引发小范围秩序混乱"
+  },
+  {
+   "tentative": true,
+   "description": "底层民众开始注意到主角的存在，将其视为潜在救世主的信号初现"
+  },
+  {
+   "tentative": true,
+   "description": "神庭监测到异常波动，派出低阶执行者进行初步调查"
+  },
+  {
+   "tentative": true,
+   "description": "主角发现自身能力并非无代价，每次使用都会消耗某种不可再生的‘定义’资源"
+  },
+  {
+   "tentative": true,
+   "description": "新的问题浮现：为何连预言都无法锁定主角？是否存在更高层级的观察者？"
+  },
+  {
+   "tentative": true,
+   "description": "主角尝试接触第一个反抗组织成员，但对方因恐惧而拒绝信任"
+  },
+  {
+   "tentative": true,
+   "description": "神庭内部出现分歧，部分高阶天使主张观察而非立即清除"
+  },
+  {
+   "tentative": true,
+   "description": "主角在一次危机中被迫再次使用概念抹除，导致身边某物永久失去名称"
+  },
+  {
+   "tentative": true,
+   "description": "世界边缘出现裂缝，暗示绝对秩序体系正在从内部瓦解"
+  },
+  {
+   "tentative": true,
+   "description": "主角收到匿名信息，指向一个能解释其起源的古老遗迹"
+  },
+  {
+   "tentative": true,
+   "description": "神庭启动‘净化协议’，将主角标记为最高优先级威胁"
+  },
+  {
+   "tentative": true,
+   "description": "主角意识到自己的存在本身即是系统漏洞，必须找到修复或扩大它的方法"
+  },
+  {
+   "tentative": true,
+   "description": "一名曾试图定义主角的神官精神崩溃，留下残缺笔记"
+  },
+  {
+   "tentative": true,
+   "description": "底层民众自发聚集在主角曾出现的地点，形成非正式崇拜圈"
+  },
+  {
+   "tentative": true,
+   "description": "主角首次遭遇其他‘不可定义者’的痕迹，但对方已消失"
+  },
+  {
+   "tentative": true,
+   "description": "神庭公开宣布主角为‘虚无之疫’，煽动公众敌意"
+  },
+  {
+   "tentative": true,
+   "description": "主角利用BUG制造短暂混乱，成功逃脱追捕"
+  },
+  {
+   "tentative": true,
+   "description": "发现造物主留下的空白页，上面有未完成的签名痕迹"
+  },
+  {
+   "tentative": true,
+   "description": "反抗组织提出合作，但要求主角证明其价值"
+  },
+  {
+   "tentative": true,
+   "description": "主角的能力开始影响时间流，出现轻微因果倒置现象"
+  },
+  {
+   "tentative": true,
+   "description": "神庭派遣‘命名者’部队，专门负责重新定义异常实体"
+  },
+  {
+   "tentative": true,
+   "description": "主角在逃亡途中目睹一座城市因逻辑冲突而自我重构"
+  },
+  {
+   "tentative": true,
+   "description": "旧日神话片段浮现，暗示主角可能是创世失败品"
+  },
+  {
+   "tentative": true,
+   "description": "民众中有人模仿主角行为，导致更多小型BUG爆发"
+  },
+  {
+   "tentative": true,
+   "description": "主角被迫进入地下黑市，寻找能暂时屏蔽神庭追踪的物品"
+  },
+  {
+   "tentative": true,
+   "description": "黑市商人透露‘无名者’传说，称其为系统重启的关键"
+  },
+  {
+   "tentative": true,
+   "description": "神庭高层秘密会议讨论是否承认主角为合法变量"
+  },
+  {
+   "tentative": true,
+   "description": "主角经历一次记忆缺失，醒来后发现自己身处陌生神殿"
+  },
+  {
+   "tentative": true,
+   "description": "神殿壁画描绘了多个类似主角的形象，均被抹去面部"
+  },
+  {
+   "tentative": true,
+   "description": "主角遇到一位盲眼先知，后者声称能‘看见’他的本质"
+  },
+  {
+   "tentative": true,
+   "description": "先知警告：过度使用能力将导致现实结构彻底崩解"
+  },
+  {
+   "tentative": true,
+   "description": "神庭发动大规模搜捕，动用全域预言网络"
+  },
+  {
+   "tentative": true,
+   "description": "主角通过抹除自身位置坐标，实现瞬移式逃脱"
+  },
+  {
+   "tentative": true,
+   "description": "逃脱过程中意外激活古代装置，释放出一段加密音频"
+  },
+  {
+   "tentative": true,
+   "description": "音频内容似乎是造物主自言自语，提及‘错误代码0xNULL’"
+  },
+  {
+   "tentative": true,
+   "description": "反抗组织截获该音频，视其为革命性证据"
+  },
+  {
+   "tentative": true,
+   "description": "神庭否认音频真实性，指控为主角伪造"
+  },
+  {
+   "tentative": true,
+   "description": "主角决定公开音频以争取民心，但面临巨大风险"
+  },
+  {
+   "tentative": true,
+   "description": "公开行动引发社会动荡，多地发生暴乱与镇压"
+  },
+  {
+   "tentative": true,
+   "description": "主角在混乱中与一名神庭叛逃者结盟"
+  },
+  {
+   "tentative": true,
+   "description": "叛逃者提供关于‘命名仪式’的情报，暗示可逆转部分效果"
+  },
+  {
+   "tentative": true,
+   "description": "主角尝试逆向操作，结果导致局部区域陷入混沌状态"
+  },
+  {
+   "tentative": true,
+   "description": "混沌区成为新势力争夺焦点，各方介入"
+  },
+  {
+   "tentative": true,
+   "description": "主角意识到自己不仅是变量，更是催化剂"
+  },
+  {
+   "tentative": true,
+   "description": "最终抉择临近：是稳定世界还是加速崩塌？"
+  }
+ ]
+}

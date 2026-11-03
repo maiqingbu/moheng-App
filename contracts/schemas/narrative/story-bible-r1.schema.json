@@ -1,0 +1,271 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "m0a://schemas/narrative/story-bible.r1.schema.json",
+ "title": "StoryBibleR1",
+ "type": "object",
+ "properties": {
+  "payloadSchema": {
+   "const": "story-bible.r1"
+  },
+  "stage": {
+   "type": "string",
+   "enum": [
+    "CANDIDATE",
+    "CONFIRMED"
+   ]
+  },
+  "generation": {
+   "type": "integer",
+   "minimum": 1
+  },
+  "variant": {
+   "type": "string",
+   "minLength": 1
+  },
+  "angle": {
+   "type": "string",
+   "minLength": 1
+  },
+  "storyConstitutionRef": {
+   "$ref": "../artifact/artifact-ref.schema.json"
+  },
+  "confirmedFromRef": {
+   "anyOf": [
+    {
+     "$ref": "../artifact/artifact-ref.schema.json"
+    },
+    {
+     "type": "null"
+    }
+   ]
+  },
+  "normalWorld": {
+   "type": "string",
+   "minLength": 1
+  },
+  "mechanism": {
+   "type": "object",
+   "properties": {
+    "experience": {
+     "type": "string",
+     "minLength": 1
+    },
+    "rules": {
+     "type": "array",
+     "minItems": 2,
+     "maxItems": 5,
+     "items": {
+      "type": "object",
+      "properties": {
+       "rule": {
+        "type": "string",
+        "minLength": 1
+       },
+       "numbers": {
+        "type": "string",
+        "minLength": 1
+       },
+       "howReadersSeeIt": {
+        "type": "string",
+        "minLength": 1
+       }
+      },
+      "required": [
+       "rule",
+       "numbers",
+       "howReadersSeeIt"
+      ],
+      "additionalProperties": false
+     }
+    }
+   },
+   "required": [
+    "experience",
+    "rules"
+   ],
+   "additionalProperties": false
+  },
+  "protagonist": {
+   "type": "object",
+   "properties": {
+    "name": {
+     "type": "string",
+     "minLength": 1
+    },
+    "personality": {
+     "type": "string",
+     "minLength": 1
+    },
+    "flaw": {
+     "type": "string",
+     "minLength": 1
+    },
+    "wantsNow": {
+     "type": "string",
+     "minLength": 1
+    },
+    "humorStyle": {
+     "type": "string",
+     "minLength": 1
+    },
+    "innerVoiceStyle": {
+     "type": "string",
+     "minLength": 1
+    }
+   },
+   "required": [
+    "name",
+    "personality",
+    "flaw",
+    "wantsNow",
+    "humorStyle",
+    "innerVoiceStyle"
+   ],
+   "additionalProperties": false
+  },
+  "emotionalAnchor": {
+   "type": "object",
+   "properties": {
+    "object": {
+     "type": "string",
+     "minLength": 1
+    },
+    "memorySummary": {
+     "type": "string",
+     "minLength": 1
+    }
+   },
+   "required": [
+    "object",
+    "memorySummary"
+   ],
+   "additionalProperties": false
+  },
+  "antagonist": {
+   "type": "object",
+   "properties": {
+    "name": {
+     "type": "string",
+     "minLength": 1
+    },
+    "position": {
+     "type": "string",
+     "minLength": 1
+    },
+    "wants": {
+     "type": "string",
+     "minLength": 1
+    },
+    "method": {
+     "type": "string",
+     "minLength": 1
+    }
+   },
+   "required": [
+    "name",
+    "position",
+    "wants",
+    "method"
+   ],
+   "additionalProperties": false
+  },
+  "cast": {
+   "type": "array",
+   "minItems": 2,
+   "maxItems": 8,
+   "items": {
+    "type": "object",
+    "properties": {
+     "name": {
+      "type": "string",
+      "minLength": 1
+     },
+     "role": {
+      "type": "string",
+      "minLength": 1
+     },
+     "relation": {
+      "type": "string",
+      "minLength": 1
+     },
+     "privateAgenda": {
+      "type": "string",
+      "minLength": 1
+     },
+     "speechStyle": {
+      "type": "string",
+      "minLength": 1
+     },
+     "contrastWithProtagonist": {
+      "type": "string",
+      "minLength": 1
+     },
+     "firstAppears": {
+      "type": "integer",
+      "minimum": 1
+     }
+    },
+    "required": [
+     "name",
+     "role",
+     "relation",
+     "privateAgenda",
+     "speechStyle",
+     "contrastWithProtagonist",
+     "firstAppears"
+    ],
+    "additionalProperties": false
+   }
+  },
+  "openingArc": {
+   "type": "array",
+   "minItems": 3,
+   "maxItems": 3,
+   "items": {
+    "type": "object",
+    "properties": {
+     "chapter": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 3
+     },
+     "direction": {
+      "type": "string",
+      "minLength": 1
+     },
+     "protagonistWin": {
+      "type": "string",
+      "minLength": 1
+     }
+    },
+    "required": [
+     "chapter",
+     "direction",
+     "protagonistWin"
+    ],
+    "additionalProperties": false
+   }
+  },
+  "createdAt": {
+   "$ref": "../shared/definitions.schema.json#/$defs/Rfc3339Utc"
+  }
+ },
+ "additionalProperties": false,
+ "required": [
+  "payloadSchema",
+  "stage",
+  "generation",
+  "variant",
+  "angle",
+  "storyConstitutionRef",
+  "confirmedFromRef",
+  "normalWorld",
+  "mechanism",
+  "protagonist",
+  "emotionalAnchor",
+  "antagonist",
+  "cast",
+  "openingArc",
+  "createdAt"
+ ]
+}

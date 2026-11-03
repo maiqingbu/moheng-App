@@ -138,6 +138,20 @@ pub fn execute_adjustment(
         return Err("IDEMPOTENCY_CONFLICT".into());
     }
 
+    // Owner decision 2026-11-03: a foreshadow found by the audit is changed
+    // by the owner directly, like a C-level thread.
+    if let Some(foreshadow) =
+        NarrativeRepository::foreshadow_authority(&connection, project_id, obligation_id)
+            .map_err(|error| error.to_string())?
+    {
+        return adjust_foreshadow(
+            &connection,
+            &command,
+            (obligation_id, thread_ref, action, &artifact_id),
+            &foreshadow,
+            payload,
+        );
+    }
     let record = NarrativeRepository::responsibility_adjustment_record(
         &connection,
         project_id,
@@ -391,6 +405,125 @@ pub fn execute_adjustment(
         "afterRevision":receipt.after_revision,
         "replayed":false,
         "receipt":receipt
+    }))
+}
+
+/// A foreshadow rewritten (`EDIT`: its intent, payoff or recovery window)
+/// or abandoned (`DELETE`) by the owner, committed with a snapshot, a
+/// decision and a receipt; a recovered or abandoned one is finished.
+fn adjust_foreshadow(
+    connection: &libsql_rusqlite::Connection,
+    command: &AdjustmentCommand<'_>,
+    (foreshadow_id, thread_ref, action, artifact_id): (&str, &str, &str, &str),
+    foreshadow: &crate::repositories::narrative::ForeshadowAuthorityRecord,
+    payload: &serde_json::Map<String, Value>,
+) -> Result<Value, String> {
+    if !matches!(foreshadow.status.as_str(), "PLANTED" | "REINFORCED" | "STALE") {
+        return Err("B08_FORESHADOW_NOT_ACTIVE".into());
+    }
+    let text = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+    let (intent, payoff, window, status) = match action {
+        "EDIT" => {
+            let window = match payload.get("recoverWindowEndChapter") {
+                Some(Value::Null) => None,
+                Some(value) => Some(
+                    value
+                        .as_str()
+                        .filter(|chapter| !chapter.trim().is_empty())
+                        .ok_or_else(|| "IPC_INVALID:recoverWindowEndChapter".to_string())?
+                        .to_owned(),
+                ),
+                None => foreshadow.recover_window_end_chapter.clone(),
+            };
+            let intent = text("intent").map(ToOwned::to_owned);
+            let payoff = text("fulfillmentObject").and_then(crate::production::payoff_ref);
+            if intent.is_none() && payoff.is_none() && !payload.contains_key("recoverWindowEndChapter") {
+                return Err("IPC_INVALID:EDIT needs intent, fulfillmentObject or recoverWindowEndChapter".into());
+            }
+            (
+                intent.unwrap_or_else(|| foreshadow.intent.clone()),
+                payoff.or_else(|| foreshadow.secret_payload_ref.clone()),
+                window,
+                foreshadow.status.clone(),
+            )
+        }
+        "DELETE" => (
+            foreshadow.intent.clone(),
+            foreshadow.secret_payload_ref.clone(),
+            foreshadow.recover_window_end_chapter.clone(),
+            "ABANDONED".to_owned(),
+        ),
+        _ => return Err("IPC_INVALID:action".into()),
+    };
+    let version = crate::repositories::artifacts::ArtifactRepository::next_version(connection, artifact_id)
+        .map_err(|error| error.to_string())?;
+    let snapshot_payload = json!({
+        "payloadSchema":"foreshadow-adjustment.r1",
+        "foreshadowId":foreshadow_id,"threadRef":thread_ref,"action":action,
+        "previous":{"intent":foreshadow.intent,"secretPayloadRef":foreshadow.secret_payload_ref,
+            "recoverWindowEndChapter":foreshadow.recover_window_end_chapter,"status":foreshadow.status},
+        "intent":intent,"secretPayloadRef":payoff,"recoverWindowEndChapter":window,"status":status,
+        "actor":"USER","changedAt":command.requested_at,"requestDigest":command.request_digest
+    });
+    let payload_hash = sha256_canonical(&snapshot_payload).map_err(|error| error.to_string())?;
+    let artifact_ref = ArtifactRef {
+        artifact_id: artifact_id.to_owned(),
+        version,
+        payload_hash: payload_hash.clone(),
+    };
+    let artifact: ArtifactEnvelope = serde_json::from_value(json!({
+        "artifactId":artifact_id,"projectId":command.project_id,"artifactType":"ForeshadowPlan",
+        "scope":{"level":"PROJECT"},"version":version,"schemaVersion":"m0a.artifact.v1",
+        "artifactStatus":"CANDIDATE","semanticLifecycle":"MATERIALIZED",
+        "payload":snapshot_payload,"payloadHash":payload_hash,"dependencyRefs":[],
+        "provenance":{"createdBy":"B08::ResponsibilityAdjustmentOwner","commandId":command.command_id},
+        "createdAt":command.requested_at
+    }))
+    .map_err(|error| error.to_string())?;
+    let decision_id = StableIdentityFactory::from_command(
+        StableIdKind::Decision,
+        &format!("foreshadow-adjustment:{}", command.command_id),
+    )
+    .map_err(|error| error.to_string())?;
+    let reason = if action == "DELETE" {
+        "用户放弃这条伏笔；原审计记录与证据保留。"
+    } else {
+        "用户改写这条伏笔。"
+    };
+    let bundle: CommitBundle = serde_json::from_value(json!({
+        "commitId":format!("commit:{}", command.command_id),"projectId":command.project_id,
+        "commandId":command.command_id,"idempotencyKey":command.idempotency_key,
+        "expectedProjectRevision":command.expected_revision,"contractVersion":"m0a.v1",
+        "createdAt":command.requested_at,"artifacts":[artifact],
+        "headUpdates":[{"artifactType":"ForeshadowPlan","scope":{"level":"PROJECT"},"artifactId":artifact_ref.artifact_id,"version":artifact_ref.version,"payloadHash":artifact_ref.payload_hash}],
+        "foreshadowDelta":[{
+            "foreshadowId":foreshadow_id,"intent":intent,"status":status,
+            "plantChapterId":foreshadow.plant_chapter_id,"recoverWindowEndChapter":window,
+            "forbiddenRevealBeforeChapter":foreshadow.forbidden_reveal_before_chapter,
+            "secretPayloadRef":payoff,
+            "payloadJson":{"sourceAuthority":foreshadow.source_authority,"action":action,"foreshadowAdjustmentRef":artifact_ref}
+        }],
+        "decisionUpdates":[{
+            "decisionId":decision_id,"decisionType":"USER_FORESHADOW_ADJUSTMENT","outcome":action,
+            "reason":reason,"sourceRef":thread_ref,
+            "payloadJson":{"actor":"USER","changedAt":command.requested_at,"foreshadowAdjustmentRef":artifact_ref}
+        }],
+        "receiptDraft":{"domain":"B08_FORESHADOW_ADJUSTMENT","payload":{"threadRef":thread_ref,"action":action,"status":status,"foreshadowAdjustmentRef":artifact_ref}}
+    }))
+    .map_err(|error| error.to_string())?;
+    let receipt = CommitService::commit(connection, &bundle, command.requested_at)
+        .map_err(|error| error.to_string())?;
+    Ok(json!({
+        "commandId":command.command_id,"projectId":command.project_id,"finalStatus":"committed",
+        "message":if action == "DELETE" {"已放弃这条伏笔，原始记录保留。"} else {"伏笔已改写，原始记录保留。"},
+        "receiptId":receipt.receipt_id,"beforeRevision":receipt.before_revision,
+        "afterRevision":receipt.after_revision,"replayed":false,"receipt":receipt
     }))
 }
 

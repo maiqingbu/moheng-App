@@ -11,6 +11,8 @@ pub struct GoalConstraint {
     pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refs: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_no: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -22,6 +24,8 @@ pub struct MacroDirection {
     pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refs: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_no: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -54,6 +58,32 @@ pub struct VolumeIntentSeed {
     pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refs: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stages: Option<Vec<VolumeStage>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub climax: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StageStep {
+    pub id: String,
+    pub goal: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VolumeStage {
+    pub id: String,
+    pub goal: String,
+    pub pressure: String,
+    pub cast: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_cast: Option<Vec<String>>,
+    pub turn: String,
+    pub estimated_chapters: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps: Option<Vec<StageStep>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -186,6 +216,13 @@ pub struct TaskProgressMetric {
     pub target: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Range {
+    pub min: f64,
+    pub max: f64,
+}
+
 pub type OpaqueId = String;
 
 pub type Rfc3339Utc = String;
@@ -214,6 +251,10 @@ pub enum ArtifactType {
     EntityNameDesign,
     #[serde(rename = "StoryConstitution")]
     StoryConstitution,
+    #[serde(rename = "StoryBible")]
+    StoryBible,
+    #[serde(rename = "StyleCard")]
+    StyleCard,
     #[serde(rename = "ConstitutionSeal")]
     ConstitutionSeal,
     #[serde(rename = "BookPlan")]
@@ -860,6 +901,8 @@ pub struct ChapterPlanR1 {
     pub compiled_from_state_digest: String,
     pub context_manifest_ref: ArtifactRef,
     pub chapter_goal: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chapter_role: Option<String>,
     pub active_task_refs: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entity_refs: Option<Vec<String>>,
@@ -890,6 +933,245 @@ pub struct ChapterPlanR1ContinuityActionsItem {
     pub disposition: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bridge: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChapterPlanR2 {
+    pub payload_schema: serde_json::Value,
+    pub chapter_id: String,
+    pub compiled_from_project_revision: i64,
+    pub compiled_from_state_digest: String,
+    pub context_manifest_ref: ArtifactRef,
+    pub chapter_goal: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chapter_role: Option<String>,
+    pub active_task_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_refs: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hard_scope: Option<ChapterPlanR2HardScope>,
+    pub continuity_actions: Vec<ChapterPlanR2ContinuityActionsItem>,
+    pub required_state_outcomes: Vec<Condition>,
+    pub forbidden_transitions: Vec<Condition>,
+    pub knowledge_boundaries: Vec<String>,
+    pub reservation_refs: Vec<String>,
+    pub horizon_preview: Vec<HorizonSlot>,
+    pub craft: ChapterPlanR2Craft,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChapterPlanR2HardScope {
+    pub task_refs: Vec<String>,
+    pub responsibility_refs: Vec<String>,
+    pub reservation_refs: Vec<String>,
+    pub entity_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChapterPlanR2ContinuityActionsItem {
+    pub thread_ref: String,
+    pub disposition: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bridge: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChapterPlanR2Craft {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub big_turn: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub small_discovery: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protagonist_win: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<ChapterPlanR2CraftDevice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warmth: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emotional_beat: Option<String>,
+    pub situation_change: ChapterPlanR2CraftSituationChange,
+    pub scenes: Vec<ChapterPlanR2CraftScenesItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_losses: Option<Vec<String>>,
+    pub end_hook: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChapterPlanR2CraftDevice {
+    pub name: String,
+    pub status: String,
+    pub how_used: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChapterPlanR2CraftSituationChange {
+    pub before: String,
+    pub after: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChapterPlanR2CraftScenesItem {
+    pub place: String,
+    pub people: Vec<ChapterPlanR2CraftScenesItemPeopleItem>,
+    pub conflict: String,
+    pub events: Vec<String>,
+    pub reader_question: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_characters: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChapterPlanR2CraftScenesItemPeopleItem {
+    pub name: String,
+    pub wants: String,
+    pub hides: String,
+    pub why_here: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StoryBibleR1 {
+    pub payload_schema: serde_json::Value,
+    pub stage: String,
+    pub generation: i64,
+    pub variant: String,
+    pub angle: String,
+    pub story_constitution_ref: ArtifactRef,
+    pub confirmed_from_ref: serde_json::Value,
+    pub normal_world: String,
+    pub mechanism: StoryBibleR1Mechanism,
+    pub protagonist: StoryBibleR1Protagonist,
+    pub emotional_anchor: StoryBibleR1EmotionalAnchor,
+    pub antagonist: StoryBibleR1Antagonist,
+    pub cast: Vec<StoryBibleR1CastItem>,
+    pub opening_arc: Vec<StoryBibleR1OpeningArcItem>,
+    pub created_at: Rfc3339Utc,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StoryBibleR1Mechanism {
+    pub experience: String,
+    pub rules: Vec<StoryBibleR1MechanismRulesItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StoryBibleR1MechanismRulesItem {
+    pub rule: String,
+    pub numbers: String,
+    pub how_readers_see_it: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StoryBibleR1Protagonist {
+    pub name: String,
+    pub personality: String,
+    pub flaw: String,
+    pub wants_now: String,
+    pub humor_style: String,
+    pub inner_voice_style: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StoryBibleR1EmotionalAnchor {
+    pub object: String,
+    pub memory_summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StoryBibleR1Antagonist {
+    pub name: String,
+    pub position: String,
+    pub wants: String,
+    pub method: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StoryBibleR1CastItem {
+    pub name: String,
+    pub role: String,
+    pub relation: String,
+    pub private_agenda: String,
+    pub speech_style: String,
+    pub contrast_with_protagonist: String,
+    pub first_appears: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StoryBibleR1OpeningArcItem {
+    pub chapter: i64,
+    pub direction: String,
+    pub protagonist_win: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StyleCardR1 {
+    pub payload_schema: serde_json::Value,
+    pub stage: String,
+    pub generation: i64,
+    pub variant: String,
+    pub label: String,
+    pub source: StyleCardR1Source,
+    pub confirmed_from_ref: serde_json::Value,
+    pub targets: StyleCardR1Targets,
+    pub narration: StyleCardR1Narration,
+    pub opening_structure: Vec<String>,
+    pub rules: Vec<String>,
+    pub forbidden: Vec<String>,
+    pub examples: Vec<StyleCardR1ExamplesItem>,
+    pub created_at: Rfc3339Utc,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StyleCardR1Source {
+    pub kind: String,
+    pub archetype_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StyleCardR1Targets {
+    pub avg_paragraph_chars: Range,
+    pub short_paragraph_pct: Range,
+    pub dialogue_paragraph_pct: Range,
+    pub simile_per1k: Range,
+    pub explain_per1k: Range,
+    pub exclaim_per1k: Range,
+    pub question_per1k: Range,
+    pub ellipsis_per1k: Range,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StyleCardR1Narration {
+    pub person: String,
+    pub pov_policy: String,
+    pub voice: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StyleCardR1ExamplesItem {
+    pub technique: String,
+    pub lines: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

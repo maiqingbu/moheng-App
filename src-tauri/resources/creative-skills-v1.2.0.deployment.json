@@ -6,7 +6,7 @@
   "hashAlgorithm": "SHA-256 over raw file bytes",
   "manifestDigestAlgorithm": "SHA-256 over raw UTF-8 manifest bytes",
   "pathEncoding": "UTF-8 POSIX relative paths",
-  "fileCount": 676,
+  "fileCount": 655,
   "files": [
     {
       "path": "BUILD_PROVENANCE.json",
@@ -3282,111 +3282,6 @@
       "path": "skills/worldbuilding-rule-design/schemas/output.schema.json",
       "sizeBytes": 4006,
       "sha256": "8b6b68842e9e3f85dff82f2f6ab498255ef286c865b1af41723a9c68dd8e709e"
-    },
-    {
-      "path": "sources/articles/01-世界观深化技巧.md",
-      "sizeBytes": 12310,
-      "sha256": "275a2ed7aff70ea55eee4866ac71fa6bf4774839c3e4f27bdb5a0bc1447fc654"
-    },
-    {
-      "path": "sources/articles/02-修改润色技巧.md",
-      "sizeBytes": 10064,
-      "sha256": "2aeb518352583fd7586b993dabe4110d17dfa64e5ef83d3627256267bddef828"
-    },
-    {
-      "path": "sources/articles/03-冲突升级技巧.md",
-      "sizeBytes": 9522,
-      "sha256": "cca012b5623dc8d13fea5755e17f4327b0d6769661fe8d2dc16829f11f937624"
-    },
-    {
-      "path": "sources/articles/04-场景转换艺术.md",
-      "sizeBytes": 8847,
-      "sha256": "685891b038aa231de168cc4cbbc7ff2e5cf4c1ea2d09b5875e84b4fc8b893fdf"
-    },
-    {
-      "path": "sources/articles/05-多线叙事技巧.md",
-      "sizeBytes": 11182,
-      "sha256": "e840829ccef6115348c881f2da52285c37ed034cff1dd7dfbb09cc310526941e"
-    },
-    {
-      "path": "sources/articles/06-多视角叙事技巧.md",
-      "sizeBytes": 11230,
-      "sha256": "18d17ff8ca7dbdd8114bd0721514f21a8437131ac3d172cb78bd7724aa7c139b"
-    },
-    {
-      "path": "sources/articles/07-大纲方法.md",
-      "sizeBytes": 8028,
-      "sha256": "a4f09a1555cab0ecddf3adeda79dc92095e3b320f3560ec4ffcc02bc85682279"
-    },
-    {
-      "path": "sources/articles/08-套路与爽点.md",
-      "sizeBytes": 8127,
-      "sha256": "418d3c5582b66b88ca3395439581477db41836cc713016a9b0b8fe98d01faab8"
-    },
-    {
-      "path": "sources/articles/09-平台选择与签约.md",
-      "sizeBytes": 8985,
-      "sha256": "80c820837eca8e8cec2bba5b0ee2113704e4bd3738be34d9d33ed2c475133d73"
-    },
-    {
-      "path": "sources/articles/10-幽默喜剧写作技巧.md",
-      "sizeBytes": 9680,
-      "sha256": "0e597adf57cb9b855223c301634fba55bff33d00473ddcc51f13a8e794244723"
-    },
-    {
-      "path": "sources/articles/11-开头技巧.md",
-      "sizeBytes": 8365,
-      "sha256": "07b76726be7c0dfce846106e11c453abc50c38cad749cc7faf15b7809148adb5"
-    },
-    {
-      "path": "sources/articles/12-情感冲击力写作技巧.md",
-      "sizeBytes": 11062,
-      "sha256": "bfbdc61b5b95c2960d91ee09b9598f4d57bac75c42f77fbb573c7f3003284c8e"
-    },
-    {
-      "path": "sources/articles/13-成为顶级作者之路.md",
-      "sizeBytes": 8922,
-      "sha256": "3f03389f5b03f6bb01a1f8720e20fd6401492a887ef63da13c1a301fa00131fd"
-    },
-    {
-      "path": "sources/articles/14-收入模式详解.md",
-      "sizeBytes": 10626,
-      "sha256": "e243a05186f8f3439edfebc63229dcdc716811bc3a437ee99582c42ab97a74cf"
-    },
-    {
-      "path": "sources/articles/15-时间线处理技巧.md",
-      "sizeBytes": 11421,
-      "sha256": "f6425686130bbc9f19decd3eb520450cf802fd4f046128e281ee70a5a68f235b"
-    },
-    {
-      "path": "sources/articles/16-节奏控制.md",
-      "sizeBytes": 7079,
-      "sha256": "bace4bb8b1a86cd8137bece748601e2b57f9c9978a11b5d7203b9f9819faa4eb"
-    },
-    {
-      "path": "sources/articles/17-读者粘性培养技巧.md",
-      "sizeBytes": 10678,
-      "sha256": "f88307b5bcd0fe01f1628f36c48f10a1158582c0721d8e7d1e0227668715e67b"
-    },
-    {
-      "path": "sources/articles/18-长篇架构设计.md",
-      "sizeBytes": 13270,
-      "sha256": "0fe16593dfa417a712e4e9ddc57d5d8ce4176f3de25f4d0dfc5fd8f11e73655c"
-    },
-    {
-      "path": "sources/articles/19-长篇连载管理技巧.md",
-      "sizeBytes": 10586,
-      "sha256": "884e06acf7b22c33317d437277bb987c6626bd4d3e5d58db5546ec5101f730e5"
-    },
-    {
-      "path": "sources/articles/20-高潮设计.md",
-      "sizeBytes": 7023,
-      "sha256": "64674136f9742a71f9059392a791ec7d718fa1a2a3776334907b2f60176ea2e6"
-    },
-    {
-      "path": "sources/source-index.jsonl",
-      "sizeBytes": 433913,
-      "sha256": "09af047ba2b58ad4ce697476697524f2eee6f6fbb6a7e33c11166877e50d620b"
     }
   ]
 }

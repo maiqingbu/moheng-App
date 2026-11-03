@@ -2694,3 +2694,207 @@ fn b12_project_migration_records_additive_v11_and_trigger_ownership() {
         })
         .expect("verify migration");
 }
+
+fn insert_story_bible(state: &KernelState, project_id: &str) {
+    let payload: Value = serde_json::from_str(include_str!(
+        "../../contracts/fixtures/valid/narrative-story-bible-r1.json"
+    ))
+    .expect("story bible fixture");
+    let handle = state.manager.open(project_id, "", NOW).expect("open project");
+    insert_committed_artifact(
+        &handle,
+        project_id,
+        "StoryBible",
+        "story-bible:p3",
+        "PROJECT",
+        json!({"level":"PROJECT"}),
+        payload,
+        true,
+    );
+}
+
+fn story_bible_head(state: &KernelState, project_id: &str) -> (i64, Value, String) {
+    state
+        .manager
+        .with_read_connection(project_id, NOW, |connection| {
+            let (version, payload, provenance): (i64, String, String) = connection
+                .query_row(
+                    "SELECT h.version,p.payload_json,a.provenance_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version JOIN artifacts a ON a.artifact_id=h.artifact_id AND a.version=h.version WHERE h.project_id=?1 AND h.artifact_type='StoryBible'",
+                    [project_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("read story bible head");
+            Ok::<_, ai_novel_production_system_core::project_db::ManagerError>((
+                version,
+                serde_json::from_str(&payload).unwrap(),
+                provenance,
+            ))
+        })
+        .expect("story bible head")
+}
+
+#[test]
+fn p3_an_approved_setup_change_is_applied_by_the_craft_setup_owner() {
+    // P3: the owner changes the story bible through a change request; the
+    // craft setup owner writes the new version.
+    let state = test_state("p-p3-bible");
+    insert_story_bible(&state, "p-p3-bible");
+    let mut antagonist = story_bible_head(&state, "p-p3-bible").1["antagonist"].clone();
+    antagonist["method"] = json!("借据、打手，再加上收买码头的账房");
+    let digest = create_and_approve_change(
+        &state,
+        "p-p3-bible",
+        "change:p3:bible",
+        &["story-bible:p3"],
+        json!({
+            "targetAuthority":{"artifactType":"StoryBible","artifactId":"story-bible:p3"},
+            "patch":{"antagonist":antagonist}
+        }),
+    );
+    let result = command(
+        &state,
+        "p-p3-bible",
+        "change_request_apply",
+        "cmd:change:p3:bible:apply",
+        0,
+        json!({"changeRequestId":"change:p3:bible","impactDigest":digest}),
+    )
+    .expect("apply setup change");
+    assert_eq!(result["result"]["authorityType"], "StoryBible");
+    assert_eq!(result["result"]["authorityOwner"], "B11::CraftSetupOwner");
+    let (version, payload, provenance) = story_bible_head(&state, "p-p3-bible");
+    assert_eq!(version, 2);
+    assert_eq!(payload["antagonist"]["method"], "借据、打手，再加上收买码头的账房");
+    assert!(provenance.contains("B11::CraftSetupOwner"));
+}
+
+#[test]
+fn p3_a_setup_change_that_breaks_the_story_bible_is_rejected_without_writing() {
+    // P3: the owner module checks the changed bible as it checks a new one;
+    // a quoted line in a speech style is refused.
+    let state = test_state("p-p3-bad-bible");
+    insert_story_bible(&state, "p-p3-bad-bible");
+    let mut cast = story_bible_head(&state, "p-p3-bad-bible").1["cast"].clone();
+    cast[0]["speechStyle"] = json!("总说“你懂个屁”");
+    let digest = create_and_approve_change(
+        &state,
+        "p-p3-bad-bible",
+        "change:p3:bad-bible",
+        &["story-bible:p3"],
+        json!({
+            "targetAuthority":{"artifactType":"StoryBible","artifactId":"story-bible:p3"},
+            "patch":{"cast":cast}
+        }),
+    );
+    let error = command(
+        &state,
+        "p-p3-bad-bible",
+        "change_request_apply",
+        "cmd:change:p3:bad-bible:apply",
+        0,
+        json!({"changeRequestId":"change:p3:bad-bible","impactDigest":digest}),
+    )
+    .unwrap_err();
+    assert!(error.contains("STORY_BIBLE_READY_SENTENCE"), "{error}");
+    assert_eq!(story_bible_head(&state, "p-p3-bad-bible").0, 1);
+}
+
+#[test]
+fn p3_a_setup_change_is_not_applied_before_the_owner_approves_it() {
+    let state = test_state("p-p3-unapproved");
+    insert_story_bible(&state, "p-p3-unapproved");
+    command(
+        &state,
+        "p-p3-unapproved",
+        "change_request_create",
+        "cmd:p3:unapproved:create",
+        0,
+        json!({
+            "changeRequestId":"change:p3:unapproved",
+            "changeType":"CHANGE",
+            "scope":"PROJECT",
+            "summary":"未批准的设定修改",
+            "requestedChange":{"targetAuthority":{"artifactType":"StoryBible","artifactId":"story-bible:p3"},"patch":{"angle":"换个角度"}}
+        }),
+    )
+    .expect("create change");
+    let preflight = command(
+        &state,
+        "p-p3-unapproved",
+        "impact_preflight",
+        "cmd:p3:unapproved:preflight",
+        0,
+        json!({"changeRequestId":"change:p3:unapproved"}),
+    )
+    .expect("preflight");
+    let digest = preflight["result"]["impactDigest"].as_str().unwrap().to_owned();
+    assert!(command(
+        &state,
+        "p-p3-unapproved",
+        "change_request_apply",
+        "cmd:p3:unapproved:apply",
+        0,
+        json!({"changeRequestId":"change:p3:unapproved","impactDigest":digest}),
+    )
+    .is_err());
+    assert_eq!(story_bible_head(&state, "p-p3-unapproved").0, 1);
+}
+
+#[test]
+fn an_approved_change_to_the_book_plan_keeps_its_mysteries_in_step() {
+    // Debt from P1: only the first approval recorded mysteries.
+    let state = test_state("p-b12-mysteries");
+    let project_id = "p-b12-mysteries";
+    let mut plan: Value = serde_json::from_str(include_str!(
+        "../../contracts/fixtures/valid/narrative-book-plan-r1-approved.json"
+    ))
+    .expect("approved book plan fixture");
+    plan["majorMysteryGoals"] =
+        json!([{"id":"mystery:book:1","volumeNo":1,"description":"第 1 层：缺页去哪了"}]);
+    {
+        let handle = state.manager.open(project_id, "", NOW).expect("open project");
+        insert_committed_artifact(&handle, project_id, "BookPlan", "plan:book:mysteries", "PROJECT", json!({"level":"PROJECT"}), plan, true);
+        handle
+            .execute(
+                "INSERT INTO narrative_obligations(obligation_id,project_id,scope,obligation_type,authority_level,source_artifact_id,source_version,description,prerequisites_json,resume_condition_json,lifecycle,created_at,updated_at) VALUES ('mystery:book:1',?1,'BOOK','MYSTERY','B','plan:book:mysteries',1,'第 1 层：缺页去哪了','[]','{\"kind\":\"AFTER_CHAPTER\",\"value\":0}','APPROVED',?2,?2)",
+                params![project_id, NOW],
+            )
+            .expect("record the mystery");
+    }
+    let digest = create_and_approve_change(
+        &state,
+        project_id,
+        "change:mysteries",
+        &["plan:book:mysteries"],
+        json!({
+            "targetAuthority":{"artifactType":"BookPlan","artifactId":"plan:book:mysteries"},
+            "patch":{"majorMysteryGoals":[{"id":"mystery:book:2","volumeNo":1,"description":"第 2 层：谁改了租约"}]}
+        }),
+    );
+    command(
+        &state,
+        project_id,
+        "change_request_apply",
+        "cmd:change:mysteries:apply",
+        0,
+        json!({"changeRequestId":"change:mysteries","impactDigest":digest}),
+    )
+    .expect("apply the book plan change");
+    state
+        .manager
+        .with_read_connection(project_id, NOW, |connection| {
+            let lifecycle = |id: &str| -> String {
+                connection
+                    .query_row(
+                        "SELECT lifecycle FROM narrative_obligations WHERE project_id=?1 AND obligation_id=?2",
+                        params![project_id, id],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or_else(|_| "MISSING".into())
+            };
+            assert_eq!(lifecycle("mystery:book:1"), "ABANDONED");
+            assert_eq!(lifecycle("mystery:book:2"), "APPROVED");
+            Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
+        })
+        .unwrap();
+}

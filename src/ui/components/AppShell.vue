@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projectStore'
 import { useProjectLibraryStore } from '../stores/projectLibraryStore'
 import ProjectAssistantDock from './ProjectAssistantDock.vue'
 import WriteLockBanner from './WriteLockBanner.vue'
+import LoadingBlock from './LoadingBlock.vue'
 import { phaseLabel } from '../presentation/projectLabels'
 import { productErrorMessage } from '../presentation/productLanguage'
 
@@ -16,7 +17,7 @@ const assistantCollapsed = ref(false)
 const workspaceEl = ref<HTMLElement | null>(null)
 const id = computed(() => store.currentProjectId ?? (typeof route.params.id === 'string' ? route.params.id : ''))
 const inWorkspace = computed(() => route.meta.scope === 'project' && !!id.value)
-const projectTitle = computed(() => store.project?.title?.trim() || '未命名作品')
+const projectTitle = computed(() => store.project?.title?.trim() || (store.loading ? '正在读取…' : '未命名作品'))
 const phase = computed(() => store.project ? phaseLabel(store.project.phase) : '作品库')
 const currentVolume = computed(() => store.overview?.currentVolume ? `第 ${store.overview.currentVolume.number} 卷 · ${store.overview.currentVolume.title}` : phase.value)
 const committedChapters = computed(() => store.project?.committedChapters ?? 0)
@@ -34,7 +35,15 @@ const workspaceNav = computed<NavItem[]>(() => inWorkspace.value ? [
 ] : [])
 const isActive = (item: NavItem) => item.matches.includes(String(route.name))
 // 冻结路由兼容：长篇健康继续使用 /health；版本与变更记录保留 match: 'history'，但统一归入待处理。
-watch(inWorkspace, value => { if (value) assistantCollapsed.value = false }, { immediate: true })
+// Below this width the assistant floats over the page, so it starts folded
+// (the same 1180px breakpoint as prototype-shell.css).
+const narrowWindow = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+  ? window.matchMedia('(max-width: 1180px)')
+  : null
+watch(inWorkspace, value => { if (value) assistantCollapsed.value = narrowWindow?.matches ?? false }, { immediate: true })
+const foldOnNarrow = (event: MediaQueryListEvent) => { if (event.matches) assistantCollapsed.value = true }
+narrowWindow?.addEventListener('change', foldOnNarrow)
+onUnmounted(() => narrowWindow?.removeEventListener('change', foldOnNarrow))
 watch(() => route.fullPath, () => {
   void nextTick(() => {
     if (workspaceEl.value) workspaceEl.value.scrollTop = 0
@@ -50,6 +59,7 @@ watch(() => route.fullPath, () => {
       <div class="prototype-topactions"><button class="prototype-btn ghost" type="button" @click="router.push('/projects')">⌘K 搜索</button><button class="prototype-btn primary" type="button" @click="router.push('/projects/new')">＋ 新建</button><button v-if="inWorkspace" class="prototype-iconbtn" type="button" :aria-label="assistantCollapsed ? '展开项目助手' : '折叠项目助手'" @click="assistantCollapsed = !assistantCollapsed">{{ assistantCollapsed ? '‹' : '›' }}</button><button class="prototype-iconbtn" type="button" aria-label="作品设置" @click="router.push(inWorkspace ? `/projects/${id}/settings` : '/settings')">⚙</button></div>
     </div>
 
+    <div v-if="store.activity" class="shell-activity" :class="store.activity" role="status" aria-live="polite"><div class="progress-running" /><span v-if="store.activity === 'command'" class="shell-activity-label"><span class="spinner" />正在处理…</span></div>
     <div class="prototype-shell" :class="{ 'assistant-collapsed': assistantCollapsed, 'no-assistant': !inWorkspace }">
       <nav class="prototype-nav" aria-label="作品导航">
         <template v-if="inWorkspace">
@@ -66,7 +76,7 @@ watch(() => route.fullPath, () => {
         </template>
       </nav>
 
-      <main ref="workspaceEl" class="prototype-workspace"><WriteLockBanner :locked="inWorkspace && store.writeLocked" /><div v-if="inWorkspace && store.loadError" class="prototype-panel"><strong>暂时无法读取作品</strong><p>{{ productErrorMessage(store.loadError, '请返回作品库后重试。') }}</p><button class="prototype-btn" type="button" @click="store.refresh">重试</button></div><div v-else-if="inWorkspace && store.loading && !store.overview" class="prototype-panel">正在读取作品记录…</div><slot v-else /></main>
+      <main ref="workspaceEl" class="prototype-workspace"><WriteLockBanner :locked="inWorkspace && store.writeLocked" /><div v-if="inWorkspace && store.loadError" class="prototype-panel"><strong>暂时无法读取作品</strong><p>{{ productErrorMessage(store.loadError, '请返回作品库后重试。') }}</p><button class="prototype-btn" type="button" @click="store.refresh">重试</button></div><LoadingBlock v-else-if="inWorkspace && store.loading && !store.overview" class="prototype-panel" caption="正在读取作品记录…" /><slot v-else /></main>
       <ProjectAssistantDock v-if="inWorkspace" :collapsed="assistantCollapsed" @toggle="assistantCollapsed = !assistantCollapsed" />
     </div>
   </div>

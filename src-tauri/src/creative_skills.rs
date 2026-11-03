@@ -1775,53 +1775,6 @@ pub struct ChapterSkillEnrichment {
     pub invocations: Vec<InvocationProvenance>,
 }
 
-pub(crate) fn method_injection_provenance(
-    enrichment: &ChapterSkillEnrichment,
-    render_model_run_id: &str,
-) -> Result<Value, String> {
-    enrichment
-        .selection
-        .selected
-        .iter()
-        .map(|skill| {
-            let loaded_text = enrichment
-                .loaded_skill_texts
-                .iter()
-                .find(|loaded| {
-                    loaded
-                        .reference
-                        .ends_with(&format!("skills/{}/SKILL.md", skill.slug))
-                })
-                .ok_or_else(|| "SKILL_LOADED_TEXT_MISSING".to_string())?;
-            let mut loaded_resources = vec![json!({
-                "reference":loaded_text.reference,
-                "digest":loaded_text.digest
-            })];
-            loaded_resources.extend(
-                enrichment
-                    .loaded_resources
-                    .iter()
-                    .filter(|resource| {
-                        resource
-                            .reference
-                            .contains(&format!("/skills/{}/", skill.slug))
-                    })
-                    .map(
-                        |resource| json!({"reference":resource.reference,"digest":resource.digest}),
-                    ),
-            );
-            Ok(json!({
-                "skillId":skill.id,
-                "version":skill.version,
-                "bundleDigest":skill.bundle_digest,
-                "loadedResources":loaded_resources,
-                "renderModelRunId":render_model_run_id
-            }))
-        })
-        .collect::<Result<Vec<_>, String>>()
-        .map(Value::Array)
-}
-
 /// B08 calls this pure composition step immediately before rendering. It adds
 /// bounded creative guidance to the existing render input; it does not create
 /// a ChapterPlan or perform any write.

@@ -1,0 +1,232 @@
+{
+ "source": "real RENDER_CHAPTER body + AUDIT_EXTRACT output, qwen3.8-flash, 2026-10-16",
+ "body": "第一章：被抹去的痕迹\n\n雨夜，霓虹灯在积水中破碎成光斑。沈砚站在“城市记忆档案局”第七分部的走廊尽头，指尖摩挲着那枚冰冷的铜质徽章。作为调查员，他的职责是修复那些因人为篡改而断裂的公共记忆链条。但今晚，他接到的委托有些不同寻常。\n\n委托人是一位名叫林婉的老妇人，她颤抖着递来一张泛黄的照片，照片上是一个年轻女孩的笑脸，背景是早已拆除的旧钟楼。“他们说我疯了，说我的女儿从未存在过。”林婉的声音沙哑，“但我知道她在。档案里全是空白，连出生记录都消失了。”\n\n沈砚接过照片，目光扫过女孩眉眼间熟悉的神态——那轮廓像极了他失踪多年的姐姐沈清。心脏猛地收缩，但他面上不动声色。这是他的第一次独立负责此类高危修复案，上级曾暗示，这类涉及“深层遗忘”的案件往往伴随着不可预知的风险。\n\n“我可以尝试进入记忆回溯层，寻找残留的数据碎片。”沈砚说道，声音平稳，“但这需要您签署一份免责协议。一旦开始，任何意外后果由我承担。”\n\n林婉犹豫片刻，签下了名字。沈砚知道，这不仅是法律上的免责，更是机制上的契约。在城市记忆系统中，修复一段被强行抹去的记忆，必须用等量的现实痕迹作为代价进行交换。这就是所谓的“等价湮灭”。\n\n回到操作室，沈砚戴上神经连接头盔。随着电流声响起，意识沉入黑暗。周围浮现出无数流动的光带，那是城市的集体记忆。他迅速定位到林婉提供的坐标点，那里原本应该有一段关于女孩成长的完整影像，此刻却是一片刺眼的虚无黑洞。\n\n“找到你了。”沈砚低声自语。他伸出意识触手，试图从黑洞边缘抓取残存的信息片段。然而，就在接触的瞬间，一股巨大的阻力袭来。这不是普通的删除，而是经过精心设计的“格式化”。\n\n沈砚咬紧牙关，调动自身的精神力强行撕开一道裂缝。碎片涌入脑海：女孩在钟楼下的奔跑、母亲温柔的呼唤、还有……一个模糊的男人背影，正拿着某种仪器对着镜头微笑。\n\n画面逐渐清晰，但代价随之而来。沈砚感到一阵剧烈的眩晕，仿佛有什么东西正从他身体的根基处被抽离。他猛地摘下头盔，大口喘息。操作室的灯光依旧明亮，但他发现，自己左手无名指上那道童年留下的疤痕不见了。\n\n那是他最珍视的记忆锚点之一，是他与过去唯一的物理联系。现在，它彻底消失了，就像从未存在过一样。镜子里的他，手指光洁如新，陌生得令人心悸。\n\n“这就是代价吗？”沈砚看着自己的手，心中寒意顿生。修复成功了，林婉的女儿确实存在过，那段记忆已被重新写入公共档案。但为了填补这个空洞，系统自动抹去了他的一段现实痕迹。\n\n此时，通讯器响起，是主管冷硬的声音：“沈砚，报告结果。”\n\n“任务完成，目标记忆已恢复。”沈砚回答，声音微颤。\n\n“很好。注意，下次不要擅自处理未授权的‘深层遗忘’案件。你的权限还不够。”主管挂断电话。\n\n沈砚放下通讯器，目光落在桌上那张照片上。那个模糊的男人背影让他感到莫名的熟悉，却又无法确认身份。更重要的是，他发现照片角落有一行极小的手写数字，像是某种编码。而在他的脑海中，除了消失的疤痕，还多出了一段不属于他的记忆碎片：一座废弃的图书馆，以及一本没有封面的书。\n\n新的谜题出现了。为什么修复记忆会触发这段陌生的场景？那个男人是谁？姐姐沈清的失踪，是否与这种“痕迹抹除”机制有关？\n\n沈砚站起身，走向窗边。外面的雨还在下，城市的灯火辉煌，却掩盖不住底层涌动的暗流。他意识到，自己刚刚迈出的这一步，不仅解开了一个小谜题，更将自己推向了未知的深渊。每一次修复，都是一次自我消亡的过程。而他必须在完全消失之前，找回真相。\n\n他拿起笔，在笔记本上写下那串数字，然后合上本子。眼神中不再有迷茫，取而代之的是一种决绝。既然代价不可避免，那就让这代价成为通往真相的路标。",
+ "audit": {
+  "qualityFindings": [],
+  "canonCandidates": [
+   {
+    "factId": "f:shenyan_alive",
+    "subjectId": "e:shenyan",
+    "entityId": "e:shenyan",
+    "canonicalName": "沈砚",
+    "entityType": "CHARACTER",
+    "predicate": "alive",
+    "objectJson": {
+     "value": true
+    },
+    "authorityLevel": "A",
+    "evidence": {
+     "start": 10,
+     "end": 12,
+     "quote": "沈砚"
+    }
+   },
+   {
+    "factId": "f:shenyan_location_ch1",
+    "subjectId": "e:shenyan",
+    "entityId": "e:shenyan",
+    "canonicalName": "沈砚",
+    "entityType": "CHARACTER",
+    "predicate": "location",
+    "objectJson": {
+     "value": "城市记忆档案局第七分部操作室"
+    },
+    "authorityLevel": "A",
+    "evidence": {
+     "start": 38,
+     "end": 56,
+     "quote": "“城市记忆档案局”第七分部的走廊尽头"
+    }
+   },
+   {
+    "factId": "f:shenyan_identity_investigator",
+    "subjectId": "e:shenyan",
+    "entityId": "e:shenyan",
+    "canonicalName": "沈砚",
+    "entityType": "CHARACTER",
+    "predicate": "identity",
+    "objectJson": {
+     "value": "城市记忆档案调查员"
+    },
+    "authorityLevel": "A",
+    "evidence": {
+     "start": 74,
+     "end": 79,
+     "quote": "作为调查员"
+    }
+   },
+   {
+    "factId": "f:linwan_alive",
+    "subjectId": "e:linwan",
+    "entityId": "e:linwan",
+    "canonicalName": "林婉",
+    "entityType": "CHARACTER",
+    "predicate": "alive",
+    "objectJson": {
+     "value": true
+    },
+    "authorityLevel": "A",
+    "evidence": {
+     "start": 115,
+     "end": 117,
+     "quote": "林婉"
+    }
+   },
+   {
+    "factId": "f:shenqing_missing",
+    "subjectId": "e:shenqing",
+    "entityId": "e:shenqing",
+    "canonicalName": "沈清",
+    "entityType": "CHARACTER",
+    "predicate": "status",
+    "objectJson": {
+     "value": "missing"
+    },
+    "authorityLevel": "B",
+    "evidence": {
+     "start": 218,
+     "end": 226,
+     "quote": "失踪多年的姐姐沈清"
+    }
+   },
+   {
+    "factId": "f:shenyan_scar_removed",
+    "subjectId": "e:shenyan",
+    "entityId": "e:shenyan",
+    "canonicalName": "沈砚",
+    "entityType": "CHARACTER",
+    "predicate": "owns_item",
+    "objectJson": {
+     "item": "左手无名指疤痕",
+     "state": "removed"
+    },
+    "authorityLevel": "A",
+    "evidence": {
+     "start": 688,
+     "end": 705,
+     "quote": "自己左手无名指上那道童年留下的疤痕不见了"
+    }
+   },
+   {
+    "factId": "f:shenyan_memory_fragment_library",
+    "subjectId": "e:shenyan",
+    "entityId": "e:shenyan",
+    "canonicalName": "沈砚",
+    "entityType": "CHARACTER",
+    "predicate": "remembered",
+    "objectJson": {
+     "content": "废弃图书馆及无封面书"
+    },
+    "authorityLevel": "A",
+    "evidence": {
+     "start": 825,
+     "end": 845,
+     "quote": "一座废弃的图书馆，以及一本没有封面的书"
+    }
+   }
+  ],
+  "knowledgeCandidates": [
+   {
+    "knowledgeId": "k:shenyan_knows_sister_similar",
+    "knowerId": "e:shenyan",
+    "factId": "f:shenqing_missing",
+    "epistemicState": "BELIEVES_TRUE",
+    "storyTime": "UNKNOWN",
+    "acquiredStoryTime": "UNKNOWN",
+    "visibilityScope": "PRIVATE",
+    "evidence": {
+     "start": 205,
+     "end": 226,
+     "quote": "目光扫过女孩眉眼间熟悉的神态——那轮廓像极了他失踪多年的姐姐沈清"
+    }
+   },
+   {
+    "knowledgeId": "k:shenyan_knows_cost_mechanism",
+    "knowerId": "e:shenyan",
+    "factId": "f:shenyan_scar_removed",
+    "epistemicState": "KNOWS",
+    "storyTime": "UNKNOWN",
+    "acquiredStoryTime": "UNKNOWN",
+    "visibilityScope": "PRIVATE",
+    "evidence": {
+     "start": 688,
+     "end": 705,
+     "quote": "自己左手无名指上那道童年留下的疤痕不见了"
+    }
+   }
+  ],
+  "continuityCandidates": [
+   {
+    "threadRef": "t:mystery_man_back",
+    "disposition": "ADVANCE",
+    "promotionSignals": {
+     "explicitPromise": false,
+     "unresolvedMajorConflict": false,
+     "majorRelationshipTransition": false,
+     "mysteryOrRevealResponsibility": true,
+     "foreshadowRecoveryResponsibility": true,
+     "keyFutureUseObjectOrInformation": true,
+     "goalContractResponsibility": false,
+     "hardAuthorityResponsibility": false,
+     "futureReservationResponsibility": false,
+     "ambientDescription": false,
+     "completedTrivialEvent": false,
+     "nonContinuingSceneDetail": false
+    },
+    "description": "照片中的模糊男人背影与陌生记忆碎片（废弃图书馆、无封面书）构成新的未解谜题。",
+    "fulfillmentObject": "揭示男人身份及图书馆关联",
+    "resumeCondition": {
+     "kind": "NEXT_MEETING"
+    },
+    "evidence": {
+     "start": 795,
+     "end": 845,
+     "quote": "那个模糊的男人背影让他感到莫名的熟悉...还多出了一段不属于他的记忆碎片：一座废弃的图书馆，以及一本没有封面的书"
+    }
+   },
+   {
+    "threadRef": "t:sister_disappearance_link",
+    "disposition": "ADVANCE",
+    "promotionSignals": {
+     "explicitPromise": false,
+     "unresolvedMajorConflict": false,
+     "majorRelationshipTransition": false,
+     "mysteryOrRevealResponsibility": true,
+     "foreshadowRecoveryResponsibility": true,
+     "keyFutureUseObjectOrInformation": false,
+     "goalContractResponsibility": true,
+     "hardAuthorityResponsibility": false,
+     "futureReservationResponsibility": false,
+     "ambientDescription": false,
+     "completedTrivialEvent": false,
+     "nonContinuingSceneDetail": false
+    },
+    "description": "沈砚怀疑姐姐沈清的失踪与“痕迹抹除”机制有关。",
+    "fulfillmentObject": "确认姐姐失踪原因及下落",
+    "resumeCondition": {
+     "kind": "KNOWLEDGE_ACQUIRED"
+    },
+    "evidence": {
+     "start": 855,
+     "end": 875,
+     "quote": "姐姐沈清的失踪，是否与这种“痕迹抹除”机制有关？"
+    }
+   }
+  ],
+  "taskProgressCandidates": [
+   {
+    "taskId": "task:chapter_goal_repair",
+    "status": "SATISFIED",
+    "evidence": {
+     "start": 735,
+     "end": 755,
+     "quote": "修复成功了，林婉的女儿确实存在过"
+    }
+   }
+  ],
+  "revealedReservationRefs": [],
+  "evidenceRanges": [],
+  "auditCompleteness": "COMPLETE_WITH_DELTA",
+  "unresolvedHard": false
+ }
+}

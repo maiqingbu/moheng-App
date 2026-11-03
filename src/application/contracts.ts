@@ -28,6 +28,7 @@ export type BlockReason =
   | 'CANON_CONFLICT'
   | 'RETRY_EXHAUSTED'
   | 'PERSISTENCE_FAILURE'
+  | 'UNKNOWN_REMOTE_OUTCOME'
 
 export type SigningStatus = 'NOT_STARTED' | 'IN_REVIEW' | 'REVISE' | 'REJECTED' | 'PASS' | 'FAIL' | 'NOT_VERIFIED' | 'STALE'
 export type CommandStatus = 'idle' | 'submitting' | 'accepted' | 'processing' | 'committed' | 'blocked' | 'failed'
@@ -132,7 +133,48 @@ export interface SupportSessionProjection {
   finding: Record<string, unknown>
   receipt: Record<string, unknown>
   evidenceLedger?: Record<string, unknown>[]
+  /** FX-21: how the question was understood. */
+  intent?: AssistantIntentResolution
 }
+/** FX-22: one backup of a work; revision is the one it was taken at. */
+export interface BackupEntry {
+  backupName: string
+  checksumSha256: string
+  createdAt: string
+  revision: number | null
+  sizeBytes: number | null
+  available: boolean
+}
+/** FX-21: how the project assistant understood a question. */
+export interface AssistantIntentResolution {
+  intent: string
+  source: 'MODEL' | 'KEYWORD'
+  subjects?: string[]
+  attribute?: string | null
+  modelRunId?: string | null
+  fallbackReason?: string | null
+}
+/** P3: one story bible change in a draft: the field, what it is, what it becomes. */
+export interface SetupDraftItem {
+  path: string
+  before: unknown
+  after: unknown
+  /** P3: sentences of written chapters that still say the old value. */
+  writtenConflicts?: { chapterNo: number; quote: string }[]
+}
+/** P3: a story bible change drafted from the owner's words; nothing is written yet. */
+export interface SetupChangeDraft {
+  targetAuthority: { artifactType: 'StoryBible'; artifactId: string }
+  items: SetupDraftItem[]
+  /** The touched top-level fields as they are now. */
+  base: Record<string, unknown>
+  patch: Record<string, unknown>
+  /** The written chapters could not be read, so conflicts are unknown. */
+  writtenConflictsUnavailable?: boolean
+  /** The model could not judge rewordings; only literal matches are listed. */
+  writtenConflictsJudgedUnavailable?: boolean
+}
+export interface SetupChangeDraftResult { draft: SetupChangeDraft | null; reason?: string; modelRunId?: string }
 export interface SupportCheckpointProjection { checkpointId: string; projectId: string; projectRevision: number; status: 'SAFE' | 'CHECKPOINT_STALE' }
 
 export interface StorySetupProjection {
@@ -143,6 +185,18 @@ export interface StorySetupProjection {
   storyCore: Record<string, unknown> | null
   openingReady: boolean
   provenance?: Record<string, unknown>
+}
+
+/** CRAFT v3 opening craft setup: story bible and style card candidates. */
+export interface CraftStageProjection {
+  candidates: Array<Record<string, any> & { id: string }>
+  confirmed: (Record<string, any> & { id: string }) | null
+}
+export interface CraftSetupProjection {
+  storyBible: CraftStageProjection
+  styleCard: CraftStageProjection
+  sample: { text: string; digest: string; savedAt: string; metrics: Record<string, number>; minChars: number } | null
+  archetypes: Array<{ id: string; name: string; genres: string[] }>
 }
 
 export interface OpeningReadyProjection {
@@ -167,6 +221,8 @@ export interface OpeningProgressProjection {
 
 export interface AssistantRepairPlan {
   action?: 'EXECUTABLE' | 'PROPOSAL_ONLY' | 'NO_ACTION'
+  /** FX-21: how the repair request was understood. */
+  intent?: AssistantIntentResolution
   repairPlanId: string
   projectId: string
   basedOnProjectRevision: number
@@ -437,6 +493,9 @@ export type DecisionCategory =
   | 'Retcon'
   | '大规模修复'
   | '完结冲突'
+  | '审计提醒'
+  | '计划提醒'
+  | '规划提醒'
 
 export interface DecisionItem {
   id: string
@@ -449,7 +508,18 @@ export interface DecisionItem {
   createdAt: string
   recommendation?: string
   evidence?: string[]
-  allowedActions?: Array<'RETRY_REMOTE' | 'MARK_FAILED' | 'CANCEL_JOB'>
+  allowedActions?: Array<'RETRY_REMOTE' | 'MARK_FAILED' | 'CANCEL_JOB' | 'ACKNOWLEDGE'>
+  /** WM-2a: a plan or continuity reminder the owner may keep as a correction. */
+  rememberable?: boolean
+}
+
+/** WM-2a: one of the owner's corrections; no subject for a writing rule of the whole work. */
+export interface OwnerCorrection {
+  correctionId: string
+  subject: string | null
+  content: string
+  sourceDecisionId: string | null
+  createdAt: string
 }
 
 export interface ChapterListItem {
@@ -702,6 +772,7 @@ export interface ProductionCenterProjection {
     title: string
     volumeId: string
     executionMode: 'OPENING_BOOTSTRAP' | 'LONG_FORM'
+    quota?: { used: number; limit: number; allowance: number } | null
   } | null
   chapterPlan?: {
     ref: { artifactId: string; version: number; payloadHash: string }
@@ -722,6 +793,14 @@ export interface ProductionCenterProjection {
     resumeCondition?: Record<string, unknown> | null
     evidence?: { start: number; end: number; quote: string } | null
     ruleVersion?: string | null
+  }>
+  /** Owner decision 2026-11-03: foreshadows still open, to rewrite or abandon. */
+  openForeshadows?: Array<{
+    threadRef: string
+    intent: string
+    payoff?: string | null
+    recoverWindowEndChapter?: string | null
+    status: string
   }>
   gate?: { status: 'PENDING' | 'PASS' | 'BLOCKED' | 'FAIL'; reason: string }
   stale?: { status: 'NO_PLAN' | 'PLAN_STALE' | 'VALID' | 'RECHECK_REQUIRED' | 'VALID_OR_REQUIRES_RELEVANT_RECHECK'; reason: string }
@@ -822,16 +901,29 @@ export interface SettingsProjection {
   }
   privacyMode: 'local-first' | 'balanced'
   sendDraftOnly: boolean
+  /** FX-18: the work's default chapter length range (project settings only). */
+  chapterLengthRange?: { min: number; max: number }
   exportFormat: 'DOCX' | 'Markdown' | 'TXT' | 'EPUB'
   platform: string
   theme: 'light' | 'system' | 'dark'
   providerId?: string
   modelId?: string
+  /** Optional model used only for writing chapter prose; blank uses modelId. */
+  renderModelId?: string
+  /** Optional model used only for the audit extraction; blank uses modelId. */
+  auditModelId?: string
+  /** P4: a step left out keeps the provider's own default. */
+  thinking?: Partial<Record<ThinkingStep, StepThinking>>
   enabled?: boolean
   timeoutMs?: number
   secretStatus?: 'AVAILABLE' | 'NOT_CONFIGURED' | 'UNAVAILABLE'
   capabilityStatus?: 'AVAILABLE' | 'UNAVAILABLE' | 'ERROR'
 }
+
+/** P4: the three steps that each have their own model and thinking. */
+export type ThinkingStep = 'default' | 'render' | 'audit'
+export interface StepThinking { enabled: boolean; effort?: 'high' | 'max' }
+export interface ProviderModelList { models: string[]; reason?: string }
 
 export interface ProviderSettingsInput extends SettingsProjection {
   /** Ephemeral IPC input; never part of SettingsProjection or persisted state. */
@@ -1025,6 +1117,14 @@ export type CommandType =
   | 'pitch_regenerate'
   | 'pitch_select'
   | 'story_setup_save'
+  | 'story_bible_generate'
+  | 'story_bible_confirm'
+  | 'style_card_generate'
+  | 'style_card_confirm'
+  | 'style_sample_save'
+  | 'writing_rule_add'
+  | 'memory_correction_add'
+  | 'memory_correction_revoke'
   | 'opening_ready'
   | 'opening_start_creating'
   | 'book_plan_create'
@@ -1037,6 +1137,7 @@ export type CommandType =
   | 'production_pause'
   | 'production_resume'
   | 'production_cancel'
+  | 'production_reset_chapter_quota'
   | 'repair_plan_create'
   | 'repair_authorize'
   | 'repair_execute'
@@ -1064,6 +1165,7 @@ export type CommandType =
   | 'opening_evaluate'
   | 'signing_confirm'
   | 'backup_create'
+  | 'backup_restore'
   | 'integrity_check_run'
   | 'endgame_contract_create'
   | 'complete_book'
@@ -1092,8 +1194,13 @@ export interface FrontendPort {
   queryMarketStrategy(request: ProjectQueryRequest): Promise<MarketStrategyProjection>
   queryStoryDirections(request: ProjectQueryRequest): Promise<StoryDirectionProjection>
   queryStorySetup(request: ProjectQueryRequest): Promise<StorySetupProjection>
+  queryCraftSetup(request: ProjectQueryRequest): Promise<CraftSetupProjection>
+  queryOwnerCorrections(request: ProjectQueryRequest): Promise<{ items: OwnerCorrection[] }>
   queryOpeningReady(request: ProjectQueryRequest): Promise<OpeningReadyProjection>
   queryAssistantRepairPlan(request: ProjectQueryRequest & { question: string }): Promise<AssistantRepairPlan>
+  queryBackups(request: ProjectQueryRequest): Promise<{ projectId: string; backups: BackupEntry[] }>
+  classifyAssistantIntent(request: ProjectQueryRequest & { question: string; entry: 'DIAGNOSE' | 'CHANGE' | 'REPAIR' }): Promise<AssistantIntentResolution>
+  draftSetupChange(request: ProjectQueryRequest & { question: string; requestedAt?: string }): Promise<SetupChangeDraftResult>
   queryProductionCenter(request: ProjectQueryRequest): Promise<ProductionCenterProjection>
   queryVolumeList(request: ProjectQueryRequest): Promise<PageResult<VolumeSummary>>
   queryVolumeDetail(request: ProjectQueryRequest & { volumeId: string }): Promise<VolumeDetailProjection>
@@ -1134,6 +1241,7 @@ export interface FrontendPort {
   supportCheckpointResume(request: { projectId: string; checkpointId: string }): Promise<SupportCheckpointProjection>
   executeCommand(request: CommandRequest, onStatus?: (status: CommandStatus, message: string) => void): Promise<CommandReceipt>
   testProvider(settings: ProviderSettingsInput, onStatus?: (status: CommandStatus, message: string) => void): Promise<CommandReceipt>
+  listProviderModels(settings: ProviderSettingsInput): Promise<ProviderModelList>
 }
 
 // R1 Narrative DTOs are generated from the shared contract schemas. They are

@@ -169,7 +169,76 @@ fn b02_phase_steps_with_labels(phases: &[&str], current: Option<&str>, status: &
         .collect()
 }
 
+/// Model runs a chapter gets per allowance; also the size of a manual reset.
+/// Owner decision (2026-10-19): 16, since each chapter is now also reviewed
+/// and rewritten.
+pub const CHAPTER_RUN_ALLOWANCE: i64 = 16;
+
 impl ProductionRepository {
+    /// Model runs the chapter has used against its limit: the larger of the
+    /// commit gate's count (model runs of the chapter's jobs) and the runtime
+    /// budget's count (reservations), so a limit above it satisfies both.
+    pub fn chapter_quota(
+        connection: &Connection,
+        project_id: &str,
+        chapter_id: &str,
+    ) -> Result<Option<Value>, ProductionRepositoryError> {
+        let Some((budget_id, limit)) = connection
+            .query_row(
+                "SELECT budget_id, hard_max_model_runs FROM chapter_production_budgets WHERE project_id=?1 AND chapter_id=?2",
+                [project_id, chapter_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let used = crate::repositories::runtime::chapter_model_runs_used(
+            connection, project_id, chapter_id, &budget_id,
+        )?;
+        Ok(Some(
+            json!({"used":used,"limit":limit,"allowance":CHAPTER_RUN_ALLOWANCE}),
+        ))
+    }
+
+    /// Owner decision (2026-10-17): the user may give a chapter a fresh
+    /// allowance by hand. History is kept; the limit moves to what is already
+    /// used plus one allowance, and jobs held for budget become retryable.
+    pub fn reset_chapter_quota(
+        connection: &Connection,
+        project_id: &str,
+        chapter_id: &str,
+        now: &str,
+    ) -> Result<Value, ProductionRepositoryError> {
+        let quota = Self::chapter_quota(connection, project_id, chapter_id)?.ok_or_else(|| {
+            ProductionRepositoryError::Narrative("CHAPTER_BUDGET_NOT_FOUND".into())
+        })?;
+        let used = quota["used"].as_i64().unwrap_or(0);
+        let limit = used + CHAPTER_RUN_ALLOWANCE;
+        connection.execute(
+            "UPDATE chapter_production_budgets SET hard_max_model_runs=?3 WHERE project_id=?1 AND chapter_id=?2",
+            libsql_rusqlite::params![project_id, chapter_id, limit],
+        )?;
+        connection.execute(
+            "UPDATE jobs SET status='FAILED', updated_at=?3 WHERE project_id=?1 AND chapter_id=?2 AND status='WAITING_BUDGET'",
+            [project_id, chapter_id, now],
+        )?;
+        connection.execute(
+            "UPDATE project_runtime_state SET run_state='IDLE', block_reason=NULL, updated_at=?2 WHERE project_id=?1 AND run_state='WAITING_BUDGET'",
+            [project_id, now],
+        )?;
+        connection.execute(
+            "INSERT INTO decisions(decision_id, project_id, decision_type, outcome, reason, payload_json, created_at, updated_at) VALUES (?1, ?2, 'CHAPTER_QUOTA_RESET', 'APPLIED', '用户手动重置本章额度', ?3, ?4, ?4) ON CONFLICT(decision_id) DO NOTHING",
+            libsql_rusqlite::params![
+                format!("decision:quota-reset:{chapter_id}:{used}"),
+                project_id,
+                json!({"chapterId":chapter_id,"usedBefore":used,"limitBefore":quota["limit"],"limitAfter":limit}).to_string(),
+                now
+            ],
+        )?;
+        Ok(json!({"used":used,"limit":limit,"allowance":CHAPTER_RUN_ALLOWANCE}))
+    }
+
     pub fn center_projection(
         connection: &Connection,
         project_id: &str,
@@ -729,8 +798,9 @@ impl ProductionRepository {
             } else {
                 "OPENING_BOOTSTRAP"
             };
+            let quota = Self::chapter_quota(connection, project_id, &id)?;
             Some(
-                json!({"id":id,"number":number,"title":title,"volumeId":volume_id,"executionMode":execution_mode}),
+                json!({"id":id,"number":number,"title":title,"volumeId":volume_id,"executionMode":execution_mode,"quota":quota}),
             )
         } else {
             None
@@ -762,6 +832,7 @@ impl ProductionRepository {
         let cost_summary =
             production_cost_summary(connection, project_id, cost_chapter_id, runtime.2)?;
         let new_responsibilities = Self::latest_new_responsibilities(connection, project_id)?;
+        let open_foreshadows = Self::open_foreshadows(connection, project_id)?;
         Ok(json!({
             "timeline":timeline,"tasks":task,"artifacts":{"items":artifact_items,"nextCursor":null,"total":artifact_items.len()},
             "signing":signing,"bookPlan":book_plan,"gatePolicy":gate_policy,"projectPhase":runtime.5,"activeWork":{"label":if job_status.as_deref()==Some("FAILED") { "FAILED" } else { &current_stage },"detail":active_detail},
@@ -769,6 +840,7 @@ impl ProductionRepository {
             "productionStage":current_stage,"jobStatus":job_status,"jobError":job_error,"isActive":is_active,"canRetry":can_retry,"lastStage":current_stage,"nextChapter":next_chapter_projection,"chapterPlan":plan_projection,
             "triggeredContinuity":plan_projection.as_ref().and_then(|plan| plan.get("continuityActions")).cloned().unwrap_or_else(|| json!([])),
             "newResponsibilities":new_responsibilities,
+            "openForeshadows":open_foreshadows,
             "gate":{"status":gate_status,"reason":if job_status.as_deref()==Some("FAILED") {job_error.clone().unwrap_or_else(|| "MODEL_TRANSPORT_FAILED".into())} else if stale_status=="PLAN_STALE" {"PLAN_STALE / RECOMPILE_REQUIRED".into()} else {"".into()}},
             "stale":{"status":stale_status,"reason":if stale_status=="PLAN_STALE" {"Relevant authority changed"} else {""}},"modelRuns":model_runs,"candidateRef":candidate_ref,"finalChapterRef":final_ref,"reconciliation":reconciliation,"repair":repair,
             "creativeSkills":creative_skills,"quality":quality,"tasteProfile":taste_profile,
@@ -776,6 +848,27 @@ impl ProductionRepository {
             "openingProgress":opening_progress,
             "costSummary":cost_summary,"committedChapters":runtime.1,"candidateChapters":runtime.3
         }))
+    }
+
+    /// Owner decision 2026-11-03: the foreshadows still open, newest first,
+    /// for the owner to rewrite or abandon.
+    fn open_foreshadows(
+        connection: &Connection,
+        project_id: &str,
+    ) -> Result<Value, ProductionRepositoryError> {
+        let mut statement = connection.prepare(
+            "SELECT foreshadow_id,intent,secret_payload_ref,recover_window_end_chapter,status FROM foreshadows WHERE project_id=?1 AND status IN ('PLANTED','REINFORCED','STALE') ORDER BY updated_at DESC,foreshadow_id LIMIT 30",
+        )?;
+        let rows = statement.query_map([project_id], |row| {
+            Ok(json!({
+                "threadRef":format!("thread:{}", row.get::<_, String>(0)?),
+                "intent":row.get::<_, String>(1)?,
+                "payoff":row.get::<_, Option<String>>(2)?,
+                "recoverWindowEndChapter":row.get::<_, Option<String>>(3)?,
+                "status":row.get::<_, String>(4)?
+            }))
+        })?;
+        Ok(json!(rows.collect::<Result<Vec<_>, _>>()?))
     }
 
     fn latest_new_responsibilities(

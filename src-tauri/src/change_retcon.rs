@@ -302,6 +302,8 @@ fn target_scope_value(record: &repository::AuthorityHeadRecord) -> Result<Value,
 fn target_class(artifact_type: Option<&str>) -> &'static str {
     match artifact_type {
         Some("BookPlan" | "VolumeIntent" | "VolumePlan" | "ChapterPlan") => "PLAN_CHANGE",
+        // P3: the story bible (people, world, mechanism) is changed by its owner.
+        Some("StoryBible") => "SETUP_CHANGE",
         Some(_) => "UNSUPPORTED",
         None => "PROJECTION_ONLY",
     }
@@ -311,6 +313,7 @@ fn target_owner(artifact_type: &str) -> Option<&'static str> {
     match artifact_type {
         "BookPlan" | "ChapterPlan" => Some("B07::PlanningOwner"),
         "VolumeIntent" | "VolumePlan" => Some("B09::VolumeLifecycleOwner"),
+        "StoryBible" => Some("B11::CraftSetupOwner"),
         _ => None,
     }
 }
@@ -486,6 +489,35 @@ fn resolve_typed_target(
     Ok(Some(record))
 }
 
+/// The mystery changes an approved change to the book plan makes, so its
+/// mysteries stay in step with what the plan now says.
+fn book_plan_mysteries(
+    connection: &Connection,
+    project_id: &str,
+    artifacts: &[crate::generated::types::ArtifactEnvelope],
+) -> Result<Option<Vec<crate::generated::types::ObligationDelta>>, String> {
+    let Some(book_plan) = artifacts
+        .iter()
+        .find(|artifact| artifact.artifact_type == crate::generated::types::ArtifactType::BookPlan)
+    else {
+        return Ok(None);
+    };
+    let payload = serde_json::to_value(&book_plan.payload).map_err(|error| error.to_string())?;
+    let deltas = crate::planning::book_mystery_deltas_for(
+        connection,
+        project_id,
+        &payload,
+        &book_plan.artifact_id,
+        book_plan.version,
+    )?;
+    if deltas.is_empty() {
+        return Ok(None);
+    }
+    serde_json::from_value(json!(deltas))
+        .map(Some)
+        .map_err(|error| format!("B12_MYSTERY_DELTA:{error}"))
+}
+
 struct TypedTargetMutation {
     artifact: crate::generated::types::ArtifactEnvelope,
     head: crate::generated::types::HeadChange,
@@ -533,6 +565,18 @@ fn materialize_typed_target(
                 &target.artifact_id,
                 target.version,
                 &target.payload_hash,
+                &scope,
+                patch,
+                decision_id,
+                command_id,
+                now,
+            )?;
+            (mutation.artifact, mutation.head, mutation.owner_receipt)
+        }
+        "StoryBible" => {
+            let mutation = crate::craft_setup::apply_typed_change(
+                project_id,
+                &target,
                 &scope,
                 patch,
                 decision_id,
@@ -2011,6 +2055,7 @@ where
     if let Some(head) = target_head {
         bundle.head_updates = Some(vec![head]);
     }
+    bundle.obligation_delta = book_plan_mysteries(&handle, project_id, &bundle.artifacts)?;
     let impact_id = impact.impact_set_id.clone();
     let seed = change.impact_seed.clone();
     let receipt =
@@ -2306,6 +2351,7 @@ pub fn apply_approved_on_connection(
     if let Some(head) = target_head {
         bundle.head_updates = Some(vec![head]);
     }
+    bundle.obligation_delta = book_plan_mysteries(connection, project_id, &bundle.artifacts)?;
     let impact_id = impact.impact_set_id.clone();
     let seed = change.impact_seed.clone();
     let receipt =

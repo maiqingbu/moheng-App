@@ -28,6 +28,7 @@ import type {
   DependencySummaryBootstrapProjection,
   RetconContextProjection,
   StorySetupProjection,
+  CraftSetupProjection,
   SupportSessionProjection,
   StoryDirectionProjection,
   VersionProjection,
@@ -37,6 +38,7 @@ import type {
 } from '../../application/contracts'
 import { getFrontendPort } from '../../app/providers/runtimePort'
 import {
+  isInFlight,
   parseContextHardBudgetFailure,
   receiptSummary,
   repairExecutionLabel,
@@ -95,6 +97,7 @@ export const useProjectStore = defineStore('project-projection', () => {
   const marketStrategy = ref<MarketStrategyProjection | null>(null)
   const directions = ref<StoryDirectionProjection | null>(null)
   const storySetup = ref<StorySetupProjection | null>(null)
+  const craftSetup = ref<CraftSetupProjection | null>(null)
   const openingReady = ref<OpeningReadyProjection | null>(null)
   const assistantSession = ref<SupportSessionProjection | null>(null)
   const production = ref<ProductionCenterProjection | null>(null)
@@ -138,10 +141,12 @@ export const useProjectStore = defineStore('project-projection', () => {
     )
   }
   const writeLocked = computed(() => isProjectWriteLocked(currentProjectId.value))
-  const writeLockAllowed = new Set(['production_pause', 'production_cancel'])
+  // The owner's corrections are local and take effect from the next chapter,
+  // so they may be written while a chapter is being produced (WM-2a).
+  const writeLockAllowed = new Set(['production_pause', 'production_cancel', 'writing_rule_add', 'memory_correction_add', 'memory_correction_revoke'])
   const globalCommandTypes = new Set(['project_create_from_idea', 'project_create_from_market', 'global_settings_save'])
   const modelBusyCommandTypes = new Set([
-    'production_start', 'story_directions_generate', 'pitch_regenerate',
+    'production_start', 'story_directions_generate', 'pitch_regenerate', 'story_bible_generate',
     'opening_evaluate', 'book_plan_revise', 'planning_prepare_next_chapter',
   ])
   async function withProjectBusy<T>(work: () => Promise<T>, projectId = currentProjectId.value): Promise<T> {
@@ -161,6 +166,11 @@ export const useProjectStore = defineStore('project-projection', () => {
   }
 
   const project = computed(() => overview.value?.project ?? null)
+  // What the shell shows as running: a command on its way, or a page reading.
+  const activity = computed<'command' | 'loading' | null>(() =>
+    Object.values(commandStates.value).some(state => isInFlight(state.status))
+      ? 'command'
+      : loading.value || Object.values(workspaceLoading.value).some(Boolean) ? 'loading' : null)
   const pendingDecisionCount = computed(() => overview.value?.pendingDecisionCount ?? decisions.value?.items.filter(item => item.status === 'pending').length ?? 0)
   const pendingDecisions = computed(() => decisions.value?.items.filter(item => item.status === 'pending') ?? [])
   const recentOfficialChapters = computed(() => overview.value?.recentChapters ?? [])
@@ -174,6 +184,7 @@ export const useProjectStore = defineStore('project-projection', () => {
     marketStrategy.value = null
     directions.value = null
     storySetup.value = null
+    craftSetup.value = null
     openingReady.value = null
     assistantSession.value = null
     production.value = null
@@ -274,6 +285,10 @@ export const useProjectStore = defineStore('project-projection', () => {
   async function loadStorySetup(force=false) {
     if (storySetup.value && !force) return storySetup.value
     return withWorkspace('story-setup', () => frontendPort.queryStorySetup(queryBase('story-setup', 1)), v => { storySetup.value = v })
+  }
+  async function loadCraftSetup(force=false) {
+    if (craftSetup.value && !force) return craftSetup.value
+    return withWorkspace('craft-setup', () => frontendPort.queryCraftSetup(queryBase('craft-setup', 1)), v => { craftSetup.value = v })
   }
   async function loadOpeningReady(force=false) {
     if (openingReady.value && !force) return openingReady.value
@@ -505,6 +520,10 @@ export const useProjectStore = defineStore('project-projection', () => {
   async function queryDependencySummaryBootstrap(): Promise<DependencySummaryBootstrapProjection> {
     return frontendPort.queryDependencySummaryBootstrap(queryBase('history:dependency-summary', 1))
   }
+  /** WM-2a: the owner's corrections in force. */
+  async function loadCorrections() {
+    return (await frontendPort.queryOwnerCorrections(queryBase('corrections', 50))).items
+  }
   async function loadSettings(force=false) {
     if (settings.value && !force) return settings.value
     return withWorkspace('settings', () => frontendPort.queryProjectSettings(queryBase('settings', 1)), v => { settings.value=v })
@@ -516,6 +535,22 @@ export const useProjectStore = defineStore('project-projection', () => {
   async function supportSession(question: string, mode: 'INSPECT'|'DIAGNOSE' = 'DIAGNOSE') {
     const request = { ...queryBase('assistant', 12), question, mode, requestedAt: new Date().toISOString() } as Parameters<FrontendPort['supportSession']>[0]
     return withWorkspace('assistant', () => frontendPort.supportSession(request), value => { assistantSession.value = value })
+  }
+
+  /** FX-22: the current work's backups, newest first. */
+  async function loadBackups() {
+    return frontendPort.queryBackups(queryBase('backups', 1))
+  }
+
+  /** FX-21: how the backend understood a question for one assistant entry. */
+  async function classifyAssistantIntent(question: string, entry: 'DIAGNOSE' | 'CHANGE' | 'REPAIR') {
+    const request = { ...queryBase('assistant-intent', 1), question, entry, requestedAt: new Date().toISOString() }
+    return frontendPort.classifyAssistantIntent(request)
+  }
+
+  /** P3: a story bible change drafted from the owner's words (writes nothing). */
+  async function draftSetupChange(question: string) {
+    return frontendPort.draftSetupChange({ ...queryBase('assistant-setup-draft', 1), question, requestedAt: new Date().toISOString() })
   }
 
   async function queryAssistantRepairPlan(question: string): Promise<AssistantRepairPlan> {
@@ -613,6 +648,7 @@ export const useProjectStore = defineStore('project-projection', () => {
     if (marketStrategy.value) jobs.push(loadMarket(true))
     if (directions.value) jobs.push(loadDirections(true))
     if (storySetup.value) jobs.push(loadStorySetup(true))
+    if (craftSetup.value) jobs.push(loadCraftSetup(true))
     if (openingReady.value) jobs.push(loadOpeningReady(true))
     if (production.value) jobs.push(loadProduction(true))
     if (volumes.value) jobs.push(loadVolumes(true))
@@ -932,13 +968,13 @@ export const useProjectStore = defineStore('project-projection', () => {
   function isWorkspaceLoading(key:string){ return !!workspaceLoading.value[key] }
 
   return {
-    currentProjectId, overview, marketStrategy, directions, storySetup, openingReady, assistantSession, production, volumes, volumeDetail, planningRoute, continuityProjection, continuityVolumeId, withdrawRequests, writeLocked, decisions,
+    currentProjectId, overview, marketStrategy, directions, storySetup, craftSetup, openingReady, assistantSession, production, volumes, volumeDetail, planningRoute, continuityProjection, continuityVolumeId, withdrawRequests, writeLocked, decisions,
     readerVolumes, chapterLists, activeChapter, chapterVersions, canon, health, healthFactorSourcePages, healthError, history, historyKind, settings, searchResults, volumeLifecycle,
-    loading, loadError, project, pendingDecisionCount, pendingDecisions, recentOfficialChapters, advancedMode,
-    bootstrap, openProject, refresh, clearProject, loadMarket, loadDirections, loadStorySetup, loadOpeningReady, loadProduction, loadVolumes,
+    loading, loadError, project, activity, pendingDecisionCount, pendingDecisions, recentOfficialChapters, advancedMode,
+    bootstrap, openProject, refresh, clearProject, loadMarket, loadDirections, loadStorySetup, loadCraftSetup, loadOpeningReady, loadProduction, loadVolumes,
     loadVolumeDetail, loadPlanningRoute, loadContinuity, loadWithdrawRequests, decideWithdrawRequest, loadVolumeLifecycle, loadDecisions, loadReaderVolumes, loadChapterList, loadChapter, loadChapterVersions,
     loadExportCapability, createExport, queryExportReceipt, loadLatestExportReceipt,
-    loadCanon, loadHealth, loadHealthFactorSources, loadHistory, queryChangeRequest, queryRetconContext, queryDependencySummaryBootstrap, loadSettings, search, supportSession, queryAssistantRepairPlan, prepareAssistantRepair, authorizeAssistantRepair, reverifyAssistantRepair, requeryAssistantRepair, runCommand, retryCommand, withProjectBusy, testProvider, commandState,
+    loadCanon, loadHealth, loadHealthFactorSources, loadHistory, queryChangeRequest, queryRetconContext, queryDependencySummaryBootstrap, loadSettings, loadCorrections, search, supportSession, classifyAssistantIntent, draftSetupChange, loadBackups, queryAssistantRepairPlan, prepareAssistantRepair, authorizeAssistantRepair, reverifyAssistantRepair, requeryAssistantRepair, runCommand, retryCommand, withProjectBusy, testProvider, commandState,
     clearCommandState, confirmCommandResult, isWorkspaceLoading
   }
 })

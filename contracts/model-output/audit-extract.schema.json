@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "chapter audit extraction",
+  "type": "object",
+  "required": [
+    "qualityFindings",
+    "canonCandidates",
+    "knowledgeCandidates",
+    "continuityCandidates",
+    "taskProgressCandidates",
+    "revealedReservationRefs",
+    "evidenceRanges",
+    "auditCompleteness",
+    "unresolvedHard"
+  ],
+  "properties": {
+    "qualityFindings": {
+      "type": "array"
+    },
+    "canonCandidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "evidence": {
+            "$ref": "#/$defs/evidence"
+          }
+        }
+      }
+    },
+    "knowledgeCandidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "factIndex": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "evidence": {
+            "$ref": "#/$defs/evidence"
+          }
+        }
+      }
+    },
+    "continuityCandidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "threadRef": {
+            "type": "string"
+          },
+          "sourceFactIndex": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sourceEventId": {
+            "type": "string"
+          },
+          "evidence": {
+            "$ref": "#/$defs/evidence"
+          }
+        }
+      }
+    },
+    "taskProgressCandidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "evidence": {
+            "$ref": "#/$defs/evidence"
+          }
+        }
+      }
+    },
+    "revealedReservationRefs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidenceRanges": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/evidence"
+      }
+    },
+    "auditCompleteness": {
+      "enum": [
+        "COMPLETE_NO_CHANGE",
+        "COMPLETE_WITH_DELTA",
+        "INCOMPLETE",
+        "TRUNCATED",
+        "UNRESOLVED_HARD"
+      ]
+    },
+    "unresolvedHard": {
+      "type": "boolean"
+    },
+    "continuityDetails": {
+      "type": "array"
+    }
+  },
+  "$defs": {
+    "evidence": {
+      "description": "QC-1.1: the evidence is the sentence of the body at this index of bodySentences.",
+      "type": "object",
+      "properties": {
+        "sentence": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

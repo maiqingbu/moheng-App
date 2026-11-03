@@ -5,7 +5,8 @@ use crate::commit::CommitService;
 use crate::generated::types::ArtifactRef;
 use crate::generated::types::{ArtifactEnvelope, CommitBundle, CommitReceipt, HeadChange};
 use crate::generated::validators::{
-    validate_book_plan_r1, validate_chapter_plan_r1, validate_volume_plan_r1,
+    validate_book_plan_r1, validate_chapter_plan_r1, validate_chapter_plan_r2,
+    validate_volume_plan_r1,
 };
 use crate::hash::sha256_canonical;
 use crate::repositories::narrative::OpeningActualState;
@@ -25,11 +26,24 @@ pub fn normalize_legacy_book_plan_payload(payload: &Value) -> (Value, Vec<String
     (normalized, ignored_fields)
 }
 
+/// Validates a chapter plan against its own revision: CRAFT v3 plans are
+/// `chapter-plan.r2`, earlier chapters stay readable as `chapter-plan.r1`.
+pub fn validate_chapter_plan(plan: &Value) -> Result<(), String> {
+    if crate::chapter_craft::is_craft_plan(plan) {
+        validate_chapter_plan_r2(plan)
+    } else {
+        validate_chapter_plan_r1(plan)
+    }
+    .map_err(|error| format!("CHAPTER_PLAN_CONTRACT:{error}"))
+}
+
 pub fn normalize_chapter_plan_model_output(
     mut plan: Value,
     triggered_thread_refs: &[String],
     authoritative_bindings: &Value,
 ) -> Value {
+    crate::craft_plan::fold_opening_threat(&mut plan);
+    crate::craft_plan::drop_unchosen_beats(&mut plan);
     if let Some(object) = plan.as_object_mut() {
         object.retain(|key, _| {
             matches!(
@@ -40,6 +54,7 @@ pub fn normalize_chapter_plan_model_output(
                     | "compiledFromStateDigest"
                     | "contextManifestRef"
                     | "chapterGoal"
+                    | "chapterRole"
                     | "activeTaskRefs"
                     | "continuityActions"
                     | "requiredStateOutcomes"
@@ -47,11 +62,34 @@ pub fn normalize_chapter_plan_model_output(
                     | "knowledgeBoundaries"
                     | "reservationRefs"
                     | "sceneExecution"
+                    | "craft"
                     | "horizonPreview"
             )
         });
     }
-    plan["payloadSchema"] = json!("chapter-plan.r1");
+    if let Some(object) = plan.as_object_mut() {
+        let valid_role = object
+            .get("chapterRole")
+            .and_then(Value::as_str)
+            .is_some_and(|role| crate::chapter_craft::CHAPTER_ROLES.contains(&role));
+        if !valid_role {
+            object.remove("chapterRole");
+        }
+    }
+    // A plan carrying the CRAFT v3 decisions is r2, which replaces the
+    // scene/beat execution list.
+    if plan.get("craft").is_some_and(Value::is_object) {
+        plan["payloadSchema"] = json!("chapter-plan.r2");
+        crate::craft_plan::strip_plan_quotes(&mut plan);
+        if let Some(object) = plan.as_object_mut() {
+            object.remove("sceneExecution");
+        }
+    } else {
+        plan["payloadSchema"] = json!("chapter-plan.r1");
+        if let Some(object) = plan.as_object_mut() {
+            object.remove("craft");
+        }
+    }
     for field in [
         "chapterId",
         "compiledFromProjectRevision",
@@ -164,11 +202,22 @@ pub fn normalize_chapter_plan_model_output(
                 .as_str()
                 .or_else(|| item.get("objective").and_then(Value::as_str))
                 .or_else(|| item.get("description").and_then(Value::as_str))
+                .or_else(|| item.get("content").and_then(Value::as_str))
                 .map(str::trim)
                 .filter(|value| !value.is_empty());
             if let Some(objective) = objective {
                 normalized_items.push(json!({"slotNo":normalized_items.len() + 1,"objective":objective,"tentative":true}));
             }
+        }
+        // FX-17: the horizon is the soft rolling preview (architecture: future
+        // 3-8 chapters). Extra tentative slots beyond the authoritative capacity
+        // are dropped in order; too few still fails in validate_chapter_plan_horizon.
+        // The untrimmed model output stays in the persisted raw response.
+        if let Some(capacity) = authoritative_bindings
+            .get("horizonPreviewCapacity")
+            .and_then(Value::as_i64)
+        {
+            normalized_items.truncate(capacity.clamp(0, 8) as usize);
         }
         *items = normalized_items;
     }
@@ -189,6 +238,7 @@ pub fn approve_book_plan(
     opening_canon_refs: &[String],
     signing_evidence_refs: &[String],
     actual_state: &OpeningActualState,
+    direction: Option<&Value>,
 ) -> Result<Value, String> {
     let (seed, _) = normalize_legacy_book_plan_payload(seed);
     if !signing_pass || opening_canon_refs.len() < 3 || signing_evidence_refs.is_empty() {
@@ -205,6 +255,7 @@ pub fn approve_book_plan(
         opening_canon_refs,
         signing_evidence_refs,
         actual_state,
+        direction,
     )?;
     for key in [
         "mustAchieve",
@@ -222,6 +273,86 @@ pub fn approve_book_plan(
     }
     validate_book_plan_r1(&approved).map_err(|error| format!("BOOK_PLAN_CONTRACT:{error}"))?;
     Ok(approved)
+}
+
+/// P1: each mystery layer the direction planned, as a MYSTERY obligation
+/// that stays open until a chapter records its MYSTERY_RESOLVED event.  The
+/// opening's own CANON_REFS rule is not a mystery.
+fn book_mystery_obligations(book_plan: &Value, artifact_id: &str, version: i64) -> Vec<Value> {
+    book_plan
+        .get("majorMysteryGoals")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|goal| Some((goal.get("id")?.as_str()?, goal.get("volumeNo")?.as_i64()?, goal)))
+        .map(|(id, volume_no, goal)| {
+            json!({
+                "obligationId":id,"scope":"BOOK","obligationType":"MYSTERY","authorityLevel":"B",
+                "lifecycle":"APPROVED","description":goal["description"],"prerequisites":[],
+                "payloadJson":{"sourceArtifactId":artifact_id,"sourceVersion":version,"answerInVolume":volume_no,
+                    // Open from the start; the volume answering it is answerInVolume.
+                    "resumeCondition":{"kind":"AFTER_CHAPTER","value":0}}
+            })
+        })
+        .collect()
+}
+
+/// The mystery changes writing approved `book_plan` makes in the project,
+/// for its commit; none for a plan not yet approved.
+pub fn book_mystery_deltas_for(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    book_plan: &Value,
+    artifact_id: &str,
+    version: i64,
+) -> Result<Vec<Value>, String> {
+    if book_plan["planningMaturity"] != "APPROVED" {
+        return Ok(Vec::new());
+    }
+    let recorded = crate::repositories::narrative::NarrativeRepository::mystery_obligations(
+        connection, project_id,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(book_mystery_deltas(book_plan, artifact_id, version, &recorded))
+}
+
+/// What writing `book_plan` (artifact `artifact_id`, `version`) changes in
+/// the `recorded` MYSTERY obligations (id, lifecycle, description): a layer
+/// new to the plan opens, a reworded open one takes the new wording with its
+/// progress, and an open one the plan no longer has is abandoned; resolved
+/// ones stay. Every writer of an approved book plan commits these.
+pub fn book_mystery_deltas(
+    book_plan: &Value,
+    artifact_id: &str,
+    version: i64,
+    recorded: &[(String, String, String)],
+) -> Vec<Value> {
+    let open = |lifecycle: &str| matches!(lifecycle, "APPROVED" | "PROGRESSING");
+    let planned = book_mystery_obligations(book_plan, artifact_id, version);
+    let mut deltas = Vec::new();
+    for mut mystery in planned.iter().cloned() {
+        match recorded.iter().find(|(id, _, _)| mystery["obligationId"] == id.as_str()) {
+            None => deltas.push(mystery),
+            Some((_, lifecycle, description))
+                if open(lifecycle) && mystery["description"] != description.as_str() =>
+            {
+                mystery["lifecycle"] = json!(lifecycle);
+                deltas.push(mystery);
+            }
+            Some(_) => {}
+        }
+    }
+    for (id, lifecycle, description) in recorded {
+        if open(lifecycle) && !planned.iter().any(|mystery| mystery["obligationId"] == id.as_str()) {
+            deltas.push(json!({
+                "obligationId":id,"scope":"BOOK","obligationType":"MYSTERY","authorityLevel":"B",
+                "lifecycle":"ABANDONED","description":description,"prerequisites":[],
+                "payloadJson":{"sourceArtifactId":artifact_id,"sourceVersion":version,
+                    "resumeCondition":{"kind":"AFTER_CHAPTER","value":0}}
+            }));
+        }
+    }
+    deltas
 }
 
 /// Seeds the post-signing goal fields from actual opening references when the
@@ -243,6 +374,7 @@ fn enrich_book_plan_from_opening(
     opening_canon_refs: &[String],
     signing_evidence_refs: &[String],
     actual_state: &OpeningActualState,
+    direction: Option<&Value>,
 ) -> Result<(), String> {
     if opening_canon_refs.is_empty() || actual_state.evidence.is_empty() {
         return Err("BOOK_PLAN_OPENING_CANON_REQUIRED".into());
@@ -283,6 +415,16 @@ fn enrich_book_plan_from_opening(
             "description":"开篇已提交事实不得违背；以 Canon 为准。"
         }),
     );
+    let prerequisites = opening_canon_refs
+        .iter()
+        .chain(signing_evidence_refs)
+        .cloned()
+        .collect::<Vec<_>>();
+    // VD-1a: a direction from the model replaces the template goals below.
+    if let Some(direction) = direction {
+        crate::book_direction::apply(object, direction, &prerequisites);
+        return Ok(());
+    }
     if actual_state.relations.is_empty() {
         append_book_plan_item(
             object,
@@ -328,7 +470,7 @@ fn enrich_book_plan_from_opening(
             "description":"保留开篇 Canon 已确立的后续责任；以 Canon 为准。",
             "reservedForVolumeNo":2,
             "notBeforeVolumeNo":2,
-            "prerequisites":opening_canon_refs.iter().cloned().chain(signing_evidence_refs.iter().cloned()).collect::<Vec<_>>(),
+            "prerequisites":prerequisites,
             "mayForeshadow":true,
             "mayReveal":true,
             "authorityLevel":"B"
@@ -615,12 +757,47 @@ fn source_strings(sources: &Value, key: &str, nested_key: &str) -> Vec<String> {
         .collect()
 }
 
-fn seed_matches_volume(seed_id: &str, volume_no: i64) -> bool {
+pub(crate) fn seed_matches_volume(seed_id: &str, volume_no: i64) -> bool {
     let marker = format!("volume-{volume_no}");
     seed_id == marker
         || seed_id.ends_with(&format!(":{marker}"))
         || seed_id.ends_with(&format!("/{marker}"))
         || seed_id.ends_with(&format!("-{volume_no}"))
+}
+
+/// The book plan's seeds for volume `volume_no`.
+pub(crate) fn volume_seeds(book_plan: &Value, volume_no: i64) -> impl Iterator<Item = &Value> {
+    book_plan["volumeIntentSeeds"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(move |seed| {
+            seed["seedId"]
+                .as_str()
+                .is_some_and(|id| seed_matches_volume(id, volume_no))
+        })
+}
+
+/// VD-1b: the volume goal a seed stage becomes.
+fn stage_goal_id(volume_id: &str, stage_id: &str) -> String {
+    format!("goal:{volume_id}:{stage_id}")
+}
+
+/// The REQUIRED route task a volume goal becomes.
+fn required_task_id(goal_id: &str) -> String {
+    format!("task:required:{goal_id}")
+}
+
+/// VD-1c: the route task a seed stage becomes in volume `volume_id`.
+pub(crate) fn stage_task_id(volume_id: &str, stage_id: &str) -> String {
+    required_task_id(&stage_goal_id(volume_id, stage_id))
+}
+
+/// Whether `goal_id` is the goal `stage_id` became in some volume.
+fn is_stage_goal(goal_id: &str, stage_id: &str) -> bool {
+    goal_id
+        .strip_suffix(stage_id)
+        .is_some_and(|rest| rest.starts_with("goal:") && rest.ends_with(':'))
 }
 
 fn goal_matches_seed(goal: &Value, seed_description: &str) -> bool {
@@ -668,56 +845,74 @@ pub fn compile_volume_intent_from_authority(
     if project_revision < 0 {
         return Err("VOLUME_INTENT_COMPILED_REVISION_REQUIRED".into());
     }
-    let scoped_seeds = book_plan
-        .get("volumeIntentSeeds")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|seed| {
-            seed.get("seedId")
-                .and_then(Value::as_str)
-                .is_some_and(|id| seed_matches_volume(id, volume_no))
-        })
-        .collect::<Vec<_>>();
+    let scoped_seeds = volume_seeds(book_plan, volume_no).collect::<Vec<_>>();
     let global_goals = book_plan
         .get("mustAchieve")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let scoped_seed_descriptions = scoped_seeds
+    // VD-1b: a seed with stages (a planned direction) sets this volume's
+    // goals: its stages in order, then the book's goals for this volume.
+    // Real run round 25: a stage's steps are route tasks only (VD-1h), as
+    // these goals are part of every chapter's hard context.
+    let stage_goals = scoped_seeds
         .iter()
-        .filter_map(|seed| seed.get("description").and_then(Value::as_str))
+        .flat_map(|seed| seed["stages"].as_array().into_iter().flatten())
+        .filter_map(|unit| {
+            Some(json!({
+                "id":stage_goal_id(volume_id, unit["id"].as_str()?),
+                "volumeNo":volume_no,
+                "description":unit["goal"].as_str()?
+            }))
+        })
         .collect::<Vec<_>>();
-    let mut must_achieve = if scoped_seeds.is_empty() && volume_no == 1 {
-        global_goals
-    } else if !scoped_seed_descriptions.is_empty() {
-        global_goals
+    let staged = !stage_goals.is_empty();
+    let mut must_achieve = if staged {
+        stage_goals
             .into_iter()
-            .filter(|goal| {
-                scoped_seed_descriptions
-                    .iter()
-                    .any(|seed| goal_matches_seed(goal, seed))
-            })
+            .chain(
+                global_goals
+                    .into_iter()
+                    .filter(|goal| goal["volumeNo"] == volume_no),
+            )
             .collect()
     } else {
-        Vec::new()
-    };
-    for seed in &scoped_seeds {
-        if let (Some(seed_id), Some(description)) = (
-            seed.get("seedId").and_then(Value::as_str),
-            seed.get("description").and_then(Value::as_str),
-        ) {
-            let mut goal = json!({
-                "id":format!("goal:{volume_id}:seed:{seed_id}"),
-                "description":description
-            });
-            if seed.get("kind").and_then(Value::as_str) == Some("CANON_REFS") {
-                goal["kind"] = json!("CANON_REFS");
-                goal["refs"] = seed.get("refs").cloned().unwrap_or_else(|| json!([]));
+        let scoped_seed_descriptions = scoped_seeds
+            .iter()
+            .filter_map(|seed| seed.get("description").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        let mut must_achieve = if scoped_seeds.is_empty() && volume_no == 1 {
+            global_goals
+        } else if !scoped_seed_descriptions.is_empty() {
+            global_goals
+                .into_iter()
+                .filter(|goal| {
+                    scoped_seed_descriptions
+                        .iter()
+                        .any(|seed| goal_matches_seed(goal, seed))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for seed in &scoped_seeds {
+            if let (Some(seed_id), Some(description)) = (
+                seed.get("seedId").and_then(Value::as_str),
+                seed.get("description").and_then(Value::as_str),
+            ) {
+                let mut goal = json!({
+                    "id":format!("goal:{volume_id}:seed:{seed_id}"),
+                    "description":description
+                });
+                if seed.get("kind").and_then(Value::as_str) == Some("CANON_REFS") {
+                    goal["kind"] = json!("CANON_REFS");
+                    goal["refs"] = seed.get("refs").cloned().unwrap_or_else(|| json!([]));
+                }
+                push_unique_goal(&mut must_achieve, goal);
             }
-            push_unique_goal(&mut must_achieve, goal);
         }
-    }
+        must_achieve
+    };
     for responsibility in sources
         .get("responsibilities")
         .and_then(Value::as_array)
@@ -737,35 +932,38 @@ pub fn compile_volume_intent_from_authority(
             );
         }
     }
-    for event in sources
-        .get("events")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .take(8)
-    {
-        if let (Some(id), Some(event_type)) = (
-            event.get("eventId").and_then(Value::as_str),
-            event.get("eventType").and_then(Value::as_str),
-        ) {
-            let object = event
-                .get("objectJson")
-                .and_then(|value| value.get("text"))
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| {
-                    event
-                        .get("objectJson")
-                        .map(ToString::to_string)
-                        .unwrap_or_else(|| "未知对象".into())
-                });
-            push_unique_goal(
-                &mut must_achieve,
-                json!({
-                    "id":format!("goal:{volume_id}:event:{id}"),
-                    "description":format!("承接已发生事件 {event_type}：{object} 并给出可核对后果")
-                }),
-            );
+    // Opening events are covered by the stages when there are any.
+    if !staged {
+        for event in sources
+            .get("events")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .take(8)
+        {
+            if let (Some(id), Some(event_type)) = (
+                event.get("eventId").and_then(Value::as_str),
+                event.get("eventType").and_then(Value::as_str),
+            ) {
+                let object = event
+                    .get("objectJson")
+                    .and_then(|value| value.get("text"))
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| {
+                        event
+                            .get("objectJson")
+                            .map(ToString::to_string)
+                            .unwrap_or_else(|| "未知对象".into())
+                    });
+                push_unique_goal(
+                    &mut must_achieve,
+                    json!({
+                        "id":format!("goal:{volume_id}:event:{id}"),
+                        "description":format!("承接已发生事件 {event_type}：{object} 并给出可核对后果")
+                    }),
+                );
+            }
         }
     }
     if must_achieve.is_empty() {
@@ -947,16 +1145,8 @@ pub fn compile_volume_intent_from_authority(
         "revision":project_revision,
     }))
     .map_err(|error| error.to_string())?;
-    let seed_description = book_plan
-        .get("volumeIntentSeeds")
-        .and_then(Value::as_array)
-        .and_then(|items| {
-            items.iter().find(|item| {
-                item.get("seedId")
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| seed_matches_volume(id, volume_no))
-            })
-        })
+    let seed_description = scoped_seeds
+        .first()
         .and_then(|item| item.get("description"))
         .and_then(Value::as_str)
         .unwrap_or("承接全书战略并推进当前卷目标");
@@ -1134,7 +1324,26 @@ pub fn validate_volume_plan_semantics(plan: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// The chapters `goal_id` is estimated to take when it is `stage` or one of
+/// its steps (VD-1h: a stage's estimate shared among its steps, the first
+/// ones taking the remainder).
+fn stage_goal_estimate(stage: &Value, goal_id: &str) -> Option<i64> {
+    let estimate = stage["estimatedChapters"].as_i64()?;
+    if is_stage_goal(goal_id, stage["id"].as_str()?) {
+        return Some(estimate);
+    }
+    let steps = stage["steps"].as_array()?;
+    let index = steps.iter().position(|step| {
+        step["id"]
+            .as_str()
+            .is_some_and(|id| is_stage_goal(goal_id, id))
+    })?;
+    let count = steps.len() as i64;
+    Some((estimate / count + i64::from((index as i64) < estimate % count)).max(1))
+}
+
 pub fn compile_volume_plan_from_authority(
+    volume_no: i64,
     volume_intent_ref: &ArtifactRef,
     volume_intent: &Value,
     goal_contract: &Value,
@@ -1155,6 +1364,14 @@ pub fn compile_volume_plan_from_authority(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let book_plan = goal_contract
+        .get("bookPlan")
+        .ok_or("GOAL_CONTRACT_BOOK_PLAN_REQUIRED")?;
+    // VD-1b: this volume's seed, when the book plan has one with stages.
+    let seed = volume_seeds(book_plan, volume_no).next();
+    let stages = volume_seeds(book_plan, volume_no)
+        .flat_map(|seed| seed["stages"].as_array().into_iter().flatten())
+        .collect::<Vec<_>>();
     let mut tasks = Vec::new();
     let mut previous_required: Option<String> = None;
     for goal in volume_intent
@@ -1167,36 +1384,62 @@ pub fn compile_volume_plan_from_authority(
             .get("id")
             .and_then(Value::as_str)
             .ok_or("VOLUME_PLAN_GOAL_ID_REQUIRED")?;
-        let task_id = format!("task:required:{goal_id}");
-        let predicate = json!({
-            "kind":"TASK_EVIDENCE_RECORDED",
-            "value":{"taskId":task_id,"goalId":goal_id,"evidenceType":"FINAL_CHAPTER","requiresNewEvidence":true}
+        // VD-1h: a stage with steps is reached through one task per step,
+        // named as the step's own goal would be.
+        let stage = stages.iter().find(|stage| {
+            stage["id"]
+                .as_str()
+                .is_some_and(|id| is_stage_goal(goal_id, id))
         });
-        let dependencies = previous_required
-            .iter()
-            .cloned()
-            .map(Value::String)
-            .collect::<Vec<_>>();
-        tasks.push(json!({
-            "taskId":task_id,
-            "class":"REQUIRED",
-            "objective":goal.get("description").cloned().unwrap_or_else(|| json!("完成卷目标")),
-            "dependsOnTaskIds":dependencies,
-            "continuityThreadRefs":continuity_refs,
-            "reservationRefs":[],
-            "completionPredicate":predicate,
-            "estimatedChapterCost":{"preferred":1}
-        }));
-        previous_required = Some(task_id);
+        let units = match stage.and_then(|stage| stage["steps"].as_array()) {
+            Some(steps) if !steps.is_empty() => steps
+                .iter()
+                .filter_map(|step| {
+                    let stage_id = stage?["id"].as_str()?;
+                    let step_goal = format!("{}{}", goal_id.strip_suffix(stage_id)?, step["id"].as_str()?);
+                    Some((step_goal, step["goal"].clone()))
+                })
+                .collect::<Vec<_>>(),
+            _ => vec![(
+                goal_id.to_owned(),
+                goal.get("description").cloned().unwrap_or_else(|| json!("完成卷目标")),
+            )],
+        };
+        for (unit_goal, objective) in units {
+            let task_id = required_task_id(&unit_goal);
+            let predicate = json!({
+                "kind":"TASK_EVIDENCE_RECORDED",
+                "value":{"taskId":task_id,"goalId":goal_id,"evidenceType":"FINAL_CHAPTER","requiresNewEvidence":true}
+            });
+            let dependencies = previous_required
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect::<Vec<_>>();
+            let estimate = stages
+                .iter()
+                .find_map(|stage| stage_goal_estimate(stage, &unit_goal))
+                .unwrap_or(1);
+            tasks.push(json!({
+                "taskId":task_id,
+                "class":"REQUIRED",
+                "objective":objective,
+                "dependsOnTaskIds":dependencies,
+                "continuityThreadRefs":continuity_refs,
+                "reservationRefs":[],
+                "completionPredicate":predicate,
+                "estimatedChapterCost":{"preferred":estimate}
+            }));
+            previous_required = Some(task_id);
+        }
     }
-    let book_plan = goal_contract
-        .get("bookPlan")
-        .ok_or("GOAL_CONTRACT_BOOK_PLAN_REQUIRED")?;
+    // Directions for another volume wait for it; unnumbered ones apply now.
+    let for_this_volume = |item: &&Value| item.get("volumeNo").is_none_or(|n| n == volume_no);
     if let Some(items) = book_plan
         .get("relationshipMacroDirections")
         .and_then(Value::as_array)
     {
-        for item in items.iter().take(8) {
+        for item in items.iter().filter(for_this_volume).take(8) {
             let id = item.get("id").and_then(Value::as_str).unwrap_or("relation");
             tasks.push(json!({
                 "taskId":format!("task:optional:{id}"),
@@ -1212,13 +1455,21 @@ pub fn compile_volume_plan_from_authority(
     }
     let mut climax_task: Option<String> = None;
     if let Some(items) = book_plan.get("majorMysteryGoals").and_then(Value::as_array) {
-        for item in items.iter().take(1) {
+        for item in items.iter().filter(for_this_volume).take(1) {
             let id = item.get("id").and_then(Value::as_str).unwrap_or("mystery");
             let task_id = format!("task:climax:{id}");
+            let mystery = item
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("完成本卷关键回报");
+            let objective = match seed.and_then(|seed| seed["climax"].as_str()) {
+                Some(climax) => format!("{climax}；{mystery}"),
+                None => mystery.to_owned(),
+            };
             tasks.push(json!({
                 "taskId":task_id,
                 "class":"CLIMAX",
-                "objective":item.get("description").cloned().unwrap_or_else(|| json!("完成本卷关键回报")),
+                "objective":objective,
                 "dependsOnTaskIds":previous_required.iter().cloned().map(Value::String).collect::<Vec<_>>(),
                 "continuityThreadRefs":continuity_refs,
                 "reservationRefs":[],
@@ -1469,8 +1720,7 @@ pub fn validate_change_target_owner(
             }
         }
         "ChapterPlan" => {
-            validate_chapter_plan_r1(candidate)
-                .map_err(|error| format!("CHAPTER_PLAN_CONTRACT:{error}"))?;
+            validate_chapter_plan(candidate)?;
             let scope_chapter = scope
                 .get("chapterId")
                 .and_then(Value::as_str)
@@ -1496,7 +1746,7 @@ pub struct PlanningChangeMutation {
 
 pub struct PlanningOwner;
 
-fn merge_change_patch(target: &mut Value, patch: &Value) {
+pub(crate) fn merge_change_patch(target: &mut Value, patch: &Value) {
     match (target.as_object_mut(), patch.as_object()) {
         (Some(target), Some(patch)) => {
             for (key, value) in patch {
@@ -1826,6 +2076,25 @@ pub fn validate_task_reality(
     route_plan: &Value,
     task_states: &[(&str, &str)],
 ) -> Result<(), String> {
+    for task_ref in chapter_plan
+        .get("activeTaskRefs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        task_ready(task_ref, route_plan, task_states)?;
+    }
+    Ok(())
+}
+
+/// Whether a chapter may work on `task_ref` now: a planned, unreserved task
+/// that is neither invalidated nor blocked and whose dependencies are met.
+pub fn task_ready(
+    task_ref: &str,
+    route_plan: &Value,
+    task_states: &[(&str, &str)],
+) -> Result<(), String> {
     let tasks = route_plan
         .get("tasks")
         .and_then(Value::as_array)
@@ -1834,35 +2103,27 @@ pub fn validate_task_reality(
         .iter()
         .copied()
         .collect::<std::collections::BTreeMap<_, _>>();
-    for task_ref in chapter_plan
-        .get("activeTaskRefs")
+    let task = tasks
+        .iter()
+        .find(|item| item.get("taskId").and_then(Value::as_str) == Some(task_ref))
+        .ok_or("TASK_SCOPE_VIOLATION")?;
+    if task.get("class").and_then(Value::as_str) == Some("RESERVED") {
+        return Err("TASK_SCOPE_VIOLATION".into());
+    }
+    match states.get(task_ref).copied() {
+        Some("INVALIDATED") => return Err("TASK_SCOPE_VIOLATION".into()),
+        Some("BLOCKED") => return Err("TASK_DEPENDENCY_UNMET".into()),
+        _ => {}
+    }
+    for dependency in task
+        .get("dependsOnTaskIds")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
     {
-        let task = tasks
-            .iter()
-            .find(|item| item.get("taskId").and_then(Value::as_str) == Some(task_ref))
-            .ok_or("TASK_SCOPE_VIOLATION")?;
-        if task.get("class").and_then(Value::as_str) == Some("RESERVED") {
-            return Err("TASK_SCOPE_VIOLATION".into());
-        }
-        match states.get(task_ref).copied() {
-            Some("INVALIDATED") => return Err("TASK_SCOPE_VIOLATION".into()),
-            Some("BLOCKED") => return Err("TASK_DEPENDENCY_UNMET".into()),
-            _ => {}
-        }
-        for dependency in task
-            .get("dependsOnTaskIds")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-        {
-            if states.get(dependency).copied() != Some("SATISFIED") {
-                return Err("TASK_DEPENDENCY_UNMET".into());
-            }
+        if states.get(dependency).copied() != Some("SATISFIED") {
+            return Err("TASK_DEPENDENCY_UNMET".into());
         }
     }
     Ok(())
@@ -2385,7 +2646,7 @@ pub fn validate_current_chapter_plan(
     triggered_threads: &[String],
     remaining_chapter_capacity: i64,
 ) -> Result<(), String> {
-    validate_chapter_plan_r1(plan).map_err(|error| format!("CHAPTER_PLAN_CONTRACT:{error}"))?;
+    validate_chapter_plan(plan)?;
     if plan.get("chapterId").and_then(Value::as_str) != Some(current_chapter_id) {
         return Err("CHAPTER_PLAN_CURRENT_ONLY".into());
     }
@@ -2429,6 +2690,125 @@ pub fn validate_current_chapter_plan(
     Ok(())
 }
 
+/// How many tentative horizon slots a plan may preview: none to all of a
+/// capacity under 3, otherwise 3 to at most 8.
+pub fn horizon_slot_range(remaining_chapter_capacity: i64) -> (usize, usize) {
+    let capacity = remaining_chapter_capacity.clamp(0, 8) as usize;
+    (if capacity >= 3 { 3 } else { 0 }, capacity)
+}
+
+/// LD-1 step 2: the last lenient pass fits a plan its planner could not fix
+/// to its contract, and returns what it changed for the plan reminder. A
+/// short preview gets tentative slots up to the minimum; a scene with fewer
+/// than two people is folded into its neighbour, and beyond the third the
+/// neighbours with the fewest events together are folded into one; a
+/// scene keeps at most five events, its first four and its last (the shape
+/// in `craft_plan`). The
+/// changes come back as one plan-craft problem.
+pub fn fit_lenient_plan_shape(plan: &mut Value, remaining_chapter_capacity: i64) -> Option<String> {
+    let (minimum, _) = horizon_slot_range(remaining_chapter_capacity);
+    if let Some(horizon) = plan.get_mut("horizonPreview").and_then(Value::as_array_mut) {
+        while horizon.len() < minimum {
+            let slot = horizon.len() + 1;
+            horizon.push(json!({"slotNo":slot,"objective":"待后续规划确定","tentative":true}));
+        }
+    }
+    use crate::craft_plan::{event_count, text, MIN_SCENE_PEOPLE, SCENE_COUNT, SCENE_EVENTS};
+    let mut notes = crate::craft_plan::complete_plan_fields(plan)
+        .into_iter()
+        .map(|field| format!("系统补上了{field}"))
+        .collect::<Vec<_>>();
+    let as_problem = |notes: Vec<String>| {
+        (!notes.is_empty()).then(|| {
+            format!(
+                "{}:{}",
+                crate::craft_plan::PLAN_CRAFT_ERROR,
+                notes.join("；")
+            )
+        })
+    };
+    let Some(scenes) = plan
+        .pointer_mut("/craft/scenes")
+        .and_then(Value::as_array_mut)
+    else {
+        return as_problem(notes);
+    };
+    let people = |scene: &Value| scene["people"].as_array().map_or(0, Vec::len);
+    while scenes.len() > 1 {
+        // Too many scenes: the neighbours with the fewest events together
+        // join, so the events spread over the scenes left (sixth
+        // acceptance: three scenes folded into one lost ten events).
+        let Some(from) = scenes
+            .iter()
+            .position(|scene| people(scene) < MIN_SCENE_PEOPLE)
+            .or_else(|| {
+                if scenes.len() > *SCENE_COUNT.end() {
+                    (1..scenes.len())
+                        .min_by_key(|&at| event_count(&scenes[at - 1]) + event_count(&scenes[at]))
+                } else {
+                    None
+                }
+            })
+        else {
+            break;
+        };
+        let mut scene = scenes.remove(from);
+        let into = &mut scenes[from.saturating_sub(1)];
+        notes.push(format!(
+            "系统把场景「{}」并入「{}」",
+            text(&scene["place"]),
+            text(&into["place"])
+        ));
+        into["conflict"] = json!(format!(
+            "{}；{}",
+            text(&into["conflict"]),
+            text(&scene["conflict"])
+        ));
+        if from > 0 {
+            into["readerQuestion"] = scene["readerQuestion"].take();
+        }
+        if let (Value::Array(people), Some(list)) =
+            (scene["people"].take(), into["people"].as_array_mut())
+        {
+            let names = list
+                .iter()
+                .map(|person| person["name"].clone())
+                .collect::<Vec<_>>();
+            list.extend(
+                people
+                    .into_iter()
+                    .filter(|person| !names.contains(&person["name"])),
+            );
+        }
+        if let (Value::Array(events), Some(list)) =
+            (scene["events"].take(), into["events"].as_array_mut())
+        {
+            list.extend(events);
+        }
+        // LD-5: the folded scene takes the room estimated for both.
+        if let (Some(folded), Some(kept)) = (
+            scene["estimatedCharacters"].as_i64(),
+            into["estimatedCharacters"].as_i64(),
+        ) {
+            into["estimatedCharacters"] = json!(folded + kept);
+        }
+    }
+    let most = *SCENE_EVENTS.end();
+    for scene in scenes.iter_mut() {
+        let count = event_count(scene);
+        if count > most {
+            notes.push(format!(
+                "系统把场景「{}」的事件从 {count} 条删到 {most} 条",
+                text(&scene["place"])
+            ));
+            if let Some(events) = scene["events"].as_array_mut() {
+                events.drain(most - 1..count - 1);
+            }
+        }
+    }
+    as_problem(notes)
+}
+
 pub fn validate_chapter_plan_horizon(
     plan: &Value,
     remaining_chapter_capacity: i64,
@@ -2437,8 +2817,7 @@ pub fn validate_chapter_plan_horizon(
         .get("horizonPreview")
         .and_then(Value::as_array)
         .ok_or("CHAPTER_PLAN_HORIZON_REQUIRED")?;
-    let capacity = remaining_chapter_capacity.clamp(0, 8) as usize;
-    let minimum = if capacity >= 3 { 3 } else { 0 };
+    let (minimum, capacity) = horizon_slot_range(remaining_chapter_capacity);
     if horizon.len() < minimum
         || horizon.len() > capacity
         || horizon
@@ -2630,6 +3009,37 @@ pub fn recompile_chapter_plan_owner(
     now: &str,
     model_run_id: Option<&str>,
 ) -> Result<CommitReceipt, String> {
+    recompile_chapter_plan_owner_with_decisions(
+        connection,
+        project_id,
+        chapter_id,
+        plan,
+        authority_request,
+        command_id,
+        idempotency_key,
+        expected_revision,
+        now,
+        model_run_id,
+        &[],
+    )
+}
+
+/// Commits a chapter plan together with `decisions` (LD-1 step 2: the
+/// reminder about plan problems the planner could not fix).
+#[allow(clippy::too_many_arguments)]
+pub fn recompile_chapter_plan_owner_with_decisions(
+    connection: &Connection,
+    project_id: &str,
+    chapter_id: &str,
+    plan: &Value,
+    authority_request: &Value,
+    command_id: &str,
+    idempotency_key: &str,
+    expected_revision: i64,
+    now: &str,
+    model_run_id: Option<&str>,
+    decisions: &[Value],
+) -> Result<CommitReceipt, String> {
     let execution_mode = preflight_chapter_plan_owner(connection, project_id, chapter_id)?;
     validate_chapter_plan_target(connection, project_id, chapter_id, execution_mode)?;
     let volume_id = crate::repositories::narrative::NarrativeRepository::chapter_volume_id(
@@ -2637,7 +3047,7 @@ pub fn recompile_chapter_plan_owner(
     )
     .map_err(|error| error.to_string())?
     .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
-    validate_chapter_plan_r1(plan).map_err(|error| format!("CHAPTER_PLAN_CONTRACT:{error}"))?;
+    validate_chapter_plan(plan)?;
     if plan.get("chapterId").and_then(Value::as_str) != Some(chapter_id) {
         return Err("CHAPTER_PLAN_CHAPTER_MISMATCH".into());
     }
@@ -2831,7 +3241,8 @@ pub fn recompile_chapter_plan_owner(
         "idempotencyKey":idempotency_key,"expectedProjectRevision":expected_revision,
         "contractVersion":"m0a.v1","createdAt":now,"artifacts":[artifact],
         "headUpdates":[{"artifactType":"ChapterPlan","scope":{"level":"CHAPTER","chapterId":chapter_id},
-            "artifactId":artifact_id,"version":version,"payloadHash":hash}]
+            "artifactId":artifact_id,"version":version,"payloadHash":hash}],
+        "decisionUpdates":decisions
     }))
     .map_err(|error| error.to_string())?;
     CommitService::commit(connection, &bundle, now).map_err(|error| error.to_string())
@@ -2977,7 +3388,125 @@ pub fn commit_opening_chapter_plan_owner(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_book_plan_keeps_its_mysteries_in_step_with_what_is_recorded() {
+        // Debt from P1: a revised book plan neither added nor withdrew its
+        // mysteries.
+        let plan = json!({"majorMysteryGoals":[
+            {"id":"mystery:book:1","volumeNo":1,"description":"第 1 层：缺页记着谁的债"},
+            {"id":"mystery:book:3","volumeNo":2,"description":"第 3 层：谁改了租约"}
+        ]});
+        let recorded = vec![
+            ("mystery:book:1".to_owned(), "PROGRESSING".to_owned(), "第 1 层：缺页去哪了".to_owned()),
+            ("mystery:book:2".to_owned(), "APPROVED".to_owned(), "第 2 层：师父怎么死的".to_owned()),
+            ("mystery:book:9".to_owned(), "RESOLVED".to_owned(), "已揭开的一层".to_owned()),
+        ];
+        let deltas = book_mystery_deltas(&plan, "plan:book:x", 2, &recorded);
+        let lifecycle = |id: &str| {
+            deltas
+                .iter()
+                .find(|delta| delta["obligationId"] == id)
+                .map(|delta| (delta["lifecycle"].clone(), delta["description"].clone()))
+        };
+        // Reworded: the new wording, its progress kept.
+        assert_eq!(lifecycle("mystery:book:1"), Some((json!("PROGRESSING"), json!("第 1 层：缺页记着谁的债"))));
+        // No longer planned: withdrawn.
+        assert_eq!(lifecycle("mystery:book:2").unwrap().0, json!("ABANDONED"));
+        // Newly planned: opened.
+        assert_eq!(lifecycle("mystery:book:3").unwrap().0, json!("APPROVED"));
+        // Already resolved: left as it is.
+        assert_eq!(lifecycle("mystery:book:9"), None);
+        assert_eq!(deltas.len(), 3);
+        // Nothing changed: nothing to write.
+        let same = vec![("mystery:book:1".to_owned(), "APPROVED".to_owned(), "第 1 层：缺页记着谁的债".to_owned()),
+            ("mystery:book:3".to_owned(), "APPROVED".to_owned(), "第 3 层：谁改了租约".to_owned())];
+        assert!(book_mystery_deltas(&plan, "plan:book:x", 2, &same).is_empty());
+    }
+
     use super::*;
+
+    #[test]
+    fn craft_plan_normalization_keeps_the_chapter_role() {
+        let plan = normalize_chapter_plan_model_output(
+            json!({"chapterGoal":"目标","chapterRole":"回报","unexpected":1,"sceneExecution":[]}),
+            &[],
+            &json!({}),
+        );
+        assert_eq!(plan["chapterRole"], "回报");
+        assert!(plan.get("unexpected").is_none());
+    }
+
+    #[test]
+    fn craft_plan_normalization_drops_an_unknown_or_null_role() {
+        for role in [json!(null), json!("主线"), json!(3)] {
+            let plan = normalize_chapter_plan_model_output(
+                json!({"chapterGoal":"目标","chapterRole":role,"sceneExecution":[]}),
+                &[],
+                &json!({}),
+            );
+            assert!(plan.get("chapterRole").is_none());
+        }
+    }
+
+    fn fx17_real_horizon_items() -> Vec<Value> {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/fx17_plan_horizon_45_items.json"
+        ))
+        .unwrap();
+        fixture["horizonPreview"].as_array().unwrap().clone()
+    }
+
+    #[test]
+    fn fx17_model_horizon_beyond_capacity_is_trimmed_in_order() {
+        let items = fx17_real_horizon_items();
+        assert_eq!(items.len(), 45);
+        for (capacity, expected) in [(8_i64, 8_usize), (20, 8), (5, 5)] {
+            let plan = json!({"horizonPreview":items.clone()});
+            let normalized = normalize_chapter_plan_model_output(
+                plan,
+                &[],
+                &json!({"horizonPreviewCapacity":capacity}),
+            );
+            let horizon = normalized["horizonPreview"].as_array().unwrap();
+            assert_eq!(horizon.len(), expected, "capacity {capacity}");
+            assert_eq!(horizon[0]["objective"], items[0]["description"]);
+            assert_eq!(horizon[expected - 1]["slotNo"], expected);
+            assert!(validate_chapter_plan_horizon(&normalized, capacity).is_ok());
+        }
+    }
+
+    #[test]
+    fn fx17_horizon_items_written_as_content_are_kept() {
+        let fixture: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/fx17_plan_horizon_content_key.json"
+        )))
+        .unwrap();
+        let items = fixture["horizonPreview"].as_array().unwrap().clone();
+        assert_eq!(items.len(), 8);
+        let normalized = normalize_chapter_plan_model_output(
+            json!({"horizonPreview":items.clone()}),
+            &[],
+            &json!({"horizonPreviewCapacity":35}),
+        );
+        let horizon = normalized["horizonPreview"].as_array().unwrap();
+        assert_eq!(horizon.len(), 8);
+        assert_eq!(horizon[0]["objective"], items[0]["content"]);
+        assert!(validate_chapter_plan_horizon(&normalized, 35).is_ok());
+    }
+
+    #[test]
+    fn fx17_horizon_below_minimum_still_fails_closed() {
+        let items = fx17_real_horizon_items();
+        let plan = json!({"horizonPreview":items[..2].to_vec()});
+        let normalized =
+            normalize_chapter_plan_model_output(plan, &[], &json!({"horizonPreviewCapacity":8}));
+        assert_eq!(
+            validate_chapter_plan_horizon(&normalized, 8),
+            Err("ROLLING_HORIZON_CAPACITY_INVALID".into())
+        );
+    }
 
     fn chapter_plan() -> Value {
         json!({"payloadSchema":"chapter-plan.r1","chapterId":"chapter:1","compiledFromProjectRevision":1,"compiledFromStateDigest":"a".repeat(64),"contextManifestRef":{"artifactId":"context:1","version":1,"payloadHash":"b".repeat(64)},"chapterGoal":"advance","activeTaskRefs":["task:required"],"continuityActions":[{"threadRef":"thread:promise","disposition":"DEFER_WITH_BRIDGE","bridge":"interrupted meeting"}],"requiredStateOutcomes":[],"forbiddenTransitions":[],"knowledgeBoundaries":[],"reservationRefs":[],"sceneExecution":[],"horizonPreview":[{"slotNo":1,"objective":"one","tentative":true},{"slotNo":2,"objective":"two","tentative":true},{"slotNo":3,"objective":"three","tentative":true}]})
@@ -3227,7 +3756,7 @@ mod tests {
     fn book_approval_and_volume_route_fail_closed_on_static_truth() {
         let seed = json!({"payloadSchema":"book-plan.r1","planningMaturity":"SEED","storyPromise":"promise","protagonistMacroDirection":"direction","endingBoundary":"end","mustNotBreak":[],"openingHypotheses":[],"globalLengthBudget":{"preferredWords":1000}});
         assert_eq!(
-            approve_book_plan(&seed, false, &[], &[], &OpeningActualState::default()),
+            approve_book_plan(&seed, false, &[], &[], &OpeningActualState::default(), None),
             Err("BOOK_PLAN_SIGNING_REQUIRED".into())
         );
         let route = json!({"payloadSchema":"volume-plan.r1","volumeIntentRef":{"artifactId":"intent:1","version":1,"payloadHash":"a".repeat(64)},"routeVersion":1,"tasks":[],"routeInvariants":[],"requiredExitConditions":[],"capacityBudget":{"minChapters":1,"preferredChapters":2,"maxChapters":3},"chapters":[]});

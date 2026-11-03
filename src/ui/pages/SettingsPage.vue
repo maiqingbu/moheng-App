@@ -3,27 +3,78 @@ import { computed, onMounted, reactive, ref, watchEffect } from 'vue'
 import { useRoute } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
+import ChapterLengthPicker from '../components/ChapterLengthPicker.vue'
+import BaseModal from '../components/BaseModal.vue'
+import { backupRestoreRequests, restorableBackups } from '../flows/backupRestore'
+import { isInFlight, productTimeLabel } from '../presentation/productLanguage'
 import { useProjectStore } from '../stores/projectStore'
 import { useProjectLibraryStore } from '../stores/projectLibraryStore'
-import type { SettingsProjection } from '../../application/contracts'
+import type { BackupEntry, OwnerCorrection, SettingsProjection, StepThinking, ThinkingStep } from '../../application/contracts'
 
 const route=useRoute()
 const projectStore=useProjectStore()
 const libraryStore=useProjectLibraryStore()
 const isProjectSettings=computed(()=>route.meta.scope==='project')
 const section=ref('model')
-const form=reactive<SettingsProjection>({provider:'OpenAI Compatible',model:'gpt-4o-mini',endpoint:'',monthlyBudget:null,chapterBudget:null,privacyMode:'local-first',sendDraftOnly:true,exportFormat:'DOCX',platform:'番茄小说',theme:'light',providerId:'openai-compatible',modelId:'gpt-4o-mini',enabled:false,timeoutMs:30000})
+const form=reactive<SettingsProjection>({provider:'OpenAI Compatible',model:'gpt-4o-mini',endpoint:'',monthlyBudget:null,chapterBudget:null,privacyMode:'local-first',sendDraftOnly:true,exportFormat:'DOCX',platform:'番茄小说',theme:'light',providerId:'openai-compatible',modelId:'gpt-4o-mini',enabled:false,timeoutMs:120000})
 type PricingEntry = NonNullable<SettingsProjection['modelPricing']>['entries'][number]
 const pricingEntries=ref<PricingEntry[]>([])
 const pricingVersion=ref(0)
 const apiKey=ref('')
+// P4: the provider's model list for the three model fields, typed by hand
+// when the list cannot be read.
+const models=ref<string[]>([])
+const modelsMessage=ref('')
+async function loadModels(){
+  modelsMessage.value='正在获取模型列表…'
+  const listed=await libraryStore.listProviderModels(providerSettings()).catch(()=>({models:[] as string[]}))
+  models.value=listed.models
+  modelsMessage.value=listed.models.length ? `找到 ${listed.models.length} 个模型，可以在下面三个框里选，也可以照常手填。` : '没有读到模型列表，请直接填写模型名。'
+}
+// P4: each step's thinking: the provider's default (nothing sent), off or on.
+const thinkingSteps:{step:ThinkingStep;label:string}[]=[{step:'default',label:'默认创作模型'},{step:'render',label:'写正文模型'},{step:'audit',label:'审核模型'}]
+const thinking=reactive<Record<ThinkingStep,{mode:''|'off'|'on';effort:''|'high'|'max'}>>({default:{mode:'',effort:''},render:{mode:'',effort:''},audit:{mode:'',effort:''}})
+function loadThinking(saved?:SettingsProjection['thinking']){
+  for(const {step} of thinkingSteps){
+    const setting=saved?.[step]
+    thinking[step]={mode:setting ? (setting.enabled ? 'on' : 'off') : '',effort:setting?.effort ?? ''}
+  }
+}
+function thinkingSettings(){
+  const saved:Partial<Record<ThinkingStep,StepThinking>>={}
+  for(const {step} of thinkingSteps){
+    const {mode,effort}=thinking[step]
+    if(mode) saved[step]={enabled:mode==='on',...(mode==='on' && effort ? {effort} : {})}
+  }
+  return saved
+}
 
-onMounted(()=>{ if(isProjectSettings.value) void projectStore.loadSettings(); else void libraryStore.loadGlobalSettings() })
+// WM-2a: the owner's writing rules for this work and the reminders kept as corrections.
+const corrections=ref<OwnerCorrection[]>([])
+const newRule=ref('')
+const ruleState=computed(()=>projectStore.commandState('writing-rule'))
+async function loadCorrections(){ corrections.value=await projectStore.loadCorrections() }
+const revokeState=computed(()=>projectStore.commandState('writing-rule-revoke'))
+async function addRule(){
+  if(!newRule.value.trim()) return
+  try {
+    await projectStore.runCommand('writing-rule',{type:'writing_rule_add',payload:{content:newRule.value}})
+    if(ruleState.value.status==='committed') newRule.value=''
+  } finally { await loadCorrections() }
+}
+async function revoke(correctionId:string){
+  try {
+    await projectStore.runCommand('writing-rule-revoke',{type:'memory_correction_revoke',payload:{correctionId}})
+  } finally { await loadCorrections() }
+}
+
+onMounted(()=>{ if(isProjectSettings.value) { void projectStore.loadSettings(); void loadBackups(); void loadCorrections() } else void libraryStore.loadGlobalSettings() })
 watchEffect(()=>{
   if(!isProjectSettings.value && !libraryStore.globalSettings) void libraryStore.loadGlobalSettings()
   const source=isProjectSettings.value ? projectStore.settings : libraryStore.globalSettings
   if(source) {
     Object.assign(form,source)
+    loadThinking(source.thinking)
     if(!isProjectSettings.value) {
       pricingEntries.value=source.modelPricing?.entries.map(entry=>({...entry})) ?? []
       pricingVersion.value=source.modelPricing?.version ?? 0
@@ -40,12 +91,12 @@ const pricingHistory=computed(()=>libraryStore.globalSettings?.modelPricing?.his
 
 function providerSettings(){
   const model=form.model.trim()
-  return {...form,model,modelId:model,enabled:Boolean(form.endpoint.trim()),...(apiKey.value ? {apiKey:apiKey.value} : {})}
+  return {...form,model,modelId:model,renderModelId:(form.renderModelId ?? '').trim(),auditModelId:(form.auditModelId ?? '').trim(),thinking:thinkingSettings(),enabled:Boolean(form.endpoint.trim()),...(apiKey.value ? {apiKey:apiKey.value} : {})}
 }
 async function save(){
   const settings=providerSettings()
   if(isProjectSettings.value) await projectStore.runCommand('settings-save',{type:'settings_save',payload:{settings}})
-  else { await libraryStore.runCommand('global-settings-save',{type:'global_settings_save',payload:{settings}}); libraryStore.globalSettings={...form,model:settings.model,modelId:settings.modelId,enabled:settings.enabled} }
+  else { await libraryStore.runCommand('global-settings-save',{type:'global_settings_save',payload:{settings}}); libraryStore.globalSettings={...form,model:settings.model,modelId:settings.modelId,thinking:settings.thinking,enabled:settings.enabled} }
   apiKey.value=''
 }
 function addPricingEntry(){
@@ -61,7 +112,23 @@ async function test(){
   if(isProjectSettings.value) await projectStore.testProvider('provider-test',settings)
   else await libraryStore.testProvider('global-provider-test',settings)
 }
-async function backup(){ await projectStore.runCommand('project-backup',{type:'backup_create',payload:{kind:'milestone'}}) }
+async function backup(){ await projectStore.runCommand('project-backup',{type:'backup_create',payload:{kind:'milestone'}}); await loadBackups() }
+// FX-22: restore from a backup after an automatic safety backup.
+const backups=ref<BackupEntry[]>([])
+const restoreTarget=ref<BackupEntry|null>(null)
+const restoreState=computed(()=>projectStore.commandState('project-restore'))
+async function loadBackups(){ if(isProjectSettings.value) backups.value=restorableBackups((await projectStore.loadBackups()).backups) }
+async function confirmRestore(){
+  const target=restoreTarget.value
+  if(!target) return
+  restoreTarget.value=null
+  const [safety,restore]=backupRestoreRequests(target)
+  try {
+    await projectStore.runCommand('project-backup',safety)
+    await projectStore.runCommand('project-restore',restore)
+    if(projectStore.currentProjectId) await projectStore.openProject(projectStore.currentProjectId)
+  } finally { await loadBackups() }
+}
 async function integrity(){ await projectStore.runCommand('project-integrity',{type:'integrity_check_run',payload:{mode:'quick_check'}}) }
 function applyTheme(){ document.documentElement.dataset.theme=form.theme==='system'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):form.theme }
 function scrollTo(id:string){ section.value=id; document.getElementById(`setting-${id}`)?.scrollIntoView({behavior:'smooth'}) }
@@ -76,13 +143,35 @@ function resetForm(){ const source=isProjectSettings.value ? projectStore.settin
     <CommandFeedback :state="saveState" />
 
     <div class="settings-layout section">
-      <aside class="settings-nav"><button :class="{active:section==='model'}" @click="scrollTo('model')">模型配置</button><button :class="{active:section==='cost'}" @click="scrollTo('cost')">成本控制</button><button :class="{active:section==='privacy'}" @click="scrollTo('privacy')">隐私</button><button :class="{active:section==='export'}" @click="scrollTo('export')">导出</button><button v-if="isProjectSettings" :class="{active:section==='reliability'}" @click="scrollTo('reliability')">数据可靠性</button><button :class="{active:section==='platform'}" @click="scrollTo('platform')">平台偏好</button><button :class="{active:section==='appearance'}" @click="scrollTo('appearance')">外观</button></aside>
+      <aside class="settings-nav"><button :class="{active:section==='model'}" @click="scrollTo('model')">模型配置</button><button :class="{active:section==='cost'}" @click="scrollTo('cost')">成本控制</button><button v-if="isProjectSettings" :class="{active:section==='length'}" @click="scrollTo('length')">章节字数</button><button v-if="isProjectSettings" :class="{active:section==='rules'}" @click="scrollTo('rules')">写作规矩</button><button :class="{active:section==='privacy'}" @click="scrollTo('privacy')">隐私</button><button :class="{active:section==='export'}" @click="scrollTo('export')">导出</button><button v-if="isProjectSettings" :class="{active:section==='reliability'}" @click="scrollTo('reliability')">数据可靠性</button><button :class="{active:section==='platform'}" @click="scrollTo('platform')">平台偏好</button><button :class="{active:section==='appearance'}" @click="scrollTo('appearance')">外观</button></aside>
 
       <main>
         <section id="setting-model" class="setting-section">
           <div class="card-head"><div><h2 class="card-title">模型配置</h2><p class="card-subtitle">可在这里测试模型服务连接。应用设置作为默认配置，单个作品可以使用独立的模型设置。</p></div></div>
-          <div class="setting-grid"><label class="field"><span class="field-label">服务类型</span><select v-model="form.provider" class="select"><option>OpenAI Compatible</option><option>自定义兼容服务</option></select></label><label class="field"><span class="field-label">默认创作模型</span><input v-model="form.model" class="input" /></label><label class="field" style="grid-column:1/-1"><span class="field-label">接口地址（API Endpoint）</span><input v-model="form.endpoint" class="input" /></label><label class="field" style="grid-column:1/-1"><span class="field-label">访问密钥（API Key）</span><input v-model="apiKey" class="input" type="password" autocomplete="new-password" /><span class="help">密钥会安全保存在系统凭据存储中，不会写入作品数据或操作记录。留空表示继续使用已保存的密钥。</span></label></div>
+          <div class="setting-grid"><label class="field"><span class="field-label">服务类型</span><select v-model="form.provider" class="select"><option>OpenAI Compatible</option><option>自定义兼容服务</option></select></label><label class="field"><span class="field-label">默认创作模型</span><input v-model="form.model" class="input" list="provider-models" /></label><label class="field" data-render-model><span class="field-label">写正文模型（可选）</span><input v-model="form.renderModelId" class="input" list="provider-models" /><span class="help">只用于写章节正文和修改正文，不用于规划和审核；留空则沿用默认创作模型。使用前请在下方填写它的价格。</span></label><label class="field" data-audit-model><span class="field-label">审核模型（可选）</span><input v-model="form.auditModelId" class="input" list="provider-models" /><span class="help">用于新流程的章节计划，以及写完后的事实提取与审核；留空则沿用默认创作模型。使用前请在下方填写它的价格。</span></label><label class="field" style="grid-column:1/-1"><span class="field-label">接口地址（API Endpoint）</span><input v-model="form.endpoint" class="input" /></label><label class="field" style="grid-column:1/-1"><span class="field-label">访问密钥（API Key）</span><input v-model="apiKey" class="input" type="password" autocomplete="new-password" /><span class="help">密钥会安全保存在系统凭据存储中，不会写入作品数据或操作记录。留空表示继续使用已保存的密钥。</span></label></div>
+          <div class="actions" style="margin-top:10px"><button class="btn" @click="loadModels">获取模型列表</button><span v-if="modelsMessage" class="help">{{ modelsMessage }}</span></div>
+          <datalist id="provider-models"><option v-for="model in models" :key="model" :value="model" /></datalist>
+          <div class="setting-grid" data-thinking style="margin-top:10px">
+            <label v-for="item in thinkingSteps" :key="item.step" class="field"><span class="field-label">{{ item.label }} · 思考</span>
+              <select v-model="thinking[item.step].mode" class="select"><option value="">服务商默认</option><option value="off">关闭</option><option value="on">开启</option></select>
+              <select v-model="thinking[item.step].effort" class="select" :disabled="thinking[item.step].mode!=='on'"><option value="">强度：服务商默认</option><option value="high">强度：high</option><option value="max">强度：max</option></select>
+              <span class="help">开启思考会更慢、更费 token；阿里的模型开启后不再使用 JSON 模式。</span>
+            </label>
+          </div>
           <div class="actions" style="margin-top:14px"><button class="btn" @click="test">测试模型连接</button></div><CommandFeedback :state="testState" />
+        </section>
+
+        <section v-if="isProjectSettings" id="setting-rules" class="setting-section">
+          <div class="card-head"><div><h2 class="card-title">写作规矩</h2><p class="card-subtitle">这部作品的每一章，规划和写作都会照这些规矩来；和其他内容冲突时以它们为准。在“待处理”里记住的提醒也列在这里。</p></div></div>
+          <div v-if="!corrections.length" class="muted">还没有写作规矩。</div>
+          <div v-for="item in corrections" :key="item.correctionId" class="actions" style="justify-content:space-between;align-items:flex-start">
+            <div><span v-if="item.subject" class="badge">{{ item.subject }}</span> {{ item.content }}</div>
+            <button class="btn" :disabled="isInFlight(revokeState.status)" @click="revoke(item.correctionId)">撤销</button>
+          </div>
+          <CommandFeedback :state="revokeState" />
+          <label class="field section"><span class="field-label">新增一条</span><textarea v-model="newRule" class="textarea" placeholder="例如：不写主角吐血，代价用记忆缺失来表现" /></label>
+          <CommandFeedback :state="ruleState" />
+          <div class="actions"><button class="btn primary" :disabled="!newRule.trim() || isInFlight(ruleState.status)" @click="addRule">添加</button></div>
         </section>
 
         <section id="setting-cost" class="setting-section">
@@ -121,6 +210,11 @@ function resetForm(){ const source=isProjectSettings.value ? projectStore.settin
           </div>
         </section>
 
+        <section v-if="isProjectSettings" id="setting-length" class="setting-section" data-chapter-length-setting>
+          <div class="card-head"><div><h2 class="card-title">章节字数</h2><p class="card-subtitle">本作品每章的默认字数区间；开始写某一章或生成某一章计划时，可以单独改这一章。</p></div></div>
+          <ChapterLengthPicker v-model="form.chapterLengthRange" />
+        </section>
+
         <section id="setting-privacy" class="setting-section">
           <div class="card-head"><div><h2 class="card-title">隐私设置</h2><p class="card-subtitle">请求内容按当前任务的正式上下文组装。</p></div></div>
           <p class="banner info" role="status">隐私模式和“仅发送草稿”选项暂不可用。</p>
@@ -136,6 +230,15 @@ function resetForm(){ const source=isProjectSettings.value ? projectStore.settin
           <div class="card-head"><div><h2 class="card-title">数据可靠性</h2><p class="card-subtitle">备份和完整性检查会在后台完成；页面只提交操作并展示结果，不会直接改写作品正式记录。</p></div></div>
           <div class="actions"><button class="btn" @click="backup">创建里程碑备份</button><button class="btn" @click="integrity">运行完整性检查</button></div>
           <CommandFeedback :state="backupState" /><CommandFeedback :state="integrityState" />
+          <div class="section-subgroup" data-backup-list>
+            <h3>已有备份</h3>
+            <div v-for="item in backups" :key="item.backupName" class="task-row">
+              <span>{{ productTimeLabel(item.createdAt) }}<small v-if="item.sizeBytes" class="muted"> · {{ Math.max(1, Math.round(item.sizeBytes / 1024)) }} KB</small></span>
+              <button class="btn" @click="restoreTarget=item">从此备份恢复</button>
+            </div>
+            <p v-if="!backups.length" class="muted">还没有可用的备份。先创建一个里程碑备份。</p>
+            <CommandFeedback :state="restoreState" />
+          </div>
           <div class="banner info" style="margin-top:12px"><div><div class="banner-title">可靠性基线</div><div class="banner-copy">正式实现包含本机事务、崩溃恢复、快速检查、哈希验证、引用检查和只读恢复模式。</div></div></div>
         </section>
 
@@ -148,6 +251,11 @@ function resetForm(){ const source=isProjectSettings.value ? projectStore.settin
           <div class="card-head"><div><h2 class="card-title">外观</h2><p class="card-subtitle">保持安静、编辑部式的阅读与制作体验。</p></div></div>
           <div class="segmented"><button :class="{active:form.theme==='light'}" @click="form.theme='light';applyTheme()">浅色</button><button :class="{active:form.theme==='system'}" @click="form.theme='system';applyTheme()">跟随系统</button><button :class="{active:form.theme==='dark'}" @click="form.theme='dark';applyTheme()">深色</button></div>
         </section>
+
+        <BaseModal :open="!!restoreTarget" title="确认从备份恢复" subtitle="恢复前会先自动备份当前状态，以便需要时再找回。" @close="restoreTarget=null">
+          <p>将把作品恢复到 {{ restoreTarget ? productTimeLabel(restoreTarget.createdAt) : '' }} 的备份。备份之后的所有改动都会被覆盖，恢复前系统会先校验备份是否完整。</p>
+          <template #footer><button class="btn" @click="restoreTarget=null">取消</button><button class="btn danger" @click="confirmRestore">确认恢复</button></template>
+        </BaseModal>
 
         <div class="actions" style="justify-content:space-between"><button class="btn soft" @click="resetForm">恢复当前已保存设置</button><button class="btn primary" @click="save">保存更改</button></div>
       </main>
