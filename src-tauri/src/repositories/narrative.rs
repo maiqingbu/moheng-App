@@ -388,6 +388,21 @@ impl NarrativeRepository {
         Ok((bodies, truncated))
     }
 
+    /// P3: the committed chapters' bodies with their numbers, in order.
+    pub fn final_bodies_by_chapter(
+        connection: &Connection,
+        project_id: &str,
+        limit: i64,
+    ) -> Result<Vec<(i64, String)>, NarrativeRepositoryError> {
+        let mut statement = connection.prepare(
+            "SELECT c.chapter_no,json_extract(p.payload_json,'$.body') FROM canonical_heads h JOIN artifacts a ON a.project_id=h.project_id AND a.artifact_id=h.artifact_id AND a.version=h.version AND a.artifact_type='FinalChapter' AND a.artifact_status='COMMITTED' JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version JOIN chapters c ON c.project_id=h.project_id AND c.chapter_id=json_extract(p.payload_json,'$.chapterId') WHERE h.project_id=?1 AND h.artifact_type='FinalChapter' ORDER BY c.chapter_no LIMIT ?2",
+        )?;
+        let rows = statement.query_map(libsql_rusqlite::params![project_id, limit.clamp(1, 10_000)], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?.unwrap_or_default()))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub fn canonical_final_head_refs(
         connection: &Connection,
         project_id: &str,

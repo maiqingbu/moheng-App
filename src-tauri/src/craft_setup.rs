@@ -460,6 +460,36 @@ pub fn draft_setup_change(
     })))
 }
 
+/// The most written chapters' sentences listed for one changed item.
+const WRITTEN_CONFLICTS_SHOWN: usize = 5;
+
+/// P3: `items` (a draft's changes) each with `writtenConflicts`: the
+/// sentences of written `chapters` (number and body) that still say a phrase
+/// of the old value, for the owner to decide on a retcon. Phrases are the
+/// old value's parts of two or more characters between punctuation.
+pub fn written_conflicts(items: &Value, chapters: &[(i64, String)]) -> Value {
+    let mut items = items.clone();
+    for item in items.as_array_mut().into_iter().flatten() {
+        let before = item["before"].as_str().unwrap_or_default().to_owned();
+        let phrases = before
+            .split(|c: char| "，、。；：,;:和与及".contains(c))
+            .map(str::trim)
+            .filter(|phrase| phrase.chars().count() >= 2)
+            .collect::<Vec<_>>();
+        let conflicts = chapters
+            .iter()
+            .flat_map(|(chapter_no, body)| {
+                body.split_inclusive(['。', '！', '？'])
+                    .filter(|sentence| phrases.iter().any(|phrase| sentence.contains(phrase)))
+                    .map(move |sentence| json!({"chapterNo":chapter_no,"quote":sentence.trim()}))
+            })
+            .take(WRITTEN_CONFLICTS_SHOWN)
+            .collect::<Vec<_>>();
+        item["writtenConflicts"] = json!(conflicts);
+    }
+    items
+}
+
 /// P3: an approved change request's patch to the confirmed story bible,
 /// checked as a new bible is and written as its next version by this owner.
 pub fn apply_typed_change(
@@ -672,6 +702,33 @@ mod tests {
         assert_eq!(draft["patch"]["antagonist"]["method"], "收买码头的账房");
         assert_eq!(draft["patch"]["cast"][0]["speechStyle"], "话少，开口就呛人");
         assert_eq!(draft["base"]["cast"][1]["speechStyle"], "满嘴俗语");
+    }
+
+    #[test]
+    fn a_setup_change_lists_where_written_chapters_still_say_the_old_value() {
+        // P3: chapters already written that conflict with the new setting are
+        // listed for the owner to decide on a retcon.
+        let items = json!([
+            {"path":"antagonist.method","before":"借据、打手和码头的规矩","after":"收买码头的账房"},
+            {"path":"cast.1.speechStyle","before":"满嘴俗语","after":"说话慢"}
+        ]);
+        let chapters = vec![
+            (4, "彭三把借据拍在桌上。打手堵住了门。林满没说话。".to_string()),
+            (5, "雨下了一夜，面馆照常开门。".to_string()),
+            (6, "老董又来赊账，满嘴俗语地说着软话。".to_string()),
+        ];
+        let listed = written_conflicts(&items, &chapters);
+        assert_eq!(
+            listed[0]["writtenConflicts"],
+            json!([
+                {"chapterNo":4,"quote":"彭三把借据拍在桌上。"},
+                {"chapterNo":4,"quote":"打手堵住了门。"}
+            ])
+        );
+        assert_eq!(
+            listed[1]["writtenConflicts"],
+            json!([{"chapterNo":6,"quote":"老董又来赊账，满嘴俗语地说着软话。"}])
+        );
     }
 
     #[test]

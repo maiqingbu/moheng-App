@@ -56,6 +56,11 @@ describe('FX-21 助手语义理解', () => {
     expect(request.requestedChange).toEqual({ targetAuthority: { artifactType: 'StoryBible', artifactId: 'bible:1' }, patch: { antagonist: { method: '收买账房' } }, description: '改反派手段', source: 'PROJECT_ASSISTANT' })
     expect(request.sourceRefs).toEqual(['bible:1'])
     expect(page).toContain('data-setup-draft')
+    // P3: written chapters that still say the old value are shown per item.
+    expect(page).toContain('v-for="conflict in item.writtenConflicts ?? []"')
+    expect(page).toContain('已写章节里还是原来的写法')
+    expect(page).toContain('setupDraft.writtenConflictsUnavailable')
+    expect(source('src/application/contracts.ts')).toContain('writtenConflicts?: { chapterNo: number; quote: string }[]')
     expect(source('src/infrastructure/tauri/frontendPort.ts')).toContain("'draft_setup_change'")
   })
 

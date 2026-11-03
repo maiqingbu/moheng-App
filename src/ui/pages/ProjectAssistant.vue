@@ -294,7 +294,11 @@ onMounted(() => {
           <strong>{{ setupPathLabel(item.path) }}</strong>
           <span class="muted">原来：{{ displayValue(item.before) }}</span>
           <label class="muted">改成<textarea v-if="typeof item.after === 'string'" v-model="item.after" rows="2" /><span v-else>{{ displayValue(item.after) }}</span></label>
+          <div v-if="item.writtenConflicts?.length" class="muted" style="font-size:12px">已写章节里还是原来的写法（批准后可另行发起事实修订）：
+            <div v-for="conflict in item.writtenConflicts ?? []" :key="`${conflict.chapterNo}:${conflict.quote}`">第 {{ conflict.chapterNo }} 章：{{ conflict.quote }}</div>
+          </div>
         </div>
+        <p v-if="setupDraft.writtenConflictsUnavailable" class="banner warning">暂时读不到已写章节，无法列出和新设定冲突的地方。</p>
         <div class="actions"><button class="btn primary" @click="submitSetupDraft">提交修改申请</button><button class="btn" @click="setupDraft = null">不改了</button></div>
         <CommandFeedback :state="setupDraftState" />
       </div>

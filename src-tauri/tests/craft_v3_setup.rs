@@ -612,7 +612,7 @@ fn p3_the_assistant_drafts_a_story_bible_change_from_the_owners_words() {
     assert_eq!(draft["draft"]["targetAuthority"]["artifactType"], "StoryBible");
     assert_eq!(
         draft["draft"]["items"][0],
-        json!({"path":"antagonist.method","before":"借据和打手","after":"收买码头的账房"})
+        json!({"path":"antagonist.method","before":"借据和打手","after":"收买码头的账房","writtenConflicts":[]})
     );
     let inputs = fixture.gateway.draft_inputs.lock().unwrap();
     assert_eq!(inputs[0]["request"], "把彭三的手段改成收买码头的账房");

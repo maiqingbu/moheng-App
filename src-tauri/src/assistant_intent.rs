@@ -305,7 +305,29 @@ pub fn draft_setup_change(
                 .map(|draft| (draft, model_run_id))
         });
     match drafted {
-        Ok((Some(draft), model_run_id)) => json!({"draft":draft,"modelRunId":model_run_id}),
+        Ok((Some(mut draft), model_run_id)) => {
+            // P3: where written chapters still say what is being changed.
+            let chapters = state
+                .manager
+                .with_read_connection(project_id, now, |connection| {
+                    crate::repositories::narrative::NarrativeRepository::final_bodies_by_chapter(
+                        connection, project_id, 10_000,
+                    )
+                    .map_err(|error| {
+                        crate::project_db::ManagerError::ProjectCommand(error.to_string())
+                    })
+                })
+;
+            match chapters {
+                Ok(chapters) => {
+                    draft["items"] =
+                        crate::craft_setup::written_conflicts(&draft["items"], &chapters);
+                }
+                // Not "no conflicts": the chapters could not be read.
+                Err(_) => draft["writtenConflictsUnavailable"] = json!(true),
+            }
+            json!({"draft":draft,"modelRunId":model_run_id})
+        }
         Ok((None, _)) => no_draft("NOT_ABOUT_THE_STORY_BIBLE".into()),
         Err(error) => no_draft(error),
     }

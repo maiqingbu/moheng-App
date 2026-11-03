@@ -155,7 +155,13 @@ export interface AssistantIntentResolution {
   fallbackReason?: string | null
 }
 /** P3: one story bible change in a draft: the field, what it is, what it becomes. */
-export interface SetupDraftItem { path: string; before: unknown; after: unknown }
+export interface SetupDraftItem {
+  path: string
+  before: unknown
+  after: unknown
+  /** P3: sentences of written chapters that still say the old value. */
+  writtenConflicts?: { chapterNo: number; quote: string }[]
+}
 /** P3: a story bible change drafted from the owner's words; nothing is written yet. */
 export interface SetupChangeDraft {
   targetAuthority: { artifactType: 'StoryBible'; artifactId: string }
@@ -163,6 +169,8 @@ export interface SetupChangeDraft {
   /** The touched top-level fields as they are now. */
   base: Record<string, unknown>
   patch: Record<string, unknown>
+  /** The written chapters could not be read, so conflicts are unknown. */
+  writtenConflictsUnavailable?: boolean
 }
 export interface SetupChangeDraftResult { draft: SetupChangeDraft | null; reason?: string; modelRunId?: string }
 export interface SupportCheckpointProjection { checkpointId: string; projectId: string; projectRevision: number; status: 'SAFE' | 'CHECKPOINT_STALE' }
