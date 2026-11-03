@@ -103,7 +103,8 @@
   - 每章都记上了事实（3–11 条）和一条事件；事件 10 条、关系 6 条、伏笔 3 条（都已从“埋下”推进到“强化”）、谜题 4 层进行中、剧情线索有推进。
   - 推进：第 4–8 章依次完成第 1 阶段的 5 步，第 9、10 章推进第 2 阶段，一章一步。分段正常，最长一段 167 字。
   - 小问题：伏笔和线索在审计没写描述时，用引文当描述（比如“柳莺的目光已经钉在他手上……”），读起来不像伏笔说明。要改的话，就在提示里要求新线索必须写一句描述。
-- **下一步**：P1 收尾（上面的描述问题），然后按负责人的安排继续 P2–P5 的剩余项，检查以下几项（分析办法参照会话记录里第 20 轮的做法：查 BookPlan 的 stages/steps、`state_deltas` 里 SATISFIED 的章号、各章的 `chapterGoal`、提醒内容）：
+- **P1 收尾（2026-11-03）**：新线索都要写一句自己的描述（提示），没写时用“待兑现：兑现对象”，最后才用引文（`production::thread_description`）。等下一轮真实验收确认。
+- **下一步**：按顺序继续 P2–P4 的剩余项（负责人 11-03：按顺序做），检查以下几项（分析办法参照会话记录里第 20 轮的做法：查 BookPlan 的 stages/steps、`state_deltas` 里 SATISFIED 的章号、各章的 `chapterGoal`、提醒内容）：
   1. 方向是否一次通过，阶段里有没有小步；
   2. 第 4–10 章是否按小步推进，有没有出现一章写完一个阶段；
   3. 第 8–10 章有没有原地打转；
@@ -160,8 +161,12 @@
 - [x] 四个环节都接上了 skill：`chapter_craft::setup_guidance(stage)` 给故事方向、故事底稿、全书方向、卷方向的模型输入加上 `craftGuidance`，四个提示词都写了“craftGuidance holds the selected story methods for this step; follow them.”（测试 `p2_the_setup_and_direction_steps_are_given_their_skills`，以及 `craft_v3_setup` 里的故事底稿测试）。
 - [x] 覆盖检查：47 个 skill 里，原来有 3 个任何环节都选不中：S04 配角与反派、S07 核心机制与力量体系、S43 长篇健康诊断。原因是这几个环节不传信号。现在故事底稿带上“新主要人物、新能力”信号，卷方向带上“卷边界”信号，三个都能被选中（测试 `every_skill_can_be_selected_by_some_step`）。
 - 选中的环节和 skill：故事方向 S09；故事底稿 S01、S03、S06，加上 S04、S07 等；全书方向 S02、S08、S15、S16、S19；卷方向 S08、S17、S18、S23，加上 S43 等。
-- [ ] 回执里单独记录选了哪些 skill：还没做。模型输入里已经带着 `craftGuidance`，先不另记。
-- [ ] 新流程审稿要不要接 skill：还没评估。
+- [x] 记录每步用了哪些 skill（2026-11-03）：模型输入带着 `craftGuidance` 时，每次模型调用都会写一条 `MODEL_CRAFT_SKILLS` 事件（模型调用编号、步骤、环节、skill 编号），开篇设置的几步和写章节的各步都覆盖（`runtime::record_model_craft_skills`，测试在 `craft_v3_setup`）。
+- [x] 评估新流程的审稿要不要接 skill（2026-11-03）：
+  - 新流程故意没有模型审稿这一步：正文问题由规则检查找出，交给改写环节修，改写环节已经按问题挑 skill（S46、S27、S32、S40）。
+  - 所以只在审稿环节用的 skill 在新流程里实际用不上：S37 章节叙事评估、S38 主动性与阅读欲望评估。S35 用在签约评估，S45 用在结局审计，这两个不受影响。
+  - 之前的“每个 skill 都能被选中”测试把审稿环节也算进去了，在新流程下偏乐观。
+  - 待负责人决定：(a) 不加，S37、S38 只给旧流程用；(b) 把 S38 的要点放进章规划，在规划时预防主角被动；(c) 新增一次模型审稿，每章多一次调用和费用。
 
 执行办法：
 1. `book_direction::plan`（PLAN_BOOK_DIRECTION）的输入加上 `craftGuidance = chapter_craft::guidance("book_plan", signals)`；`plan_volume`（PLAN_VOLUME_DIRECTION）加上 `guidance("volume_plan", …)`。两个提示词都写明“craftGuidance holds the selected methods; follow them”。

@@ -248,6 +248,19 @@ fn generating_story_bible_commits_three_candidates_without_a_head() {
         "码头账房林满"
     );
     assert_eq!(inputs[0]["input"]["adjustment"], "多些人情味");
+    // P2: which skills a step used is recorded with its model run.
+    let connection = fixture.manager.open(&fixture.project_id, "", NOW).unwrap();
+    let recorded: String = connection
+        .query_row(
+            "SELECT payload_json FROM production_events WHERE project_id=?1 AND event_type='MODEL_CRAFT_SKILLS' AND json_extract(payload_json,'$.capability')='GENERATE_STORY_BIBLE'",
+            [&fixture.project_id],
+            |row| row.get(0),
+        )
+        .expect("the skills the story bible step used");
+    drop(connection);
+    let recorded: Value = serde_json::from_str(&recorded).unwrap();
+    assert_eq!(recorded["stage"], "story_setup");
+    assert!(recorded["skillIds"].as_array().unwrap().contains(&json!("S01")), "{recorded}");
     // P2: the story bible is planned with the story setup skills.
     assert_eq!(inputs[0]["input"]["craftGuidance"]["stage"], "story_setup");
     assert!(inputs[0]["input"]["craftGuidance"]["skills"]

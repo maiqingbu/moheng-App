@@ -2343,6 +2343,28 @@ fn diagnostic_utc_now(connection: &Connection, fallback: &str) -> String {
         .unwrap_or_else(|_| fallback.to_string())
 }
 
+/// P2: the skills a model run's input carried (`craftGuidance`), recorded
+/// with the run so each step's choice of skills can be read back.
+pub fn record_model_craft_skills(
+    connection: &Connection,
+    spec: &ModelRunSpec,
+    stage: &str,
+    skill_ids: &[String],
+    now: &str,
+) -> Result<(), RuntimeError> {
+    connection.execute(
+        "INSERT OR IGNORE INTO production_events(event_id, project_id, job_id, event_type, payload_json, created_at) SELECT ?1, project_id, ?2, 'MODEL_CRAFT_SKILLS', ?3, ?4 FROM model_runs WHERE model_run_id=?5",
+        libsql_rusqlite::params![
+            format!("event:craft-skills:{}", spec.model_run_id),
+            spec.job_id,
+            serde_json::json!({"modelRunId":spec.model_run_id,"capability":spec.capability,"stage":stage,"skillIds":skill_ids}).to_string(),
+            now,
+            spec.model_run_id
+        ],
+    )?;
+    Ok(())
+}
+
 fn record_model_request_started(
     connection: &Connection,
     spec: &ModelRunSpec,

@@ -1092,8 +1092,23 @@ fn execute_production_model_with_profile_once(
     now: &str,
 ) -> Result<ModelRunOutcome, String> {
     let spec = priced_model_run_spec(gateway, spec, capability, &input, now)?;
+    // P2: the skills this step was given (setup steps wrap their input).
+    let guidance = [&input["craftGuidance"], &input["input"]["craftGuidance"]]
+        .into_iter()
+        .find(|guidance| guidance.is_object())
+        .cloned();
     let mut transport = GatewayTransport::with_profile(gateway, profile, capability, input);
     DurableModelRunner::prepare(connection, &spec, now).map_err(|error| error.to_string())?;
+    if let Some(guidance) = guidance {
+        crate::repositories::runtime::record_model_craft_skills(
+            connection,
+            &spec,
+            guidance["stage"].as_str().unwrap_or_default(),
+            &crate::chapter_craft::guidance_skill_ids(&guidance),
+            now,
+        )
+        .map_err(|error| error.to_string())?;
+    }
     let mut outcome = match DurableModelRunner::execute(connection, &mut transport, &spec, now) {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -4213,16 +4228,7 @@ fn run_chapter_production_inner(
             }
             continue;
         }
-        let description = item
-            .description
-            .as_deref()
-            .filter(|description| !description.trim().is_empty())
-            .or_else(|| {
-                item.evidence
-                    .as_ref()
-                    .map(|evidence| evidence.quote.as_str())
-            })
-            .unwrap_or(&item.thread_ref);
+        let description = thread_description(item);
         // P1: a hint, key object or mystery planted for a later payoff is a
         // foreshadow, which later chapters reinforce and recover.
         if is_foreshadow(item.promotion_signals, item.fulfillment_object.as_deref()) {
@@ -5547,6 +5553,17 @@ pub(crate) fn entity_kind(entity_type: &str) -> &'static str {
         "CREATURE" | "ANIMAL" | "BEAST" | "MONSTER" | "SPIRIT" => "CREATURE",
         _ => "OBJECT",
     }
+}
+
+/// What a new thread is about: its description, else the payoff it waits
+/// for, else the quote it was found in (real run round 29: quotes read as
+/// no description at all).
+fn thread_description(item: &ContinuityCandidate) -> String {
+    let given = |text: Option<&str>| text.filter(|text| !text.trim().is_empty()).map(ToOwned::to_owned);
+    given(item.description.as_deref())
+        .or_else(|| given(item.fulfillment_object.as_deref()).map(|payoff| format!("待兑现：{payoff}")))
+        .or_else(|| item.evidence.as_ref().map(|evidence| evidence.quote.clone()))
+        .unwrap_or_else(|| item.thread_ref.clone())
 }
 
 /// P1 (owner decision 2026-11-03): a new thread is a foreshadow when it is
@@ -7126,6 +7143,25 @@ mod tests {
         let body = "雨下了一夜。陆照和阿沅擦肩而过，谁也没看谁。药炉还没熄。";
         let mut audit = relation_audit("阿沅", "信任", 1);
         assert_eq!(bind_cited_evidence(&mut audit, body).len(), 0);
+    }
+
+    #[test]
+    fn a_thread_without_a_description_is_named_by_its_payoff_before_its_quote() {
+        // Real run round 29: foreshadows read "柳莺的目光已经钉在他手上……".
+        let candidate = |json: Value| -> ContinuityCandidate { serde_json::from_value(json).unwrap() };
+        let evidence = json!({"start":0,"end":4,"quote":"他按了按"});
+        assert_eq!(
+            thread_description(&candidate(json!({"threadRef":"t","disposition":"ADVANCE","description":"暗格里藏着什么","fulfillmentObject":"暗格","evidence":evidence}))),
+            "暗格里藏着什么"
+        );
+        assert_eq!(
+            thread_description(&candidate(json!({"threadRef":"t","disposition":"ADVANCE","fulfillmentObject":"地窖暗格","evidence":evidence}))),
+            "待兑现：地窖暗格"
+        );
+        assert_eq!(
+            thread_description(&candidate(json!({"threadRef":"t","disposition":"ADVANCE","description":" ","evidence":evidence}))),
+            "他按了按"
+        );
     }
 
     #[test]
