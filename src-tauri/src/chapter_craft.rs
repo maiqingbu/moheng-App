@@ -270,11 +270,46 @@ pub fn is_unbroken(body: &str) -> bool {
     body.lines().any(|paragraph| paragraph.chars().count() > 300)
 }
 
+/// Real run round 32: Markdown the writer leaves in the prose, which the
+/// signing check rejects (F1-2): a line of only `*`, `-` or `_` (a scene
+/// break) goes, leaving the blank line; heading, bold and list marks go.
+fn strip_markdown(body: &str) -> String {
+    let lines = body
+        .lines()
+        .filter(|line| {
+            let line = line.trim();
+            line.is_empty() || !line.chars().all(|c| matches!(c, '*' | '-' | '_' | '＊' | ' '))
+        })
+        .map(|line| {
+            let indent = &line[..line.len() - line.trim_start().len()];
+            let text = line.trim_start();
+            let text = text.trim_start_matches('#');
+            let text = if text.len() < line.trim_start().len() {
+                text.trim_start()
+            } else {
+                text
+            };
+            let text = text
+                .strip_prefix("- ")
+                .or_else(|| text.strip_prefix("* "))
+                .unwrap_or(text);
+            format!("{indent}{}", text.replace("**", ""))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut stripped = lines;
+    while stripped.contains("\n\n\n") {
+        stripped = stripped.replace("\n\n\n", "\n\n");
+    }
+    stripped
+}
+
 /// Chinese typography for committed prose (owner rule: signing checks forbid
 /// mixed full/half-width punctuation and repeated punctuation): half-width
 /// punctuation becomes full-width, and a period touching ASCII letters or
 /// digits becomes `．` so labels, decimals and dates survive.
 pub fn normalize_typography(body: &str) -> String {
+    let body = strip_markdown(body);
     let chars = body.chars().collect::<Vec<_>>();
     let ascii_alnum = |index: Option<usize>| {
         index
@@ -1597,6 +1632,18 @@ fn phrases_used(texts: &[String], from: usize, times: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn markdown_left_in_the_prose_is_taken_out_before_signing_reads_it() {
+        // Real run round 32: "* * *" scene breaks failed signing (F1-2,
+        // leftover Markdown) and no model evaluation ran.
+        let body = "他抬头看。\n\n* * *\n\n残渣里有光。\n\n---\n\n## 第二幕\n**阿公**没回头。\n- 一\n* 二";
+        assert_eq!(
+            normalize_typography(body),
+            "他抬头看。\n\n残渣里有光。\n\n第二幕\n阿公没回头。\n一\n二"
+        );
+    }
+
 
     #[test]
     fn every_chapter_plan_weighs_the_protagonists_agency_and_the_readers_desire() {
