@@ -1396,9 +1396,7 @@ fn create_b08_change_request_proposal(
         "basedOnRevision":context.current_revision,
         "sourceAuditRef":reference(context.audit),
         "sourceChapterRef":reference(context.candidate),
-        "evidence":item.evidence.as_ref().map(|evidence| {
-            json!({"start":evidence.start,"end":evidence.end,"quote":evidence.quote})
-        })
+        "evidence":item.evidence.as_ref().map(EvidenceSpan::to_json)
     });
     let artifact = artifact(
         context.project_id,
@@ -3990,7 +3988,7 @@ fn run_chapter_production_inner(
                 "fulfillmentObject": candidate.fulfillment_object,
                 "resumeCondition": candidate.resume_condition,
                 "promotionSignals": signal,
-                "evidence": candidate.evidence.as_ref().map(|evidence| json!({"start":evidence.start,"end":evidence.end,"quote":evidence.quote}))
+                "evidence": candidate.evidence.as_ref().map(EvidenceSpan::to_json)
             })
         })
         .collect::<Vec<_>>();
@@ -4169,7 +4167,7 @@ fn run_chapter_production_inner(
                     "outcome":"DEFERRED",
                     "reason":"连续性责任已通过桥接继续保留。",
                     "sourceRef":item.thread_ref,
-                    "payloadJson":{"bridge":bridge,"sourceChapterRef":reference(&candidate),"sourceAuditRef":reference(&audit),"evidence":item.evidence.as_ref().map(|evidence| json!({"start":evidence.start,"end":evidence.end,"quote":evidence.quote}))}
+                    "payloadJson":{"bridge":bridge,"sourceChapterRef":reference(&candidate),"sourceAuditRef":reference(&audit),"evidence":item.evidence.as_ref().map(EvidenceSpan::to_json)}
                 }));
             }
             continue;
@@ -4201,7 +4199,7 @@ fn run_chapter_production_inner(
                 "secretPayloadRef":foreshadow.secret_payload_ref,
                 "payloadJson":{"sourceAuthority":"B08_ACTUAL_NARRATIVE","sourceArtifactId":final_id,"sourceVersion":1,"promotionDecision":promotion_decision,"deltaMode":"EXISTING_AUTHORITY_UPDATE",
                     "resumeCondition":json!({"kind":"ENTITY_PRESENT","value":foreshadow.secret_payload_ref}),
-                    "evidence":item.evidence.as_ref().map(|evidence| json!({"start":evidence.start,"end":evidence.end,"quote":evidence.quote}))}
+                    "evidence":item.evidence.as_ref().map(EvidenceSpan::to_json)}
             }));
             effective_continuity_refs.insert(item.thread_ref.clone());
             if item.disposition == "DEFER_WITH_BRIDGE" {
@@ -4241,7 +4239,7 @@ fn run_chapter_production_inner(
                 "secretPayloadRef":item.fulfillment_object.as_deref().and_then(payoff_ref),
                 "payloadJson":{"sourceAuthority":"B08_ACTUAL_NARRATIVE","sourceArtifactId":final_id,"sourceVersion":1,"deltaMode":"NEW_CONTINUITY",
                     "fulfillmentObject":item.fulfillment_object,
-                    "evidence":item.evidence.as_ref().map(|evidence| json!({"start":evidence.start,"end":evidence.end,"quote":evidence.quote}))}
+                    "evidence":item.evidence.as_ref().map(EvidenceSpan::to_json)}
             }));
             continue;
         }
@@ -4263,7 +4261,7 @@ fn run_chapter_production_inner(
             "outcome":authority_level,
             "reason":if authority_level == "B" {"精确证据、兑现对象、兑现条件与定级信号均齐备。"} else {"证据、兑现对象或兑现条件不完整，保留为 C 级候选。"},
             "sourceRef":item.thread_ref,
-            "payloadJson":{"ruleVersion":crate::narrative::THREAD_PROMOTION_RULE_VERSION,"promotionSignals":item.promotion_signals,"evidence":item.evidence.as_ref().map(|evidence| json!({"start":evidence.start,"end":evidence.end,"quote":evidence.quote})),"fulfillmentObject":item.fulfillment_object,"resumeCondition":resume_condition}
+            "payloadJson":{"ruleVersion":crate::narrative::THREAD_PROMOTION_RULE_VERSION,"promotionSignals":item.promotion_signals,"evidence":item.evidence.as_ref().map(EvidenceSpan::to_json),"fulfillmentObject":item.fulfillment_object,"resumeCondition":resume_condition}
         }));
         let mut obligation_payload = json!({
             "sourceAuthority":"B08_ACTUAL_NARRATIVE",
@@ -4506,7 +4504,7 @@ fn run_chapter_production_inner(
                 })
                 .and_then(|condition| condition.get("kind").and_then(Value::as_str))
                 .unwrap_or("UNSPECIFIED");
-            json!({"taskId":item.task_id,"plannedExpected":expected,"actualObserved":item.status,"evidence":{"start":item.evidence.start,"end":item.evidence.end,"quote":item.evidence.quote}})
+            json!({"taskId":item.task_id,"plannedExpected":expected,"actualObserved":item.status,"evidence":item.evidence.to_json()})
         })
         .collect::<Vec<_>>();
     // Reality is the post-audit observation ledger, not only task status.  A
@@ -4520,7 +4518,7 @@ fn run_chapter_production_inner(
             "subjectId":item.subject_id,
             "predicate":item.predicate,
             "actualObserved":"COMMITTED",
-            "evidence":{"start":item.evidence.start,"end":item.evidence.end,"quote":item.evidence.quote}
+            "evidence":item.evidence.to_json()
         })
     }));
     reality.extend(extraction.knowledge_candidates.iter().map(|item| {
@@ -4530,7 +4528,7 @@ fn run_chapter_production_inner(
             "factId":item.fact_id,
             "knowerId":item.knower_id,
             "actualObserved":item.epistemic_state,
-            "evidence":{"start":item.evidence.start,"end":item.evidence.end,"quote":item.evidence.quote}
+            "evidence":item.evidence.to_json()
         })
     }));
     reality.extend(extraction.continuity_candidates.iter().filter(|item| effective_continuity_refs.contains(&item.thread_ref)).map(|item| {
@@ -4538,7 +4536,7 @@ fn run_chapter_production_inner(
             "kind":"CONTINUITY",
             "threadRef":item.thread_ref,
             "actualObserved":item.disposition,
-            "evidence":item.evidence.as_ref().map(|evidence| json!({"start":evidence.start,"end":evidence.end,"quote":evidence.quote}))
+            "evidence":item.evidence.as_ref().map(EvidenceSpan::to_json)
         })
     }));
     let mut model_run_refs = vec![render_run_id.clone(), audit_run_id.clone()];
@@ -4652,7 +4650,7 @@ fn run_chapter_production_inner(
             "entityType":item.entity_type.as_deref().map(entity_kind),
             "sourceArtifactId":final_ref.artifact_id,
             "sourceVersion":final_ref.version,
-            "evidenceRange":{"start":item.evidence.start,"end":item.evidence.end,"quote":item.evidence.quote},
+            "evidenceRange":item.evidence.to_json(),
             "supersedesFactId":extraction.canon_transitions.get(&item.fact_id),
             "alsoSupersedesFactIds":extraction.canon_duplicate_transitions.get(&item.fact_id)
         }
@@ -4883,6 +4881,13 @@ struct EvidenceSpan {
     quote: String,
     #[serde(default)]
     rebound: bool,
+}
+
+impl EvidenceSpan {
+    /// The span as recorded: where it is and what it says.
+    fn to_json(&self) -> Value {
+        json!({"start":self.start,"end":self.end,"quote":self.quote})
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]

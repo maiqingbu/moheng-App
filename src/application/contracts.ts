@@ -171,6 +171,8 @@ export interface SetupChangeDraft {
   patch: Record<string, unknown>
   /** The written chapters could not be read, so conflicts are unknown. */
   writtenConflictsUnavailable?: boolean
+  /** The model could not judge rewordings; only literal matches are listed. */
+  writtenConflictsJudgedUnavailable?: boolean
 }
 export interface SetupChangeDraftResult { draft: SetupChangeDraft | null; reason?: string; modelRunId?: string }
 export interface SupportCheckpointProjection { checkpointId: string; projectId: string; projectRevision: number; status: 'SAFE' | 'CHECKPOINT_STALE' }

@@ -388,6 +388,18 @@ impl NarrativeRepository {
         Ok((bodies, truncated))
     }
 
+    /// The book's recorded mysteries: id, lifecycle and description.
+    pub fn mystery_obligations(
+        connection: &Connection,
+        project_id: &str,
+    ) -> Result<Vec<(String, String, String)>, NarrativeRepositoryError> {
+        let mut statement = connection.prepare(
+            "SELECT obligation_id,lifecycle,description FROM narrative_obligations WHERE project_id=?1 AND obligation_type='MYSTERY' ORDER BY obligation_id",
+        )?;
+        let rows = statement.query_map([project_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// P3: the committed chapters' bodies with their numbers, in order.
     pub fn final_bodies_by_chapter(
         connection: &Connection,

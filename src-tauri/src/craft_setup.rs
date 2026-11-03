@@ -490,6 +490,85 @@ pub fn written_conflicts(items: &Value, chapters: &[(i64, String)]) -> Value {
     items
 }
 
+/// The most sentences sent to the model's conflict check.
+const CONFLICT_CANDIDATES_SENT: usize = 40;
+
+/// The person a changed bible field is about: the protagonist's, the
+/// antagonist's or a cast member's name; none for the world or mechanism.
+fn person_named_by(bible: &Value, path: &str) -> Option<String> {
+    let mut parts = path.split('.');
+    let name = match parts.next()? {
+        field @ ("protagonist" | "antagonist") => &bible[field]["name"],
+        "cast" => &bible["cast"][parts.next()?.parse::<usize>().ok()?]["name"],
+        _ => return None,
+    };
+    name.as_str().filter(|name| !name.is_empty()).map(ToOwned::to_owned)
+}
+
+/// Debt from P3: the sentences of written `chapters` that name the person a
+/// changed item is about, numbered for the model to judge which contradict
+/// the change (old settings said in other words).
+pub fn conflict_candidates(bible: &Value, items: &Value, chapters: &[(i64, String)]) -> Vec<Value> {
+    let named = items
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let path = item["path"].as_str()?;
+            Some((path.to_owned(), person_named_by(bible, path)?))
+        })
+        .collect::<Vec<_>>();
+    chapters
+        .iter()
+        .flat_map(|(chapter_no, body)| {
+            body.split_inclusive(['。', '！', '？']).map(move |sentence| (chapter_no, sentence.trim()))
+        })
+        .filter_map(|(chapter_no, sentence)| {
+            let paths = named
+                .iter()
+                .filter(|(_, name)| sentence.contains(name.as_str()))
+                .map(|(path, _)| path.clone())
+                .collect::<Vec<_>>();
+            (!paths.is_empty()).then_some((chapter_no, sentence, paths))
+        })
+        .take(CONFLICT_CANDIDATES_SENT)
+        .enumerate()
+        .map(|(id, (chapter_no, sentence, paths))| {
+            json!({"id":id,"chapterNo":chapter_no,"quote":sentence,"paths":paths})
+        })
+        .collect()
+}
+
+/// `items` with the sentences the model judged to contradict them added to
+/// their `writtenConflicts`, each once and within the shown limit; a pick
+/// that is no candidate of that item is ignored.
+pub fn with_judged_conflicts(items: &Value, candidates: &[Value], judged: &Value) -> Value {
+    let mut items = items.clone();
+    for pick in judged["conflicts"].as_array().into_iter().flatten() {
+        let path = pick["path"].as_str().unwrap_or_default();
+        let Some(candidate) = candidates.iter().find(|candidate| {
+            candidate["id"] == pick["id"]
+                && candidate["paths"].as_array().is_some_and(|paths| paths.iter().any(|p| p == path))
+        }) else {
+            continue;
+        };
+        let Some(item) = items
+            .as_array_mut()
+            .into_iter()
+            .flatten()
+            .find(|item| item["path"] == path)
+        else {
+            continue;
+        };
+        let conflict = json!({"chapterNo":candidate["chapterNo"],"quote":candidate["quote"]});
+        let listed = item["writtenConflicts"].as_array().cloned().unwrap_or_default();
+        if !listed.contains(&conflict) && listed.len() < WRITTEN_CONFLICTS_SHOWN {
+            item["writtenConflicts"] = json!(listed.into_iter().chain([conflict]).collect::<Vec<_>>());
+        }
+    }
+    items
+}
+
 /// P3: an approved change request's patch to the confirmed story bible,
 /// checked as a new bible is and written as its next version by this owner.
 pub fn apply_typed_change(
@@ -729,6 +808,39 @@ mod tests {
             listed[1]["writtenConflicts"],
             json!([{"chapterNo":6,"quote":"老董又来赊账，满嘴俗语地说着软话。"}])
         );
+    }
+
+    #[test]
+    fn sentences_naming_the_person_a_change_is_about_go_to_the_conflict_check() {
+        // Debt from P3: written chapters that say the old setting in other
+        // words are found by asking the model about the sentences naming
+        // that person.
+        let items = json!([
+            {"path":"antagonist.method","before":"借据、打手和码头的规矩","after":"收买码头的账房"},
+            {"path":"cast.1.speechStyle","before":"满嘴俗语","after":"说话慢"}
+        ]);
+        let chapters = vec![
+            (4, "彭三笑着递过一张欠条。林满没说话。".to_string()),
+            (6, "老董张口就是乡下俗话。彭三也在。".to_string()),
+        ];
+        let candidates = conflict_candidates(&bible(), &items, &chapters);
+        assert_eq!(
+            candidates,
+            vec![
+                json!({"id":0,"chapterNo":4,"quote":"彭三笑着递过一张欠条。","paths":["antagonist.method"]}),
+                json!({"id":1,"chapterNo":6,"quote":"老董张口就是乡下俗话。","paths":["cast.1.speechStyle"]}),
+                json!({"id":2,"chapterNo":6,"quote":"彭三也在。","paths":["antagonist.method"]})
+            ]
+        );
+        // The model's picks join the literal ones, once each.
+        let listed = written_conflicts(&items, &chapters);
+        let merged = with_judged_conflicts(
+            &listed,
+            &candidates,
+            &json!({"conflicts":[{"path":"cast.1.speechStyle","id":1},{"path":"antagonist.method","id":0},{"path":"antagonist.method","id":7}]}),
+        );
+        assert_eq!(merged[0]["writtenConflicts"], json!([{"chapterNo":4,"quote":"彭三笑着递过一张欠条。"}]));
+        assert_eq!(merged[1]["writtenConflicts"], json!([{"chapterNo":6,"quote":"老董张口就是乡下俗话。"}]));
     }
 
     #[test]

@@ -299,6 +299,7 @@ onMounted(() => {
           </div>
         </div>
         <p v-if="setupDraft.writtenConflictsUnavailable" class="banner warning">暂时读不到已写章节，无法列出和新设定冲突的地方。</p>
+        <p v-else-if="setupDraft.writtenConflictsJudgedUnavailable" class="banner warning">换了说法的冲突这次没能检查，下面只列出和原来字面一致的句子。</p>
         <div class="actions"><button class="btn primary" @click="submitSetupDraft">提交修改申请</button><button class="btn" @click="setupDraft = null">不改了</button></div>
         <CommandFeedback :state="setupDraftState" />
       </div>

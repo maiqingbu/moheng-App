@@ -278,7 +278,7 @@ pub fn approve_book_plan(
 /// P1: each mystery layer the direction planned, as a MYSTERY obligation
 /// that stays open until a chapter records its MYSTERY_RESOLVED event.  The
 /// opening's own CANON_REFS rule is not a mystery.
-pub fn book_mystery_obligations(book_plan: &Value, artifact_id: &str, version: i64) -> Vec<Value> {
+fn book_mystery_obligations(book_plan: &Value, artifact_id: &str, version: i64) -> Vec<Value> {
     book_plan
         .get("majorMysteryGoals")
         .and_then(Value::as_array)
@@ -295,6 +295,64 @@ pub fn book_mystery_obligations(book_plan: &Value, artifact_id: &str, version: i
             })
         })
         .collect()
+}
+
+/// The mystery changes writing approved `book_plan` makes in the project,
+/// for its commit; none for a plan not yet approved.
+pub fn book_mystery_deltas_for(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    book_plan: &Value,
+    artifact_id: &str,
+    version: i64,
+) -> Result<Vec<Value>, String> {
+    if book_plan["planningMaturity"] != "APPROVED" {
+        return Ok(Vec::new());
+    }
+    let recorded = crate::repositories::narrative::NarrativeRepository::mystery_obligations(
+        connection, project_id,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(book_mystery_deltas(book_plan, artifact_id, version, &recorded))
+}
+
+/// What writing `book_plan` (artifact `artifact_id`, `version`) changes in
+/// the `recorded` MYSTERY obligations (id, lifecycle, description): a layer
+/// new to the plan opens, a reworded open one takes the new wording with its
+/// progress, and an open one the plan no longer has is abandoned; resolved
+/// ones stay. Every writer of an approved book plan commits these.
+pub fn book_mystery_deltas(
+    book_plan: &Value,
+    artifact_id: &str,
+    version: i64,
+    recorded: &[(String, String, String)],
+) -> Vec<Value> {
+    let open = |lifecycle: &str| matches!(lifecycle, "APPROVED" | "PROGRESSING");
+    let planned = book_mystery_obligations(book_plan, artifact_id, version);
+    let mut deltas = Vec::new();
+    for mut mystery in planned.iter().cloned() {
+        match recorded.iter().find(|(id, _, _)| mystery["obligationId"] == id.as_str()) {
+            None => deltas.push(mystery),
+            Some((_, lifecycle, description))
+                if open(lifecycle) && mystery["description"] != description.as_str() =>
+            {
+                mystery["lifecycle"] = json!(lifecycle);
+                deltas.push(mystery);
+            }
+            Some(_) => {}
+        }
+    }
+    for (id, lifecycle, description) in recorded {
+        if open(lifecycle) && !planned.iter().any(|mystery| mystery["obligationId"] == id.as_str()) {
+            deltas.push(json!({
+                "obligationId":id,"scope":"BOOK","obligationType":"MYSTERY","authorityLevel":"B",
+                "lifecycle":"ABANDONED","description":description,"prerequisites":[],
+                "payloadJson":{"sourceArtifactId":artifact_id,"sourceVersion":version,
+                    "resumeCondition":{"kind":"AFTER_CHAPTER","value":0}}
+            }));
+        }
+    }
+    deltas
 }
 
 /// Seeds the post-signing goal fields from actual opening references when the
@@ -3330,6 +3388,42 @@ pub fn commit_opening_chapter_plan_owner(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_book_plan_keeps_its_mysteries_in_step_with_what_is_recorded() {
+        // Debt from P1: a revised book plan neither added nor withdrew its
+        // mysteries.
+        let plan = json!({"majorMysteryGoals":[
+            {"id":"mystery:book:1","volumeNo":1,"description":"第 1 层：缺页记着谁的债"},
+            {"id":"mystery:book:3","volumeNo":2,"description":"第 3 层：谁改了租约"}
+        ]});
+        let recorded = vec![
+            ("mystery:book:1".to_owned(), "PROGRESSING".to_owned(), "第 1 层：缺页去哪了".to_owned()),
+            ("mystery:book:2".to_owned(), "APPROVED".to_owned(), "第 2 层：师父怎么死的".to_owned()),
+            ("mystery:book:9".to_owned(), "RESOLVED".to_owned(), "已揭开的一层".to_owned()),
+        ];
+        let deltas = book_mystery_deltas(&plan, "plan:book:x", 2, &recorded);
+        let lifecycle = |id: &str| {
+            deltas
+                .iter()
+                .find(|delta| delta["obligationId"] == id)
+                .map(|delta| (delta["lifecycle"].clone(), delta["description"].clone()))
+        };
+        // Reworded: the new wording, its progress kept.
+        assert_eq!(lifecycle("mystery:book:1"), Some((json!("PROGRESSING"), json!("第 1 层：缺页记着谁的债"))));
+        // No longer planned: withdrawn.
+        assert_eq!(lifecycle("mystery:book:2").unwrap().0, json!("ABANDONED"));
+        // Newly planned: opened.
+        assert_eq!(lifecycle("mystery:book:3").unwrap().0, json!("APPROVED"));
+        // Already resolved: left as it is.
+        assert_eq!(lifecycle("mystery:book:9"), None);
+        assert_eq!(deltas.len(), 3);
+        // Nothing changed: nothing to write.
+        let same = vec![("mystery:book:1".to_owned(), "APPROVED".to_owned(), "第 1 层：缺页记着谁的债".to_owned()),
+            ("mystery:book:3".to_owned(), "APPROVED".to_owned(), "第 3 层：谁改了租约".to_owned())];
+        assert!(book_mystery_deltas(&plan, "plan:book:x", 2, &same).is_empty());
+    }
+
     use super::*;
 
     #[test]

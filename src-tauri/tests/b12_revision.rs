@@ -2839,3 +2839,62 @@ fn p3_a_setup_change_is_not_applied_before_the_owner_approves_it() {
     .is_err());
     assert_eq!(story_bible_head(&state, "p-p3-unapproved").0, 1);
 }
+
+#[test]
+fn an_approved_change_to_the_book_plan_keeps_its_mysteries_in_step() {
+    // Debt from P1: only the first approval recorded mysteries.
+    let state = test_state("p-b12-mysteries");
+    let project_id = "p-b12-mysteries";
+    let mut plan: Value = serde_json::from_str(include_str!(
+        "../../contracts/fixtures/valid/narrative-book-plan-r1-approved.json"
+    ))
+    .expect("approved book plan fixture");
+    plan["majorMysteryGoals"] =
+        json!([{"id":"mystery:book:1","volumeNo":1,"description":"第 1 层：缺页去哪了"}]);
+    {
+        let handle = state.manager.open(project_id, "", NOW).expect("open project");
+        insert_committed_artifact(&handle, project_id, "BookPlan", "plan:book:mysteries", "PROJECT", json!({"level":"PROJECT"}), plan, true);
+        handle
+            .execute(
+                "INSERT INTO narrative_obligations(obligation_id,project_id,scope,obligation_type,authority_level,source_artifact_id,source_version,description,prerequisites_json,resume_condition_json,lifecycle,created_at,updated_at) VALUES ('mystery:book:1',?1,'BOOK','MYSTERY','B','plan:book:mysteries',1,'第 1 层：缺页去哪了','[]','{\"kind\":\"AFTER_CHAPTER\",\"value\":0}','APPROVED',?2,?2)",
+                params![project_id, NOW],
+            )
+            .expect("record the mystery");
+    }
+    let digest = create_and_approve_change(
+        &state,
+        project_id,
+        "change:mysteries",
+        &["plan:book:mysteries"],
+        json!({
+            "targetAuthority":{"artifactType":"BookPlan","artifactId":"plan:book:mysteries"},
+            "patch":{"majorMysteryGoals":[{"id":"mystery:book:2","volumeNo":1,"description":"第 2 层：谁改了租约"}]}
+        }),
+    );
+    command(
+        &state,
+        project_id,
+        "change_request_apply",
+        "cmd:change:mysteries:apply",
+        0,
+        json!({"changeRequestId":"change:mysteries","impactDigest":digest}),
+    )
+    .expect("apply the book plan change");
+    state
+        .manager
+        .with_read_connection(project_id, NOW, |connection| {
+            let lifecycle = |id: &str| -> String {
+                connection
+                    .query_row(
+                        "SELECT lifecycle FROM narrative_obligations WHERE project_id=?1 AND obligation_id=?2",
+                        params![project_id, id],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or_else(|_| "MISSING".into())
+            };
+            assert_eq!(lifecycle("mystery:book:1"), "ABANDONED");
+            assert_eq!(lifecycle("mystery:book:2"), "APPROVED");
+            Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
+        })
+        .unwrap();
+}

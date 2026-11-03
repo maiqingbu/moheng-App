@@ -110,7 +110,7 @@ pub fn prompt_section(capability: &str) -> Option<String> {
 mod tests {
     /// Model steps without an output spec, and why their replies cannot
     /// fail a run unnoticed.
-    const UNSPECIFIED_STEPS: [(&str, &str); 10] = [
+    const UNSPECIFIED_STEPS: [(&str, &str); 11] = [
         (
             "PLAN_STRATEGY",
             "r1 plans: the plan contract sends a reply back to the planner",
@@ -138,6 +138,10 @@ mod tests {
         (
             "DRAFT_SETUP_CHANGE",
             "the story bible owner checks the draft; a failed reply falls back to a text-only proposal",
+        ),
+        (
+            "CHECK_SETUP_CONFLICTS",
+            "advisory: picks outside the candidates are ignored; a failed reply leaves the literal matches",
         ),
         (
             "OPENING_SIGNING_EVALUATION",

@@ -60,6 +60,7 @@ describe('FX-21 助手语义理解', () => {
     expect(page).toContain('v-for="conflict in item.writtenConflicts ?? []"')
     expect(page).toContain('已写章节里还是原来的写法')
     expect(page).toContain('setupDraft.writtenConflictsUnavailable')
+    expect(page).toContain('setupDraft.writtenConflictsJudgedUnavailable')
     expect(source('src/application/contracts.ts')).toContain('writtenConflicts?: { chapterNo: number; quote: string }[]')
     expect(source('src/infrastructure/tauri/frontendPort.ts')).toContain("'draft_setup_change'")
   })

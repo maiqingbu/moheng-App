@@ -249,6 +249,7 @@ fn classify_with_model(
 }
 
 pub const DRAFT_SETUP_CHANGE: &str = "DRAFT_SETUP_CHANGE";
+pub const CHECK_SETUP_CONFLICTS: &str = "CHECK_SETUP_CONFLICTS";
 
 /// P3 (owner decision 2026-11-03): the story bible change the owner's words
 /// ask for, drafted by the model and checked by the bible's owner, as
@@ -322,6 +323,40 @@ pub fn draft_setup_change(
                 Ok(chapters) => {
                     draft["items"] =
                         crate::craft_setup::written_conflicts(&draft["items"], &chapters);
+                    // Debt from P3: the old setting in other words, judged by
+                    // the model among the sentences naming the person.
+                    let candidates = crate::craft_setup::conflict_candidates(
+                        &bible.payload,
+                        &draft["items"],
+                        &chapters,
+                    );
+                    if !candidates.is_empty() {
+                        let changes = draft["items"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(|item| json!({"path":item["path"],"before":item["before"],"after":item["after"]}))
+                            .collect::<Vec<_>>();
+                        match run_assistant_model(
+                            state,
+                            gateway,
+                            project_id,
+                            CHECK_SETUP_CONFLICTS,
+                            format!("setup-conflicts:{model_run_id}"),
+                            json!({"changes":changes,"sentences":candidates}),
+                            now,
+                        ) {
+                            Ok((judged, _)) => {
+                                draft["items"] = crate::craft_setup::with_judged_conflicts(
+                                    &draft["items"],
+                                    &candidates,
+                                    &judged,
+                                );
+                            }
+                            // Only the literal matches are listed then.
+                            Err(_) => draft["writtenConflictsJudgedUnavailable"] = json!(true),
+                        }
+                    }
                 }
                 // Not "no conflicts": the chapters could not be read.
                 Err(_) => draft["writtenConflictsUnavailable"] = json!(true),
