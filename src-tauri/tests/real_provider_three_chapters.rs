@@ -267,7 +267,9 @@ impl ModelOverride {
         // Owner decision (2026-10-24): acceptance may run its default steps on
         // another model while the configured one keeps cutting output short.
         let main = std::env::var("MOHENG_REAL_MAIN_MODEL").ok();
-        if render.is_none() && main.is_none() {
+        // P4: the writer's thinking (high, max or off), for a comparison run.
+        let render_thinking = std::env::var("MOHENG_REAL_RENDER_THINKING").ok();
+        if render.is_none() && main.is_none() && render_thinking.is_none() {
             return None;
         }
         let original = ProviderSettingsRepository::read_global(paths).unwrap();
@@ -279,8 +281,17 @@ impl ModelOverride {
             settings["modelId"] = json!(model);
             settings["model"] = json!(model);
         }
+        if let Some(thinking) = &render_thinking {
+            settings["thinking"]["render"] = match thinking.as_str() {
+                "off" => json!({"enabled":false}),
+                effort => json!({"enabled":true,"effort":effort}),
+            };
+        }
         ProviderSettingsRepository::write_global(paths, &settings).unwrap();
-        println!("REAL_MODEL_OVERRIDE renderModelId={render:?} modelId={main:?}");
+        println!(
+            "REAL_MODEL_OVERRIDE renderModelId={render:?} modelId={main:?} renderThinking={:?}",
+            ProviderSettingsRepository::read_global(paths).unwrap()["thinking"]["render"]
+        );
         Some(Self {
             paths: paths.clone(),
             original,
