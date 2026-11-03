@@ -4238,10 +4238,7 @@ fn run_chapter_production_inner(
             foreshadow_delta.push(json!({
                 "foreshadowId":authority_id,"intent":description,"status":"PLANTED",
                 "plantChapterId":chapter_id,
-                // The ref is an id (OpaqueId): no whitespace, 1 to 200 characters.
-                "secretPayloadRef":item.fulfillment_object.as_deref()
-                    .map(|payoff| payoff.split_whitespace().collect::<Vec<_>>().join("_").chars().take(200).collect::<String>())
-                    .filter(|payoff| !payoff.is_empty()),
+                "secretPayloadRef":item.fulfillment_object.as_deref().and_then(payoff_ref),
                 "payloadJson":{"sourceAuthority":"B08_ACTUAL_NARRATIVE","sourceArtifactId":final_id,"sourceVersion":1,"deltaMode":"NEW_CONTINUITY",
                     "fulfillmentObject":item.fulfillment_object,
                     "evidence":item.evidence.as_ref().map(|evidence| json!({"start":evidence.start,"end":evidence.end,"quote":evidence.quote}))}
@@ -5556,6 +5553,13 @@ pub(crate) fn entity_kind(entity_type: &str) -> &'static str {
         "CREATURE" | "ANIMAL" | "BEAST" | "MONSTER" | "SPIRIT" => "CREATURE",
         _ => "OBJECT",
     }
+}
+
+/// A foreshadow's payoff as its ref, an OpaqueId: no whitespace, 1 to 200
+/// characters.
+pub(crate) fn payoff_ref(payoff: &str) -> Option<String> {
+    Some(payoff.split_whitespace().collect::<Vec<_>>().join("_").chars().take(200).collect::<String>())
+        .filter(|payoff| !payoff.is_empty())
 }
 
 /// What a new thread is about: its description, else the payoff it waits

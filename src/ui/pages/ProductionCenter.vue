@@ -44,6 +44,10 @@ const signing = computed(() => production.value?.signing)
 const bookPlan = computed(() => production.value?.bookPlan)
 const passingSigningPlatforms = computed(() => signing.value?.platformMatrix?.filter(item => item.mainstream && item.status === 'PASS') ?? [])
 const newResponsibilities = computed(() => production.value?.newResponsibilities ?? [])
+// Owner decision 2026-11-03: open foreshadows the owner can rewrite or abandon.
+const openForeshadows = computed(() => production.value?.openForeshadows ?? [])
+const foreshadowIntentDraft = reactive<Record<string, string>>({})
+const foreshadowPayoffDraft = reactive<Record<string, string>>({})
 const newHardConstraintCount = computed(() => newResponsibilities.value.filter(item =>
   ['A', 'B'].includes(item.authorityLevel) && !['ABANDONED', 'RESOLVED', 'SUPERSEDED'].includes(item.lifecycle),
 ).length)
@@ -170,6 +174,35 @@ function resumeConditionForm(item: ResponsibilityItem): ResumeConditionDraft {
 
 function updateResumeConditionForm(item: ResponsibilityItem, value: ResumeConditionDraft) {
   resumeConditionDraft[item.threadRef] = value
+}
+
+type ForeshadowItem = NonNullable<ProductionCenterProjection['openForeshadows']>[number]
+async function adjustForeshadow(item: ForeshadowItem, action: 'EDIT' | 'DELETE') {
+  if (responsibilityAdjustmentInFlight.value) return
+  const key = `foreshadow-${item.threadRef}`
+  const payload: Record<string, unknown> = { threadRef: item.threadRef, action }
+  if (action === 'EDIT') {
+    const intent = foreshadowIntentDraft[item.threadRef]?.trim()
+    const payoff = foreshadowPayoffDraft[item.threadRef]?.trim()
+    if (!intent && !payoff) return
+    if (intent) payload.intent = intent
+    if (payoff) payload.fulfillmentObject = payoff
+  }
+  responsibilityAdjustmentInFlight.value = item.threadRef
+  lastCommand.value = key
+  try {
+    await store.runCommand(key, {
+      type: 'thread_responsibility_adjust',
+      projectId: project.value?.id,
+      expectedRevision: project.value?.revision,
+      payload,
+    })
+    await store.loadProduction(true)
+  } catch {
+    // CommandFeedback keeps the typed result for the user.
+  } finally {
+    responsibilityAdjustmentInFlight.value = null
+  }
 }
 
 async function adjustResponsibility(
@@ -663,6 +696,20 @@ function costText(value: number | null | undefined) {
       <MetricCard label="准入检查" :value="gateLabel(production.gate?.status)" :note="productErrorMessage(production.gate?.reason, '等待检查结果。')" />
       <MetricCard label="后续安排" :value="reconciliationLabel(production.reconciliation)" note="系统会根据当前记录给出下一步" />
     </div>
+
+    <section v-if="openForeshadows.length" class="card pad section" data-open-foreshadows>
+      <div class="card-head"><div><h2 class="card-title">还没回收的伏笔 {{ openForeshadows.length }} 条</h2><p class="muted">可以改写伏笔的说法和要回收的东西，或者放弃这条伏笔；原始记录都会保留。</p></div></div>
+      <div v-for="item in openForeshadows" :key="item.threadRef" class="section" style="display:grid;gap:6px;border-top:1px solid var(--line);padding-top:10px">
+        <strong>{{ item.intent }}</strong>
+        <span v-if="item.payoff" class="muted">要回收的：{{ item.payoff }}</span>
+        <label class="muted">改写说法<input v-model="foreshadowIntentDraft[item.threadRef]" class="input" /></label>
+        <label class="muted">改写要回收的<input v-model="foreshadowPayoffDraft[item.threadRef]" class="input" /></label>
+        <div class="actions">
+          <button class="btn" :disabled="responsibilityAdjustmentInFlight !== null" @click="adjustForeshadow(item, 'EDIT')">保存改写</button>
+          <button class="btn" :disabled="responsibilityAdjustmentInFlight !== null" @click="adjustForeshadow(item, 'DELETE')">放弃这条伏笔</button>
+        </div>
+      </div>
+    </section>
 
     <section v-if="newResponsibilities.length" class="card pad section" data-new-responsibilities>
       <div class="card-head">

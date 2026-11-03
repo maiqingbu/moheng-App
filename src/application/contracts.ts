@@ -792,6 +792,14 @@ export interface ProductionCenterProjection {
     evidence?: { start: number; end: number; quote: string } | null
     ruleVersion?: string | null
   }>
+  /** Owner decision 2026-11-03: foreshadows still open, to rewrite or abandon. */
+  openForeshadows?: Array<{
+    threadRef: string
+    intent: string
+    payoff?: string | null
+    recoverWindowEndChapter?: string | null
+    status: string
+  }>
   gate?: { status: 'PENDING' | 'PASS' | 'BLOCKED' | 'FAIL'; reason: string }
   stale?: { status: 'NO_PLAN' | 'PLAN_STALE' | 'VALID' | 'RECHECK_REQUIRED' | 'VALID_OR_REQUIRES_RELEVANT_RECHECK'; reason: string }
   modelRuns?: Array<{ modelRunId: string; capability: string; provider: string; model: string; status: string }>

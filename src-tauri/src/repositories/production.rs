@@ -832,6 +832,7 @@ impl ProductionRepository {
         let cost_summary =
             production_cost_summary(connection, project_id, cost_chapter_id, runtime.2)?;
         let new_responsibilities = Self::latest_new_responsibilities(connection, project_id)?;
+        let open_foreshadows = Self::open_foreshadows(connection, project_id)?;
         Ok(json!({
             "timeline":timeline,"tasks":task,"artifacts":{"items":artifact_items,"nextCursor":null,"total":artifact_items.len()},
             "signing":signing,"bookPlan":book_plan,"gatePolicy":gate_policy,"projectPhase":runtime.5,"activeWork":{"label":if job_status.as_deref()==Some("FAILED") { "FAILED" } else { &current_stage },"detail":active_detail},
@@ -839,6 +840,7 @@ impl ProductionRepository {
             "productionStage":current_stage,"jobStatus":job_status,"jobError":job_error,"isActive":is_active,"canRetry":can_retry,"lastStage":current_stage,"nextChapter":next_chapter_projection,"chapterPlan":plan_projection,
             "triggeredContinuity":plan_projection.as_ref().and_then(|plan| plan.get("continuityActions")).cloned().unwrap_or_else(|| json!([])),
             "newResponsibilities":new_responsibilities,
+            "openForeshadows":open_foreshadows,
             "gate":{"status":gate_status,"reason":if job_status.as_deref()==Some("FAILED") {job_error.clone().unwrap_or_else(|| "MODEL_TRANSPORT_FAILED".into())} else if stale_status=="PLAN_STALE" {"PLAN_STALE / RECOMPILE_REQUIRED".into()} else {"".into()}},
             "stale":{"status":stale_status,"reason":if stale_status=="PLAN_STALE" {"Relevant authority changed"} else {""}},"modelRuns":model_runs,"candidateRef":candidate_ref,"finalChapterRef":final_ref,"reconciliation":reconciliation,"repair":repair,
             "creativeSkills":creative_skills,"quality":quality,"tasteProfile":taste_profile,
@@ -846,6 +848,27 @@ impl ProductionRepository {
             "openingProgress":opening_progress,
             "costSummary":cost_summary,"committedChapters":runtime.1,"candidateChapters":runtime.3
         }))
+    }
+
+    /// Owner decision 2026-11-03: the foreshadows still open, newest first,
+    /// for the owner to rewrite or abandon.
+    fn open_foreshadows(
+        connection: &Connection,
+        project_id: &str,
+    ) -> Result<Value, ProductionRepositoryError> {
+        let mut statement = connection.prepare(
+            "SELECT foreshadow_id,intent,secret_payload_ref,recover_window_end_chapter,status FROM foreshadows WHERE project_id=?1 AND status IN ('PLANTED','REINFORCED','STALE') ORDER BY updated_at DESC,foreshadow_id LIMIT 30",
+        )?;
+        let rows = statement.query_map([project_id], |row| {
+            Ok(json!({
+                "threadRef":format!("thread:{}", row.get::<_, String>(0)?),
+                "intent":row.get::<_, String>(1)?,
+                "payoff":row.get::<_, Option<String>>(2)?,
+                "recoverWindowEndChapter":row.get::<_, Option<String>>(3)?,
+                "status":row.get::<_, String>(4)?
+            }))
+        })?;
+        Ok(json!(rows.collect::<Result<Vec<_>, _>>()?))
     }
 
     fn latest_new_responsibilities(

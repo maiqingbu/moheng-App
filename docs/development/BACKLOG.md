@@ -122,7 +122,8 @@
     | 平均每章总耗时（含重试） | 约 6 分钟 | 约 7.6 分钟 |
     | 稳定性 | 10 章跑完 | 删句步骤思考到上限后回复为空，停在第 8 章 |
   - 建议：写手默认继续不开思考（现在的默认就是这样）。开思考的写正文失败少一些，但耗时和 token 约 3 倍，而且删句、调整字数这类机械步骤开思考，很容易思考到上限、回复为空。如果负责人读完样章，觉得开思考的正文明显更好，再考虑只给“写正文”一步开思考，删句、调整字数、改写不开（要把写正文和其他几步的思考设置拆开）。
-- **下一步**：等负责人看对比和样章后决定，检查以下几项（分析办法参照会话记录里第 20 轮的做法：查 BookPlan 的 stages/steps、`state_deltas` 里 SATISFIED 的章号、各章的 `chapterGoal`、提醒内容）：
+- **负责人 11-03 决定**：写手默认不开思考（维持现状）；S38 按建议放进章规划；伏笔修改入口由我按代码情况定方案后实施（见 P3）。
+- **下一步**：关卡通过、提交后，可以再跑一轮修仙验收，确认 S38 进入规划后正文的主角主动性，检查以下几项（分析办法参照会话记录里第 20 轮的做法：查 BookPlan 的 stages/steps、`state_deltas` 里 SATISFIED 的章号、各章的 `chapterGoal`、提醒内容）：
   1. 方向是否一次通过，阶段里有没有小步；
   2. 第 4–10 章是否按小步推进，有没有出现一章写完一个阶段；
   3. 第 8–10 章有没有原地打转；
@@ -184,7 +185,7 @@
   - 新流程故意没有模型审稿这一步：正文问题由规则检查找出，交给改写环节修，改写环节已经按问题挑 skill（S46、S27、S32、S40）。
   - 所以只在审稿环节用的 skill 在新流程里实际用不上：S37 章节叙事评估、S38 主动性与阅读欲望评估。S35 用在签约评估，S45 用在结局审计，这两个不受影响。
   - 之前的“每个 skill 都能被选中”测试把审稿环节也算进去了，在新流程下偏乐观。
-  - 待负责人决定：(a) 不加，S37、S38 只给旧流程用；(b) 把 S38 的要点放进章规划，在规划时预防主角被动；(c) 新增一次模型审稿，每章多一次调用和费用。
+  - 负责人 11-03 选 (b)：S38 改为章规划常驻（`always_in: [chapter_plan]`），每章规划都带上主角主动性与阅读欲望的要点；原有的 5 个常驻 skill 仍在预算内（测试 `every_chapter_plan_weighs_the_protagonists_agency_and_the_readers_desire`）。S37 仍只在审稿环节，新流程用不上。
 
 执行办法：
 1. `book_direction::plan`（PLAN_BOOK_DIRECTION）的输入加上 `craftGuidance = chapter_craft::guidance("book_plan", signals)`；`plan_volume`（PLAN_VOLUME_DIRECTION）加上 `guidance("volume_plan", …)`。两个提示词都写明“craftGuidance holds the selected methods; follow them”。
@@ -211,7 +212,12 @@
   - 测试：`craft_setup` 的 3 个单元测试，`craft_v3_setup` 的 `p3_the_assistant_drafts_…`，`tests/store/fx21-assistant-intent.test.ts`。
   - 已知的小缺口：负责人在页面上改过的值，要到执行时才校验，提交时还不校验。
 - [x] 影响范围（2026-11-03）：助手起草故事底稿修改时，到已写章节里找每一项原来的写法：把原值按标点拆成两个字以上的词，列出含有这些词的句子，每项最多 5 句。页面上显示在每一项下面，负责人批准后可以另行发起事实修订；读不到章节时会明确提示，不当作“没有冲突”（`craft_setup::written_conflicts`、`NarrativeRepository::final_bodies_by_chapter`）。这是按字面查找，换了说法的写法查不到。
-- [ ] 第 3 步：事实已经走 RETCON。伏笔还没有修改入口：伏笔是表里的记录，不是有版本的文档，B12 修改申请现在只能改有版本的文档。要先请负责人定做法：比如给伏笔加“负责人改写意图、放弃、改回收窗口”几种操作，走 B12 批准后由线索模块执行。
+- [x] 第 3 步：事实走 RETCON。伏笔修改入口（2026-11-03，负责人让我按代码定方案）：
+  - 方案：沿用已有的负责人命令 `thread_responsibility_adjust`（原来用于剧情线索的升级、降级、撤销）。目标是伏笔时，支持“改写”（意图、要回收的东西、回收截止章）和“放弃”（状态改为 ABANDONED）；已回收或已放弃的伏笔不能再改。
+  - 为什么不走 B12：这些伏笔来自章节审计，和 C 级线索是同一类观察记录；现有规则下，C 级线索就由负责人直接调整，并留快照和回执。B12 是给 A/B 级有版本的权威文档用的。
+  - 每次调整在一次提交里写入：快照文档（`ForeshadowPlan`，合同里已有的类型）、伏笔增量、决定记录、回执；重复发送同一请求会重放结果（`narrative::responsibility::adjust_foreshadow`）。
+  - 创作中心新增“还没回收的伏笔”一栏，每条可以改写或放弃（数据来自 `openForeshadows`）。
+  - 测试：`the_owner_rewrites_and_abandons_a_foreshadow_and_a_finished_one_stays`，以及 `tests/store/b04-a-responsibility-ui.test.ts`。
 
 执行办法（要坚持的原则：助手只能提出申请，必须由负责人批准，由数据所属的模块执行，不能绕过系统直接写数据）：
 1. **先接负责人纠正**：用户说“以后某人不要……”时，意图识别为 `REMEMBER`，生成 `memory_correction_add` 草稿，界面展示后由用户确认才执行。这一步不需要走 B12，因为纠正本来就由负责人亲手确认。

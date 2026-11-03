@@ -7,6 +7,7 @@ coverage: MEDIUM
 role: evaluator
 stages: [chapter_plan, review]
 triggers:
+  always_in: [chapter_plan]
   findings: [protagonist_passive, low_reader_desire]
   events: [retention_check]
 inject:

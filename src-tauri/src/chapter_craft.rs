@@ -1599,6 +1599,19 @@ fn phrases_used(texts: &[String], from: usize, times: usize) -> Vec<String> {
 mod tests {
 
     #[test]
+    fn every_chapter_plan_weighs_the_protagonists_agency_and_the_readers_desire() {
+        // Owner decision 2026-11-03: S38 goes into chapter planning, as no
+        // check reports a passive protagonist for it to be chosen by.
+        let skills = guidance_skill_ids(&guidance("chapter_plan", &planning_signals(Some(5), &[])).unwrap());
+        assert!(skills.contains(&"S38".to_string()), "{skills:?}");
+        // The planning residents all still fit the budget.
+        for resident in ["S14", "S25", "S26", "S36", "S39"] {
+            assert!(skills.contains(&resident.to_string()), "{resident}: {skills:?}");
+        }
+    }
+
+
+    #[test]
     fn every_skill_can_be_selected_by_some_step() {
         // P2: S04, S07 and S43 were never selected, for want of signals.
         let chapter_stages = ["chapter_plan", "render", "review", "rewrite"];

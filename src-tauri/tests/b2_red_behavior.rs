@@ -1499,3 +1499,70 @@ fn a_chapter_whose_audit_marks_no_event_still_records_its_main_event() {
     // Chapter 1's audit marks no event.
     assert_eq!(events, 1);
 }
+
+#[test]
+fn the_owner_rewrites_and_abandons_a_foreshadow_and_a_finished_one_stays() {
+    // Owner decision 2026-11-03: a foreshadow from the audit is changed by
+    // the owner directly, like a C-level thread, with a receipt.
+    let (state, _temp, _gateway) = state();
+    let (project_id, _) = create_approved_book_plan(&state);
+    {
+        let connection = state.manager.open(&project_id, "", NOW).unwrap();
+        connection
+            .execute(
+                "INSERT INTO foreshadows(foreshadow_id,project_id,intent,secret_payload_ref,status,source_authority,created_at,updated_at) VALUES ('thread-fs-1',?1,'他按了按。','缺页','PLANTED','B08_ACTUAL_NARRATIVE',?2,?2)",
+                libsql_rusqlite::params![project_id, NOW],
+            )
+            .unwrap();
+    }
+    let foreshadow = |state: &KernelState| -> (String, Option<String>, String) {
+        let connection = state.manager.open(&project_id, "", NOW).unwrap();
+        connection
+            .query_row(
+                "SELECT intent,secret_payload_ref,status FROM foreshadows WHERE project_id=?1 AND foreshadow_id='thread-fs-1'",
+                [&project_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+    };
+    // The production center lists the open foreshadows to change.
+    let center = query_production_center_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
+    )
+    .unwrap();
+    assert_eq!(
+        center["openForeshadows"],
+        json!([{"threadRef":"thread:thread-fs-1","intent":"他按了按。","payoff":"缺页","recoverWindowEndChapter":null,"status":"PLANTED"}])
+    );
+    let edited = command(
+        &state,
+        &project_id,
+        "fs:edit",
+        "thread_responsibility_adjust",
+        json!({"threadRef":"thread:thread-fs-1","action":"EDIT","intent":"账本缺的那一页记着谁的债","fulfillmentObject":"缺页上的名字"}),
+    );
+    assert_eq!(edited["finalStatus"], "committed");
+    assert_eq!(
+        foreshadow(&state),
+        ("账本缺的那一页记着谁的债".to_owned(), Some("缺页上的名字".to_owned()), "PLANTED".to_owned())
+    );
+    command(
+        &state,
+        &project_id,
+        "fs:abandon",
+        "thread_responsibility_adjust",
+        json!({"threadRef":"thread:thread-fs-1","action":"DELETE"}),
+    );
+    assert_eq!(foreshadow(&state).2, "ABANDONED");
+    let error = execute_command_impl(
+        &state,
+        json!({
+            "type":"thread_responsibility_adjust","commandId":"fs:again","idempotencyKey":"fs:again:key",
+            "projectId":project_id,"expectedRevision":revision(&state, &project_id),"requestedAt":NOW,
+            "payload":{"threadRef":"thread:thread-fs-1","action":"EDIT","intent":"再改一次"}
+        }),
+    )
+    .unwrap_err();
+    assert!(error.contains("B08_FORESHADOW_NOT_ACTIVE"), "{error}");
+}
