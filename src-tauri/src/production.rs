@@ -3888,12 +3888,21 @@ fn run_chapter_production_inner(
                     .as_array()
                     .is_some_and(|items| !items.is_empty())
             };
-            last_raw = if has_canon(&rerun_raw) || !has_canon(&raw_audit) {
-                rerun_raw.clone()
-            } else {
+            let lost_every_fact = !has_canon(&rerun_raw) && has_canon(&raw_audit);
+            last_raw = if lost_every_fact {
                 raw_audit.clone()
+            } else {
+                rerun_raw.clone()
             };
-            match check_audit(rerun_raw.clone()) {
+            // Real run round 28: in a long-form chapter, too, an empty
+            // follow-up is not taken; the first audit's facts are held back
+            // item by item instead.
+            let rechecked = if lost_every_fact {
+                Err(error.clone())
+            } else {
+                check_audit(rerun_raw.clone())
+            };
+            match rechecked {
                 Err(error) if error == "B08_AUDIT_INCOMPLETE_EVIDENCE_REBOUND" => {
                     // Ids first, so what is kept still names the facts it named.
                     let mut assigned = rerun_raw.clone();

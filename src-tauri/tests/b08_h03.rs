@@ -52,6 +52,8 @@ struct CapturingAuditPolicyGateway {
     capabilities: Arc<Mutex<Vec<String>>>,
     unregistered_predicate: bool,
     rendered_body: Option<String>,
+    /// The audit's follow-up round comes back with nothing.
+    empty_follow_up: bool,
 }
 
 impl ProductionModelGateway for CapturingAuditPolicyGateway {
@@ -71,7 +73,25 @@ impl ProductionModelGateway for CapturingAuditPolicyGateway {
                 .lock()
                 .map_err(|error| error.to_string())?
                 .push(input.clone());
+            if self.empty_follow_up && input.get("auditFeedback").is_some() {
+                response.output = json!({
+                    "qualityFindings":[],"canonCandidates":[],"knowledgeCandidates":[],
+                    "continuityCandidates":[],"taskProgressCandidates":[],
+                    "revealedReservationRefs":[],"evidenceRanges":[],
+                    "auditCompleteness":"COMPLETE_NO_CHANGE","unresolvedHard":false
+                });
+                return Ok(response);
+            }
             if self.unregistered_predicate {
+                if self.empty_follow_up {
+                    // A registered fact beside the unregistered one.
+                    let mut registered = response.output["canonCandidates"][0].clone();
+                    registered["factId"] = json!("fact:actual:door-open-registered");
+                    response.output["canonCandidates"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(registered);
+                }
                 response.output["canonCandidates"][0]["predicate"] =
                     json!("UNREGISTERED_SYNTHETIC_PREDICATE");
             }
@@ -8726,3 +8746,40 @@ mod fx19_truncation;
 mod fx4_knowledge_time;
 #[path = "b08_h03/ld2_downgrade.rs"]
 mod ld2_downgrade;
+
+#[test]
+fn b08_a_long_form_chapter_keeps_its_facts_when_the_audit_follow_up_comes_back_empty() {
+    // Real run round 28: chapters 7, 8 and 10's follow-up audits came back
+    // empty and the chapters committed no facts at all.
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b08-empty-follow-up";
+    let gateway = CapturingAuditPolicyGateway {
+        unregistered_predicate: true,
+        empty_follow_up: true,
+        ..Default::default()
+    };
+    let state =
+        KernelState::with_production_gateway(AppPaths::new(temp.path()), Arc::new(gateway.clone()));
+    let (chapter_id, volume_id, _, _) = seed_b08_long_form_project(&state, project_id);
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:b08:empty-follow-up",
+            "idempotencyKey":"key:b08:empty-follow-up","projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM",
+                "entityIds":["entity:actual:linzhou"],"references":[]}
+        }),
+    )
+    .unwrap();
+    assert_eq!(result["finalStatus"], "committed");
+    let connection = state.manager.open(project_id, "B08 empty follow-up", NOW).unwrap();
+    let facts: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM canon_facts WHERE project_id=?1 AND valid_from_chapter_id=?2",
+            libsql_rusqlite::params![project_id, chapter_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(facts > 0, "the first audit's registered facts are kept");
+}
