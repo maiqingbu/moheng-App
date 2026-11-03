@@ -243,7 +243,10 @@ pub struct ResolvedProviderProfile {
 /// `audit` (audit, review and plans) or `default`.
 pub fn model_step(capability: &str) -> &'static str {
     match capability {
-        "RENDER_CHAPTER" | "REWRITE_PASSAGES" => "render",
+        // Real run round 30: every call on the writing model, so its
+        // thinking reaches the craft writer too.
+        "RENDER_CHAPTER" | "RENDER_CHAPTER_CRAFT" | "ADJUST_CHAPTER_LENGTH" | "CUT_CHAPTER"
+        | "REWRITE_PASSAGES" => "render",
         // Owner decision (2026-10-24): r2 plans use the audit model.
         "AUDIT_EXTRACT"
         | "REVIEW_CHAPTER"

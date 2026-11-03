@@ -1566,6 +1566,15 @@ fn p4_each_steps_thinking_is_saved_and_goes_with_its_model() {
         step_thinking(&saved, "RENDER_CHAPTER"),
         Some(Thinking { enabled: true, effort: Some("max".into()) })
     );
+    // Real run round 30: the craft writer, length adjustment and cuts use
+    // the writing model, so they take its thinking too.
+    for capability in ["RENDER_CHAPTER_CRAFT", "ADJUST_CHAPTER_LENGTH", "CUT_CHAPTER", "REWRITE_PASSAGES"] {
+        assert_eq!(
+            step_thinking(&saved, capability),
+            Some(Thinking { enabled: true, effort: Some("max".into()) }),
+            "{capability}"
+        );
+    }
     assert_eq!(step_thinking(&saved, "AUDIT_EXTRACT"), None);
     assert_eq!(
         step_thinking(&saved, "PLAN_STRATEGY"),
