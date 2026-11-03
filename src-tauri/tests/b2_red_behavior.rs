@@ -1481,3 +1481,21 @@ fn after_a_step_is_done_the_next_chapter_works_on_the_next_step() {
     let active = plan["activeTaskRefs"].as_array().unwrap();
     assert!(active.iter().any(|task| task == &json!(steps[1])), "{active:?}");
 }
+
+#[test]
+fn a_chapter_whose_audit_marks_no_event_still_records_its_main_event() {
+    // Real runs rounds 26-27: 455 facts, not one marked as an event by the
+    // audit; the system marks each chapter's main event itself.
+    let (state, _temp, _gateway) = state();
+    let (project_id, _) = create_approved_book_plan(&state);
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let events: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM canon_events e JOIN chapters c ON c.chapter_id=e.chapter_id WHERE e.project_id=?1 AND c.chapter_no=1",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    // Chapter 1's audit marks no event.
+    assert_eq!(events, 1);
+}

@@ -4036,6 +4036,8 @@ fn run_chapter_production_inner(
     let mut obligation_evidence_records = Vec::new();
     let mut new_responsibility_evidence = Vec::new();
     let mut effective_continuity_refs = BTreeSet::new();
+    // P1: the book's mysteries this chapter resolves, for their events.
+    let mut resolved_mysteries = Vec::new();
     let change_request_context = B08ChangeRequestContext {
         project_id: &project_id,
         command_id: &command_id,
@@ -4061,6 +4063,11 @@ fn run_chapter_production_inner(
         )
         .map_err(|error| error.to_string())?;
         if let Some(obligation) = obligation {
+            if obligation.obligation_type == "MYSTERY"
+                && matches!(item.disposition.as_str(), "RESOLVE" | "RESOLVED")
+            {
+                resolved_mysteries.push(authority_id.to_owned());
+            }
             let lifecycle = match item.disposition.as_str() {
                 "RESOLVE" | "RESOLVED" => "RESOLVED",
                 "ADVANCE" | "PROGRESSING" | "DEFER_WITH_BRIDGE" => "PROGRESSING",
@@ -4207,9 +4214,9 @@ fn run_chapter_production_inner(
                     .map(|evidence| evidence.quote.as_str())
             })
             .unwrap_or(&item.thread_ref);
-        // P1: a hint planted for a later payoff is a foreshadow, which later
-        // chapters reinforce and recover.
-        if item.promotion_signals.foreshadow_recovery_responsibility {
+        // P1: a hint, key object or mystery planted for a later payoff is a
+        // foreshadow, which later chapters reinforce and recover.
+        if is_foreshadow(item.promotion_signals, item.fulfillment_object.as_deref()) {
             foreshadow_delta.push(json!({
                 "foreshadowId":authority_id,"intent":description,"status":"PLANTED",
                 "plantChapterId":chapter_id,
@@ -4581,6 +4588,33 @@ fn run_chapter_production_inner(
             relation_ids.insert(item.fact_id.clone(), relation_id);
         }
     }
+    // P1 (real runs rounds 26-27: 455 facts, not one marked as an event):
+    // without an event from the audit, the chapter's first fact marks its
+    // main event, described by the plan's change of situation; a resolved
+    // mystery marks the next fact.
+    let chapter_event = plan_payload["craft"]["situationChange"]["after"]
+        .as_str()
+        .or_else(|| plan_payload["chapterGoal"].as_str())
+        .unwrap_or_default();
+    let has_event = extraction
+        .canon_candidates
+        .iter()
+        .any(|item| item.event_type.is_some());
+    let marks = (!has_event)
+        .then(|| ("SITUATION_CHANGE", json!({"description":chapter_event})))
+        .into_iter()
+        .chain(
+            resolved_mysteries
+                .iter()
+                .map(|mystery| ("MYSTERY_RESOLVED", json!({"mysteryId":mystery}))),
+        );
+    let event_marks = extraction
+        .canon_candidates
+        .iter()
+        .filter(|item| item.event_type.is_none())
+        .map(|item| item.fact_id.clone())
+        .zip(marks)
+        .collect::<BTreeMap<_, _>>();
     // Relations last, after the facts that record their entities.
     let mut canon_candidates = extraction.canon_candidates.iter().collect::<Vec<_>>();
     canon_candidates.sort_by_key(|item| relation_ids.contains_key(&item.fact_id));
@@ -4591,12 +4625,13 @@ fn run_chapter_production_inner(
         "predicate":item.predicate,
         "objectJson":item.object_json,
         "authorityLevel":item.authority_level,
-        "eventType":item.event_type,
+        "eventType":item.event_type.as_deref().or_else(|| event_marks.get(&item.fact_id).map(|mark| mark.0)),
         "relationId":relation_ids.get(&item.fact_id),
         "validFromChapterId":chapter_id,
         "payloadJson":{
             "chapterId":chapter_id,
-            "eventId":item.event_type.as_ref().map(|_| format!("event:{}", item.fact_id)),
+            "eventId":(item.event_type.is_some() || event_marks.contains_key(&item.fact_id)).then(|| format!("event:{}", item.fact_id)),
+            "event":event_marks.get(&item.fact_id).map(|mark| mark.1.clone()),
             "storyTime":item.story_time,
             "canonicalName":item.canonical_name,
             "entityType":item.entity_type.as_deref().map(entity_kind),
@@ -5503,6 +5538,19 @@ pub(crate) fn entity_kind(entity_type: &str) -> &'static str {
         "CREATURE" | "ANIMAL" | "BEAST" | "MONSTER" | "SPIRIT" => "CREATURE",
         _ => "OBJECT",
     }
+}
+
+/// P1 (owner decision 2026-11-03): a new thread is a foreshadow when it is
+/// a planted hint, or a key object, piece of information or mystery the
+/// story will pay off with `fulfillment_object`.
+fn is_foreshadow(
+    signals: crate::narrative::PromotionSignal,
+    fulfillment_object: Option<&str>,
+) -> bool {
+    signals.foreshadow_recovery_responsibility
+        || ((signals.key_future_use_object_or_information
+            || signals.mystery_or_reveal_responsibility)
+            && fulfillment_object.is_some_and(|payoff| !payoff.trim().is_empty()))
 }
 
 /// P1 (real run round 20: no relation was ever recorded): the relation a
@@ -7039,6 +7087,58 @@ fn knowledge_authority_is_bound(
 
 #[cfg(test)]
 mod tests {
+    /// Owner question (2026-11-03): would binding a relation whenever its
+    /// sentence names both people bring new problems? These pin down what
+    /// the evidence check does today for relations.
+    fn relation_audit(object_id: &str, state: &str, sentence: u64) -> Value {
+        json!({"canonCandidates":[{"subjectId":"陆照","predicate":"relationship",
+            "objectJson":{"objectId":object_id,"state":state},"evidence":{"sentence":sentence}}]})
+    }
+
+    #[test]
+    fn a_relation_cited_on_a_sentence_that_names_neither_person_is_unbound() {
+        // Real run round 27: "他按了按" names no one; binding by both names
+        // would not have kept it either.
+        let body = "周砚舟把拓片推过桌面。纸边硌着胳膊，他按了按。阿沅在门口等着。";
+        let mut audit = relation_audit("周砚舟", "信任", 1);
+        assert_eq!(bind_cited_evidence(&mut audit, body).len(), 0, "the sentence before names him");
+        let body = "雨下了一夜。纸边硌着胳膊，他按了按。药炉还没熄。";
+        let mut audit = relation_audit("周砚舟", "信任", 1);
+        assert_eq!(bind_cited_evidence(&mut audit, body).len(), 1);
+    }
+
+    #[test]
+    fn a_relation_cited_on_a_sentence_that_names_the_other_person_is_kept_whatever_it_says() {
+        // The counter-example: the sentence names both people but states no
+        // trust at all. Today's check already keeps it, as it only asks that
+        // the other person be named there or next to it; requiring both names
+        // would not catch it either. Whether the relation holds is the
+        // audit's judgment, not the evidence check's.
+        let body = "雨下了一夜。陆照和阿沅擦肩而过，谁也没看谁。药炉还没熄。";
+        let mut audit = relation_audit("阿沅", "信任", 1);
+        assert_eq!(bind_cited_evidence(&mut audit, body).len(), 0);
+    }
+
+    #[test]
+    fn a_new_thread_about_a_key_object_or_a_mystery_with_its_payoff_is_a_foreshadow() {
+        // P1 (owner decision 2026-11-03): the audit never marks a planted
+        // hint, but marks key objects and mysteries all the time.
+        let signals = |json: Value| -> crate::narrative::PromotionSignal {
+            serde_json::from_value(json).unwrap()
+        };
+        let hint = signals(json!({"foreshadowRecoveryResponsibility":true}));
+        let key_object = signals(json!({"keyFutureUseObjectOrInformation":true}));
+        let mystery = signals(json!({"mysteryOrRevealResponsibility":true}));
+        let conflict = signals(json!({"unresolvedMajorConflict":true}));
+        assert!(is_foreshadow(hint, None));
+        assert!(is_foreshadow(key_object, Some("半张租约")));
+        assert!(is_foreshadow(mystery, Some("师父的死因")));
+        // Without a payoff, or about something else, it stays a thread.
+        assert!(!is_foreshadow(key_object, None));
+        assert!(!is_foreshadow(key_object, Some("  ")));
+        assert!(!is_foreshadow(conflict, Some("宗门存亡")));
+    }
+
     #[test]
     fn audited_entity_types_come_down_to_five_kinds() {
         for (raw, kind) in [
