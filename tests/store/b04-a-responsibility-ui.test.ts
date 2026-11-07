@@ -22,3 +22,17 @@ describe('B4-A responsibility review surface', () => {
     expect(contracts).toContain("| 'thread_responsibility_adjust'")
   })
 })
+
+describe('伏笔修改入口', () => {
+  it('Given 还开着的伏笔 When 负责人改写或放弃 Then 走责任调整命令并保留原始记录', () => {
+    const page = fs.readFileSync(new URL('../../src/ui/pages/ProductionCenter.vue', import.meta.url), 'utf8')
+    const contracts = fs.readFileSync(new URL('../../src/application/contracts.ts', import.meta.url), 'utf8')
+    expect(contracts).toContain('openForeshadows?: Array<{')
+    expect(page).toContain('data-open-foreshadows')
+    expect(page).toContain('v-for="item in openForeshadows"')
+    expect(page).toContain("adjustForeshadow(item, 'EDIT')")
+    expect(page).toContain("adjustForeshadow(item, 'DELETE')")
+    const adjust = page.slice(page.indexOf('async function adjustForeshadow'))
+    expect(adjust).toContain("type: 'thread_responsibility_adjust'")
+  })
+})

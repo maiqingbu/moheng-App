@@ -1,5 +1,6 @@
 pub mod artifacts;
 pub mod change_retcon;
+pub mod craft;
 pub mod endgame;
 pub mod export;
 pub mod health;
@@ -12,3 +13,4 @@ pub mod runtime;
 pub mod support;
 pub mod ui_projection;
 pub mod volume_lifecycle;
+pub mod work_memory;

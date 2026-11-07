@@ -1,0 +1,96 @@
+//! CRAFT v3 local-only storage: the user's style sample (migration 0017).
+//! The sample is deliberately outside artifacts and CommitBundles.
+
+use libsql_rusqlite::{Connection, OptionalExtension};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StyleSample {
+    pub digest: String,
+    pub body: String,
+    pub saved_at: String,
+}
+
+pub fn save_style_sample(
+    connection: &Connection,
+    project_id: &str,
+    digest: &str,
+    body: &str,
+    now: &str,
+) -> Result<(), libsql_rusqlite::Error> {
+    connection.execute(
+        "INSERT INTO style_samples(project_id, sample_digest, body, saved_at) VALUES (?1, ?2, ?3, ?4) \
+         ON CONFLICT(project_id) DO UPDATE SET sample_digest=excluded.sample_digest, body=excluded.body, saved_at=excluded.saved_at",
+        libsql_rusqlite::params![project_id, digest, body, now],
+    )?;
+    Ok(())
+}
+
+/// The craft decisions of the committed chapters before `chapter_id`, in
+/// chapter order: `(chapter_no, craft)` from each final chapter's r2 plan,
+/// each craft also holding its plan's `chapterGoal` (VD-1e). Chapters
+/// planned as r1 carry no craft and are skipped.
+pub fn prior_plan_crafts(
+    connection: &Connection,
+    project_id: &str,
+    chapter_id: &str,
+) -> Result<Vec<(i64, serde_json::Value)>, libsql_rusqlite::Error> {
+    let Some(chapter_no) = connection
+        .query_row(
+            "SELECT chapter_no FROM chapters WHERE project_id=?1 AND chapter_id=?2",
+            [project_id, chapter_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+    else {
+        return Ok(Vec::new());
+    };
+    plan_crafts_before(connection, project_id, chapter_no)
+}
+
+/// The same craft decisions for the committed chapters before `chapter_no`.
+pub fn plan_crafts_before(
+    connection: &Connection,
+    project_id: &str,
+    chapter_no: i64,
+) -> Result<Vec<(i64, serde_json::Value)>, libsql_rusqlite::Error> {
+    let mut statement = connection.prepare(
+        "SELECT c.chapter_no, json_set(json_extract(p.payload_json,'$.craft'),'$.chapterGoal',json_extract(p.payload_json,'$.chapterGoal')) FROM chapters c \
+         JOIN artifact_payloads f ON f.artifact_id=c.final_artifact_id AND f.version=c.final_version \
+         JOIN artifact_payloads p ON p.artifact_id=json_extract(f.payload_json,'$.chapterPlanRef.artifactId') AND p.version=json_extract(f.payload_json,'$.chapterPlanRef.version') \
+         WHERE c.project_id=?1 AND c.status='COMMITTED' AND json_extract(p.payload_json,'$.craft') IS NOT NULL \
+         AND c.chapter_no < ?2 \
+         ORDER BY c.chapter_no",
+    )?;
+    let rows = statement
+        .query_map(libsql_rusqlite::params![project_id, chapter_no], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(chapter, craft)| {
+            serde_json::from_str(&craft)
+                .ok()
+                .map(|craft| (chapter, craft))
+        })
+        .collect())
+}
+
+pub fn style_sample(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<Option<StyleSample>, libsql_rusqlite::Error> {
+    connection
+        .query_row(
+            "SELECT sample_digest, body, saved_at FROM style_samples WHERE project_id=?1",
+            [project_id],
+            |row| {
+                Ok(StyleSample {
+                    digest: row.get(0)?,
+                    body: row.get(1)?,
+                    saved_at: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+}

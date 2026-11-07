@@ -50,6 +50,20 @@ fn row_exists(
     Ok(connection.query_row(sql, params, |row| row.get(0))?)
 }
 
+/// A broken constraint names the delta that broke it; other errors (a busy
+/// database among them) pass through as they are.
+fn in_delta(error: super::CommitError, delta: impl FnOnce() -> String) -> super::CommitError {
+    match error {
+        super::CommitError::Sqlite(libsql_rusqlite::Error::SqliteFailure(failure, message))
+            if failure.code == libsql_rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            let message = message.unwrap_or_else(|| failure.to_string());
+            super::CommitError::DeltaConstraint(format!("{message} (in {})", delta()))
+        }
+        other => other,
+    }
+}
+
 fn apply_canon(
     connection: &Connection,
     delta: &CanonDelta,
@@ -101,7 +115,17 @@ fn apply_canon(
     )?;
     connection.execute("INSERT INTO canon_facts(fact_id, project_id, subject_id, predicate, object_json, valid_from_chapter_id, valid_to_chapter_id, story_time_from, story_time_to, source_artifact_id, source_version, source_chapter_id, evidence_range_json, authority_level, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15) ON CONFLICT(fact_id) DO UPDATE SET subject_id=excluded.subject_id, predicate=excluded.predicate, object_json=excluded.object_json, valid_from_chapter_id=excluded.valid_from_chapter_id, valid_to_chapter_id=excluded.valid_to_chapter_id, story_time_from=excluded.story_time_from, story_time_to=excluded.story_time_to, source_artifact_id=excluded.source_artifact_id, source_version=excluded.source_version, source_chapter_id=excluded.source_chapter_id, evidence_range_json=excluded.evidence_range_json, authority_level=excluded.authority_level, updated_at=excluded.updated_at", libsql_rusqlite::params![delta.fact_id, project_id, subject_id, predicate, object_json, delta.valid_from_chapter_id, delta.valid_to_chapter_id, story_time_from, story_time_to, source_artifact_id, source_version, source_chapter_id, evidence_range_json, delta.authority_level.as_ref().map(crate::repositories::artifacts::enum_string).transpose()?.unwrap_or_else(|| "C".into()), now])?;
     inserted += i64::from(!fact_existed);
-    if let Some(previous_fact_id) = payload_string(payload, "supersedesFactId") {
+    let also_superseded = payload
+        .and_then(|payload| payload.get("alsoSupersedesFactIds"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned);
+    for previous_fact_id in payload_string(payload, "supersedesFactId")
+        .into_iter()
+        .chain(also_superseded)
+    {
         let updated = connection.execute(
             "UPDATE canon_facts SET superseded_by=?1,updated_at=?2 WHERE project_id=?3 AND fact_id=?4 AND superseded_by IS NULL",
             libsql_rusqlite::params![delta.fact_id, now, project_id, previous_fact_id],
@@ -386,63 +410,72 @@ pub(crate) fn apply_all(
     let mut canon_count = 0;
     if let Some(items) = canon {
         for item in items {
-            canon_count += apply_canon(connection, item, now)?;
+            canon_count += apply_canon(connection, item, now)
+                .map_err(|error| in_delta(error, || format!("canon {}", item.fact_id)))?;
         }
     }
     counts.insert("canon".into(), canon_count);
     let mut obligation_count = 0;
     if let Some(items) = obligations {
         for item in items {
-            obligation_count += apply_obligation(connection, item, fallback_artifact, now)?;
+            obligation_count += apply_obligation(connection, item, fallback_artifact, now)
+                .map_err(|error| in_delta(error, || format!("obligation {}", item.obligation_id)))?;
         }
     }
     counts.insert("obligation".into(), obligation_count);
     let mut foreshadow_count = 0;
     if let Some(items) = foreshadows {
         for item in items {
-            foreshadow_count += apply_foreshadow(connection, item, now)?;
+            foreshadow_count += apply_foreshadow(connection, item, now)
+                .map_err(|error| in_delta(error, || format!("foreshadow {}", item.foreshadow_id)))?;
         }
     }
     counts.insert("foreshadow".into(), foreshadow_count);
     let mut knowledge_count = 0;
     if let Some(items) = knowledge {
         for item in items {
-            knowledge_count += apply_knowledge(connection, item, now)?;
+            knowledge_count += apply_knowledge(connection, item, now)
+                .map_err(|error| in_delta(error, || format!("knowledge {}", item.knowledge_id)))?;
         }
     }
     counts.insert("knowledge".into(), knowledge_count);
     let mut state_count = 0;
     if let Some(items) = states {
         for item in items {
-            state_count += apply_state(connection, item, now)?;
+            state_count += apply_state(connection, item, now)
+                .map_err(|error| in_delta(error, || format!("state {}", item.state_id)))?;
         }
     }
     counts.insert("state".into(), state_count);
     let mut dependency_count = 0;
     if let Some(items) = dependencies {
         for item in items {
-            dependency_count += apply_dependency(connection, item, now)?;
+            dependency_count += apply_dependency(connection, item, now)
+                .map_err(|error| in_delta(error, || format!("dependency {}->{}", item.source_ref, item.target_ref)))?;
         }
     }
     counts.insert("dependency".into(), dependency_count);
     let mut job_count = 0;
     if let Some(items) = jobs {
         for item in items {
-            job_count += apply_job(connection, item, now)?;
+            job_count += apply_job(connection, item, now)
+                .map_err(|error| in_delta(error, || format!("job {}", item.job_id)))?;
         }
     }
     counts.insert("job".into(), job_count);
     let mut decision_count = 0;
     if let Some(items) = decisions {
         for item in items {
-            decision_count += apply_decision(connection, item, now)?;
+            decision_count += apply_decision(connection, item, now)
+                .map_err(|error| in_delta(error, || format!("decision {}", item.decision_id)))?;
         }
     }
     counts.insert("decision".into(), decision_count);
     let mut reader_desire_count = 0;
     if let Some(items) = reader_desires {
         for item in items {
-            reader_desire_count += apply_reader_desire(connection, item, now)?;
+            reader_desire_count += apply_reader_desire(connection, item, now)
+                .map_err(|error| in_delta(error, || format!("reader desire {}", item.desire_id)))?;
         }
     }
     counts.insert("readerDesire".into(), reader_desire_count);

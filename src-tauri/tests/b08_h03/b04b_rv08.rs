@@ -674,7 +674,7 @@ fn b08_rv08_legacy_b11_policy_blocks_long_form_until_explicit_default_adoption()
 }
 
 #[test]
-fn b08_rv08_user_added_single_predicate_blocks_conflicting_actual_canon() {
+fn b08_rv08_user_added_single_predicate_holds_back_conflicting_actual_canon() {
     let temp = tempfile::tempdir().unwrap();
     let capabilities = Arc::new(Mutex::new(Vec::new()));
     let gateway = CustomSinglePredicateConflictGateway {
@@ -745,10 +745,9 @@ fn b08_rv08_user_added_single_predicate_blocks_conflicting_actual_canon() {
             "payload":{"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM","entityIds":["entity:actual:linzhou"],"references":[],"skillsEnabled":false}
         }),
     );
-    assert!(
-        matches!(production.as_ref(), Err(error) if error == "B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED"),
-        "the user-added SINGLE predicate must block a conflicting actual fact; result={production:?}"
-    );
+    // LD-1 step 2: the chapter commits; the user-added SINGLE predicate still
+    // keeps the conflicting fact out of the ledger.
+    assert_eq!(production.unwrap()["finalStatus"], "committed");
     assert_eq!(
         capabilities.lock().unwrap().as_slice(),
         ["PLAN_STRATEGY", "RENDER_CHAPTER", "AUDIT_EXTRACT"]
@@ -757,11 +756,15 @@ fn b08_rv08_user_added_single_predicate_blocks_conflicting_actual_canon() {
         .manager
         .open(project_id, "RV-08 conflict assertion", NOW)
         .unwrap();
+    assert_held_back(
+        &connection,
+        project_id,
+        "B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED",
+    );
     assert_eq!(
         b08_committed_final_count_for_chapter(&connection, project_id, &chapter_id),
-        0
+        1
     );
-    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM domain_receipts WHERE project_id=?1 AND domain='B08_CHAPTER_PRODUCTION'",[project_id],|row|row.get(0)).unwrap(),0);
 }
 
 #[test]

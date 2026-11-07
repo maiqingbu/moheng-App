@@ -1,0 +1,5 @@
+# Skill packages and bundled resources are verified byte-for-byte against
+# recorded SHA-256 digests at build time (build.rs, PRE-01). Never convert
+# their line endings (e.g. CRLF on Windows checkouts).
+creative-skills/** -text
+src-tauri/resources/** -text

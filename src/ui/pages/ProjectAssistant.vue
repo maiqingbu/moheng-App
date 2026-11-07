@@ -6,6 +6,8 @@ import CommandFeedback from '../components/CommandFeedback.vue'
 import BaseModal from '../components/BaseModal.vue'
 import { useProjectStore } from '../stores/projectStore'
 import { presentAssistantSession } from '../presentation/assistantPresentation'
+import { assistantIntentLabel, changeTypeForIntent, setupChangeRequest, setupPathLabel } from '../presentation/assistantIntent'
+import type { SetupChangeDraft } from '../../application/contracts'
 import type { AssistantPresentation } from '../presentation/assistantPresentation'
 import {
   createGroundedAssistantRetcon,
@@ -41,9 +43,23 @@ const displayScopes = (values: unknown) => Array.isArray(values)
   ? values.map(value => sanitizeProductText(value, '当前作品')).filter(Boolean).join('、') || '无'
   : '无'
 
+// FX-21: shows how the assistant understood the last question.
+const intentLabel = ref('')
+// P3: a lasting rule the owner reviews before it is remembered.
+const rememberDraft = ref<{ content: string; subject: string } | null>(null)
+const rememberState = computed(() => store.commandState('assistant-remember'))
+// P3 (owner decision 2026-11-03): a story bible change, each item shown as
+// what it is and what it becomes, sent as a change request only on submit.
+const setupDraft = ref<SetupChangeDraft | null>(null)
+const setupDraftState = computed(() => store.commandState('assistant-change-proposal'))
+const displayValue = (value: unknown) => typeof value === 'string' ? value : JSON.stringify(value)
+
 async function ask() {
   const session = await store.supportSession(question.value, 'DIAGNOSE')
-  if (session) presentation.value = presentAssistantSession(session)
+  if (session) {
+    presentation.value = presentAssistantSession(session)
+    intentLabel.value = assistantIntentLabel(session.intent)
+  }
 }
 
 async function prepareRepair() {
@@ -53,6 +69,7 @@ async function prepareRepair() {
   repairOutcomeResolved.value = false
   try {
     plan.value = await store.prepareAssistantRepair(question.value)
+    intentLabel.value = assistantIntentLabel(plan.value.intent)
   } catch (error) {
     repairMessage.value = productErrorMessage(error, '暂时无法核对修复范围，请刷新当前作品后重试。')
     repairOpen.value = true
@@ -138,8 +155,16 @@ async function proposeChange() {
   const projectId = store.currentProjectId
   if (!projectId || !question.value.trim()) return
   const changeId = `change:${projectId}:${Date.now()}`
-  const changeType = /事实|改成|原来|没有死|其实/.test(question.value) ? 'RETCON' : 'CHANGE'
   try {
+    // FX-21: the backend understands the request (model, keyword fallback).
+    const understood = await store.classifyAssistantIntent(question.value, 'CHANGE')
+    const changeType = changeTypeForIntent(understood)
+    intentLabel.value = assistantIntentLabel(understood)
+    if (changeType === 'REMEMBER') {
+      rememberDraft.value = { content: question.value.trim(), subject: understood.subjects?.[0] ?? '' }
+      changeMessage.value = '这是一条以后都要遵守的写作规则。请核对下面的内容，确认后才会记住。'
+      return
+    }
     if (changeType === 'RETCON') {
       const grounded = await createGroundedAssistantRetcon({
         execute: (key, request) => store.runCommand(key, request),
@@ -162,6 +187,12 @@ async function proposeChange() {
       groundingOptions.value = []
       selectedGroundingFactId.value = ''
       router.push({ path: `/projects/${projectId}/history`, query: { changeRequestId: grounded.changeRequestId } })
+      return
+    }
+    const drafted = await store.draftSetupChange(question.value)
+    if (drafted?.draft) {
+      setupDraft.value = drafted.draft
+      changeMessage.value = '这是对故事底稿的修改。请逐项核对“原来”和“改成”，可以直接改“改成”的内容，提交后再到版本与变更记录批准。'
       return
     }
     await store.runCommand('assistant-change-proposal', {
@@ -195,6 +226,40 @@ async function proposeChange() {
   }
 }
 
+async function confirmRemember() {
+  if (!rememberDraft.value?.content.trim()) return
+  try {
+    await store.runCommand('assistant-remember', {
+      type: 'memory_correction_add',
+      payload: { content: rememberDraft.value.content, subject: rememberDraft.value.subject },
+    })
+  } catch {
+    // CommandFeedback shows what went wrong.
+  }
+  if (rememberState.value.status === 'committed') {
+    rememberDraft.value = null
+    changeMessage.value = '已记住。之后每一章的规划和写作都会照这条来。'
+  }
+}
+
+async function submitSetupDraft() {
+  const projectId = store.currentProjectId
+  if (!projectId || !setupDraft.value) return
+  const changeId = `change:${projectId}:${Date.now()}`
+  try {
+    await store.runCommand('assistant-change-proposal', {
+      type: 'change_request_create',
+      projectId,
+      payload: setupChangeRequest(changeId, setupDraft.value, question.value.trim()),
+    })
+    await store.runCommand('assistant-change-impact', { type: 'impact_preflight', projectId, payload: { changeRequestId: changeId } })
+    setupDraft.value = null
+    router.push({ path: `/projects/${projectId}/history`, query: { changeRequestId: changeId } })
+  } catch (error) {
+    changeMessage.value = productErrorMessage(error, '修改申请未建立，请刷新当前作品后重试。')
+  }
+}
+
 function chooseGrounding(factId: string) {
   selectedGroundingFactId.value = factId
   void proposeChange()
@@ -222,7 +287,28 @@ onMounted(() => {
       <label class="field"><span class="field-label">你想确认什么</span><textarea v-model="question" class="textarea" /></label>
       <div class="actions" style="justify-content:flex-end;margin-top:14px"><button class="btn primary" @click="ask">查询当前作品记录</button><button class="btn" @click="prepareRepair">准备一次可核对的修复</button><button class="btn warning" @click="proposeChange">建立变更提案</button></div>
       <CommandFeedback :state="queryState" />
+      <p v-if="intentLabel" class="muted" data-assistant-intent style="font-size:12px;margin-top:6px">{{ intentLabel }}</p>
       <p v-if="changeMessage" class="banner info" style="margin-top:12px">{{ changeMessage }}</p>
+      <div v-if="setupDraft" class="section" data-setup-draft style="display:grid;gap:10px;margin-top:12px">
+        <div v-for="item in setupDraft.items" :key="item.path" style="display:grid;gap:4px">
+          <strong>{{ setupPathLabel(item.path) }}</strong>
+          <span class="muted">原来：{{ displayValue(item.before) }}</span>
+          <label class="muted">改成<textarea v-if="typeof item.after === 'string'" v-model="item.after" rows="2" /><span v-else>{{ displayValue(item.after) }}</span></label>
+          <div v-if="item.writtenConflicts?.length" class="muted" style="font-size:12px">已写章节里还是原来的写法（批准后可另行发起事实修订）：
+            <div v-for="conflict in item.writtenConflicts ?? []" :key="`${conflict.chapterNo}:${conflict.quote}`">第 {{ conflict.chapterNo }} 章：{{ conflict.quote }}</div>
+          </div>
+        </div>
+        <p v-if="setupDraft.writtenConflictsUnavailable" class="banner warning">暂时读不到已写章节，无法列出和新设定冲突的地方。</p>
+        <p v-else-if="setupDraft.writtenConflictsJudgedUnavailable" class="banner warning">换了说法的冲突这次没能检查，下面只列出和原来字面一致的句子。</p>
+        <div class="actions"><button class="btn primary" @click="submitSetupDraft">提交修改申请</button><button class="btn" @click="setupDraft = null">不改了</button></div>
+        <CommandFeedback :state="setupDraftState" />
+      </div>
+      <div v-if="rememberDraft" class="section" data-remember-draft style="display:grid;gap:8px;margin-top:12px">
+        <label class="muted">要记住的规则<textarea v-model="rememberDraft.content" rows="2" /></label>
+        <label class="muted">关于谁或什么（可不填）<input v-model="rememberDraft.subject" /></label>
+        <div class="actions"><button class="btn primary" @click="confirmRemember">确认记住</button><button class="btn" @click="rememberDraft = null">不记了</button></div>
+        <CommandFeedback :state="rememberState" />
+      </div>
       <div v-if="groundingOptions.length" class="section" style="display:grid;gap:8px;margin-top:12px"><span class="muted">请选择要修订的当前事实：</span><button v-for="fact in groundingOptions" :key="fact.factId" class="btn" @click="chooseGrounding(fact.factId)">{{ fact.label }}</button></div>
     </section>
 

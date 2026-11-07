@@ -824,3 +824,184 @@ fn b04_volume_and_chapter_queries_are_server_paginated() {
 
 #[allow(dead_code)]
 fn _connection_is_explicitly_used(_connection: &Connection) {}
+
+#[test]
+fn fx19_canon_evidence_check_matches_a_canonical_json_chapter_scope_key() {
+    let (_temp, _manager, connection) = project();
+    // Only the evidence check is under test; skip building the chapter graph.
+    connection.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+    let payload = serde_json::json!({"body":"正文"});
+    let payload_hash = ai_novel_production_system_core::hash::sha256_canonical(&payload).unwrap();
+    for (artifact_id, chapter_id) in [
+        ("art:fx19:final-1", "chap:fx19:one"),
+        ("art:fx19:final-2", "chap:fx19:two"),
+    ] {
+        let scope_key = serde_json::json!({"chapterId":chapter_id,"level":"CHAPTER"}).to_string();
+        connection.execute("INSERT INTO artifacts(artifact_id, project_id, artifact_type, scope_level, scope_key, version, schema_version, artifact_status, payload_hash, provenance_json, created_at) VALUES (?1,'p1','FinalChapter','CHAPTER',?2,1,'m0a.artifact.v1','COMMITTED',?3,'{}',?4)", libsql_rusqlite::params![artifact_id, scope_key, payload_hash, NOW]).unwrap();
+        connection.execute("INSERT INTO artifact_payloads(artifact_id, version, payload_json, payload_hash) VALUES (?1,1,?2,?3)", libsql_rusqlite::params![artifact_id, payload.to_string(), payload_hash]).unwrap();
+    }
+    // Real commits record the bare chapter id on canon_evidence.
+    connection.execute("INSERT INTO canon_evidence(evidence_id,project_id,fact_id,final_chapter_id,source_artifact_id,source_version,evidence_type,quote,range_start,range_end,created_at) VALUES ('evidence:fx19','p1',NULL,'chap:fx19:one','art:fx19:final-1',1,'DIRECT_QUOTE','正文',0,2,?1)", [NOW]).unwrap();
+    let report = deep_integrity_check(&connection, "p1", NOW).unwrap();
+    let missing = report
+        .failures
+        .iter()
+        .filter(|failure| *failure == "FINAL_CHAPTER_CANON_EVIDENCE_MISSING")
+        .count();
+    assert_eq!(
+        missing, 1,
+        "only the chapter without evidence is reported: {:?}",
+        report.failures
+    );
+}
+
+#[test]
+fn fx19_restore_never_replays_the_replaced_database_wal() {
+    let temp = tempdir().unwrap();
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    drop(state.manager.create("p1", "B04", NOW).unwrap());
+    let connection = state.manager.open("p1", "B04", NOW).unwrap();
+    connection
+        .execute(
+            "INSERT INTO project_settings(project_id, setting_key, setting_value, updated_at) VALUES ('p1','restore-proof','before',?1)",
+            [NOW],
+        )
+        .unwrap();
+    let backup = temp.path().join("projects/p1/backups/wal.db");
+    let manifest =
+        BackupService::create_snapshot(&connection, &backup, "p1", "2026-08-27T00:01:00Z").unwrap();
+    drop(connection);
+    // Another connection keeps the database open, so the change made after
+    // the backup is still only in project.db-wal when the restore swaps files.
+    let database = temp.path().join("projects/p1/project.db");
+    let holder = libsql_rusqlite::Connection::open(&database).unwrap();
+    holder.execute_batch("PRAGMA wal_autocheckpoint=0").unwrap();
+    holder
+        .execute("UPDATE project_settings SET setting_value='after' WHERE project_id='p1' AND setting_key='restore-proof'", [])
+        .unwrap();
+    assert!(
+        temp.path()
+            .join("projects/p1/project.db-wal")
+            .metadata()
+            .unwrap()
+            .len()
+            > 0
+    );
+    let receipt = execute_command_impl(
+        &state,
+        serde_json::json!({
+            "type":"backup_restore","commandId":"fx19-restore","idempotencyKey":"fx19-restore-key",
+            "projectId":"p1","expectedRevision":0,"requestedAt":"2026-08-27T00:02:00Z",
+            "payload":{"backupName":"wal.db","checksumSha256":manifest.checksum_sha256}
+        }),
+    )
+    .unwrap();
+    assert_eq!(receipt["finalStatus"], "committed");
+    drop(holder);
+    let fresh = libsql_rusqlite::Connection::open(&database).unwrap();
+    assert_eq!(
+        fresh
+            .query_row::<String, _, _>(
+                "SELECT setting_value FROM project_settings WHERE project_id='p1' AND setting_key='restore-proof'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        "before"
+    );
+    let integrity: String = fresh
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(integrity, "ok");
+}
+
+#[test]
+fn fx22_backups_are_listed_with_the_revision_a_restore_needs() {
+    let temp = tempdir().unwrap();
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    drop(state.manager.create("p1", "B04", NOW).unwrap());
+    let backup = |command_id: &str, at: &str| {
+        let revision = state.manager.overview("p1").unwrap().1;
+        execute_command_impl(
+            &state,
+            serde_json::json!({"type":"backup_create","commandId":command_id,"idempotencyKey":format!("{command_id}-key"),"projectId":"p1","expectedRevision":revision,"requestedAt":at,"payload":{"kind":"milestone"}}),
+        )
+        .unwrap();
+        revision
+    };
+    let first_revision = backup("fx22-first", "2026-08-27T00:01:00Z");
+    let second_revision = backup("fx22-second", "2026-08-27T00:02:00Z");
+    let listed = ai_novel_production_system_core::commands::query_backups_impl(
+        &state,
+        serde_json::json!({"projectId":"p1"}),
+    )
+    .unwrap();
+    let backups = listed["backups"].as_array().unwrap();
+    assert_eq!(backups.len(), 2);
+    let entry = |name: &str| {
+        backups
+            .iter()
+            .find(|item| item["backupName"] == name)
+            .unwrap_or_else(|| panic!("{listed}"))
+            .clone()
+    };
+    assert_eq!(entry("b04-fx22-first.db")["revision"], first_revision);
+    assert_eq!(entry("b04-fx22-second.db")["revision"], second_revision);
+    assert_eq!(entry("b04-fx22-first.db")["available"], true);
+    let first = entry("b04-fx22-first.db");
+    let restored = execute_command_impl(
+        &state,
+        serde_json::json!({"type":"backup_restore","commandId":"fx22-restore","idempotencyKey":"fx22-restore-key","projectId":"p1","expectedRevision":first["revision"],"requestedAt":"2026-08-27T00:05:00Z","payload":{"backupName":first["backupName"],"checksumSha256":first["checksumSha256"]}}),
+    )
+    .unwrap();
+    assert_eq!(restored["finalStatus"], "committed");
+}
+
+#[test]
+fn craft_previous_chapters_report_goals_and_endings_newest_first() {
+    let (_temp, _manager, connection) = project();
+    // Only the history query is under test; skip building the chapter graph.
+    connection.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+    let body = |n: usize| format!("{}第{n}章结尾。", "正文".repeat(150));
+    for n in 1..=4_usize {
+        let chapter_id = format!("chap:craft:{n}");
+        let committed = n < 4;
+        let final_id = format!("art:craft:final-{n}");
+        let plan_id = format!("art:craft:plan-{n}");
+        connection.execute("INSERT INTO chapters(chapter_id, project_id, volume_id, chapter_no, title, importance_class, status, word_count, final_artifact_id, final_version, created_at, updated_at) VALUES (?1,'p1','vol:craft',?2,'章','NORMAL',?3,1,?4,?5,?6,?6)", libsql_rusqlite::params![chapter_id, n as i64, if committed { "COMMITTED" } else { "PLANNED" }, committed.then_some(final_id.clone()), committed.then_some(1_i64), NOW]).unwrap();
+        if committed {
+            let plan = serde_json::json!({"chapterGoal":format!("第{n}章目标")});
+            let final_payload = serde_json::json!({"body":body(n),"chapterPlanRef":{"artifactId":plan_id,"version":1}});
+            for (id, payload) in [(&plan_id, plan), (&final_id, final_payload)] {
+                connection.execute("INSERT INTO artifact_payloads(artifact_id, version, payload_json, payload_hash) VALUES (?1,1,?2,?3)", libsql_rusqlite::params![id, payload.to_string(), "c".repeat(64)]).unwrap();
+            }
+        }
+    }
+    let history = ai_novel_production_system_core::repositories::ops::chapter_history(
+        &connection,
+        "p1",
+        "chap:craft:4",
+        2,
+    )
+    .unwrap();
+    assert_eq!(history.chapter_no, Some(4));
+    assert_eq!(history.recent.len(), 2);
+    assert_eq!(history.recent[0]["chapterNo"], 3);
+    assert_eq!(history.recent[0]["chapterGoal"], "第3章目标");
+    let ending = history.recent[0]["ending"].as_str().unwrap();
+    assert!(ending.ends_with("第3章结尾。"));
+    assert_eq!(ending.chars().count(), 200);
+    assert_eq!(history.recent[1]["chapterNo"], 2);
+    assert_eq!(history.bodies.len(), 2);
+    assert!(history.bodies[0].ends_with("第3章结尾。"));
+    assert_eq!(history.bodies[0].chars().count(), 300 + 6);
+    let first = ai_novel_production_system_core::repositories::ops::chapter_history(
+        &connection,
+        "p1",
+        "chap:craft:1",
+        2,
+    )
+    .unwrap();
+    assert_eq!(first.chapter_no, Some(1));
+    assert!(first.recent.is_empty());
+}

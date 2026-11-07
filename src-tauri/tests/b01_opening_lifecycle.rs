@@ -3,7 +3,7 @@ use ai_novel_production_system_core::commands::{
     query_story_directions_impl, KernelState,
 };
 use ai_novel_production_system_core::production::{
-    ProductionModelGateway, ProductionModelResponse, ResolvedProviderProfile,
+    new_audit_item_id, ProductionModelGateway, ProductionModelResponse, ResolvedProviderProfile,
 };
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::repositories::project_entry::OPENING_CHAPTER_COUNT;
@@ -383,9 +383,18 @@ fn b01_real_opening_lifecycle_creates_and_commits_three_chapters_without_volume_
             let source_refs = context["narrativeStateSources"]
                 .as_array()
                 .expect("narrative state sources");
+            // Chapter 1's first audit fact, by its system id (LD-1.2).
+            let chapter_one: String = connection
+                .query_row(
+                    "SELECT c.chapter_id FROM chapters c JOIN volumes v ON v.project_id=c.project_id AND v.volume_id=c.volume_id WHERE c.project_id=?1 AND v.volume_no=1 AND c.chapter_no=1",
+                    [&project_id],
+                    |row| row.get(0),
+                )
+                .expect("chapter one");
+            let door_open = new_audit_item_id("canon", &chapter_one, 1);
             assert!(source_refs
                 .iter()
-                .any(|source| source["ref"] == "fact:b01:door-open"));
+                .any(|source| source["ref"] == door_open.as_str()));
         }
     }
 

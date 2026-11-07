@@ -5,7 +5,8 @@ use ai_novel_production_system_core::commands::{
 use ai_novel_production_system_core::generated::types::ArtifactRef;
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::planning::{
-    compile_volume_intent_from_authority, evaluate_b03_completion_predicate,
+    compile_goal_contract, compile_volume_intent_from_authority,
+    compile_volume_plan_from_authority, evaluate_b03_completion_predicate,
     is_b03_completion_predicate_kind, validate_volume_plan_semantics,
 };
 use ai_novel_production_system_core::project_db::paths::AppPaths;
@@ -790,4 +791,240 @@ fn b03_runtime_phases_are_backend_projected_and_terminal_active_is_zero() {
             "COMPLETED"
         ]
     );
+}
+
+/// VD-1b: a BookPlan approved with a direction (VD-1a).
+fn directed_book_plan() -> Value {
+    let stage = |n: i64, goal: &str, chapters: i64| json!({"id":format!("stage:1:{n}"),"goal":goal,"pressure":"裴砚舟出手","cast":["陆照"],"turn":"段末转折","estimatedChapters":chapters});
+    json!({
+        "payloadSchema":"book-plan.r1",
+        "planningMaturity":"APPROVED",
+        "storyPromise":"以命换力",
+        "protagonistMacroDirection":"陆照从杂役走到签约人",
+        "endingBoundary":"结局",
+        "mustAchieve":[
+            {"id":"goal:book:1","volumeNo":1,"description":"陆照拿到租约原件"},
+            {"id":"goal:book:2","volumeNo":2,"description":"陆照走出青崖宗"}
+        ],
+        "mustNotBreak":[{"id":"rule:opening","description":"开篇已提交事实不得违背；以 Canon 为准。"}],
+        "relationshipMacroDirections":[
+            {"id":"relation:book:1","volumeNo":1,"description":"陆照与柳漪：从互相提防走向并肩查账"},
+            {"id":"relation:book:2","volumeNo":2,"description":"陆照与陈伯：从师徒走向诀别"}
+        ],
+        "majorMysteryGoals":[
+            {"id":"mystery:book:1","volumeNo":2,"description":"第 1 层：师父怎么死的"},
+            {"id":"mystery:book:2","volumeNo":1,"description":"第 2 层：租约里多出的那一条是谁加的"}
+        ],
+        "futureReservations":[],
+        "volumeIntentSeeds":[
+            {"seedId":"volume-1","description":"守住丹房，揪出改约的人","stages":[
+                stage(1,"陆照查清丹房的账",8),
+                stage(2,"陆照找到改约的证据",10),
+                stage(3,"陆照在会审上翻案",12)
+            ],"climax":"会审上陆照当众拿出原件"},
+            {"seedId":"volume-2","description":"走出青崖宗"}
+        ],
+        "openingHypotheses":[],"globalLengthBudget":{"preferredWords":1200000}
+    })
+}
+
+fn directed_intent() -> Value {
+    let book_ref = ArtifactRef {
+        artifact_id: "book-plan:directed".into(),
+        version: 1,
+        payload_hash: "c".repeat(64),
+    };
+    let sources = json!({
+        "facts":[{"factId":"fact:ledger","predicate":"持有","objectJson":{"text":"账册"}}],
+        "relations":[],"knowledge":[],
+        "events":[{"eventId":"event:fire","eventType":"FIRE","objectJson":{"text":"丹房起火"}}],
+        "evidence":[{"evidenceId":"evidence:directed"}],
+        "responsibilities":[{"obligationId":"obligation:debt","description":"欠陈伯的药钱"}]
+    });
+    compile_volume_intent_from_authority(
+        "vol:directed:1",
+        1,
+        1,
+        36,
+        120000,
+        &book_ref,
+        &directed_book_plan(),
+        &sources,
+        0,
+    )
+    .unwrap()
+}
+
+#[test]
+fn vd1b_a_directed_volume_intent_sets_its_stages_before_the_volume_goal() {
+    let intent = directed_intent();
+    let goals = intent["mustAchieve"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|goal| {
+            (
+                goal["id"].as_str().unwrap(),
+                goal["description"].as_str().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        goals,
+        vec![
+            ("goal:vol:directed:1:stage:1:1", "陆照查清丹房的账"),
+            ("goal:vol:directed:1:stage:1:2", "陆照找到改约的证据"),
+            ("goal:vol:directed:1:stage:1:3", "陆照在会审上翻案"),
+            ("goal:book:1", "陆照拿到租约原件"),
+            (
+                "goal:vol:directed:1:responsibility:obligation:debt",
+                "推进跨卷责任：欠陈伯的药钱"
+            ),
+        ]
+    );
+    assert!(intent["volumeFunction"]
+        .as_str()
+        .unwrap()
+        .starts_with("守住丹房，揪出改约的人"));
+}
+
+#[test]
+fn vd1b_a_directed_route_chains_the_stages_and_peaks_on_this_volumes_mystery() {
+    let intent = directed_intent();
+    let intent_ref = ArtifactRef {
+        artifact_id: "volume-intent:directed".into(),
+        version: 1,
+        payload_hash: "d".repeat(64),
+    };
+    let contract_ref = |id: &str| ArtifactRef {
+        artifact_id: id.into(),
+        version: 1,
+        payload_hash: "e".repeat(64),
+    };
+    let goal_contract = compile_goal_contract(
+        &contract_ref("story"),
+        &json!({}),
+        &contract_ref("main"),
+        &json!({}),
+        &contract_ref("book"),
+        &directed_book_plan(),
+        &intent_ref,
+        &intent,
+    )
+    .unwrap();
+    let route =
+        compile_volume_plan_from_authority(1, &intent_ref, &intent, &goal_contract, 0).unwrap();
+    let tasks = route["tasks"].as_array().unwrap();
+    let required = tasks
+        .iter()
+        .filter(|task| task["class"] == "REQUIRED")
+        .collect::<Vec<_>>();
+    assert_eq!(required[0]["objective"], "陆照查清丹房的账");
+    assert_eq!(required[0]["estimatedChapterCost"]["preferred"], 8);
+    assert_eq!(required[1]["estimatedChapterCost"]["preferred"], 10);
+    assert_eq!(
+        required[1]["dependsOnTaskIds"],
+        json!([required[0]["taskId"]])
+    );
+    assert_eq!(required[3]["estimatedChapterCost"]["preferred"], 1);
+    let optional = tasks
+        .iter()
+        .filter(|task| task["class"] == "OPTIONAL")
+        .map(|task| task["taskId"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(optional, vec!["task:optional:relation:book:1"]);
+    let climax = tasks.iter().find(|task| task["class"] == "CLIMAX").unwrap();
+    assert_eq!(climax["taskId"], "task:climax:mystery:book:2");
+    assert_eq!(
+        climax["objective"],
+        "会审上陆照当众拿出原件；第 2 层：租约里多出的那一条是谁加的"
+    );
+}
+
+#[test]
+fn vd1h_a_stage_with_steps_becomes_one_required_task_per_step() {
+    let mut book_plan = directed_book_plan();
+    book_plan["volumeIntentSeeds"][0]["stages"][0]["steps"] = json!([
+        {"id":"step:1:1:1","goal":"陆照摸清账房几时没人"},
+        {"id":"step:1:1:2","goal":"陆照抄下三月的出库单"},
+        {"id":"step:1:1:3","goal":"陆照对出两笔对不上的账"}
+    ]);
+    let book_ref = ArtifactRef {
+        artifact_id: "book-plan:steps".into(),
+        version: 1,
+        payload_hash: "c".repeat(64),
+    };
+    let sources = json!({
+        "facts":[],"relations":[],"knowledge":[],"events":[],
+        "evidence":[{"evidenceId":"evidence:steps"}],"responsibilities":[]
+    });
+    let intent = compile_volume_intent_from_authority(
+        "vol:steps:1",
+        1,
+        1,
+        36,
+        120000,
+        &book_ref,
+        &book_plan,
+        &sources,
+        0,
+    )
+    .unwrap();
+    let goals = intent["mustAchieve"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|goal| goal["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    // Real run round 25 (owner decision 2026-11-03): the volume's goals are
+    // its stages; the steps are route tasks only.
+    assert_eq!(
+        goals[..3],
+        [
+            "goal:vol:steps:1:stage:1:1",
+            "goal:vol:steps:1:stage:1:2",
+            "goal:vol:steps:1:stage:1:3"
+        ]
+    );
+    let intent_ref = ArtifactRef {
+        artifact_id: "volume-intent:steps".into(),
+        version: 1,
+        payload_hash: "d".repeat(64),
+    };
+    let contract_ref = |id: &str| ArtifactRef {
+        artifact_id: id.into(),
+        version: 1,
+        payload_hash: "e".repeat(64),
+    };
+    let goal_contract = compile_goal_contract(
+        &contract_ref("story"),
+        &json!({}),
+        &contract_ref("main"),
+        &json!({}),
+        &contract_ref("book"),
+        &book_plan,
+        &intent_ref,
+        &intent,
+    )
+    .unwrap();
+    let route =
+        compile_volume_plan_from_authority(1, &intent_ref, &intent, &goal_contract, 0).unwrap();
+    let required = route["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|task| task["class"] == "REQUIRED")
+        .collect::<Vec<_>>();
+    // Stage 1 (8 chapters) over three steps: 3, 3 and 2, each a task named
+    // as its step, toward the stage's goal.
+    assert_eq!(required[0]["taskId"], "task:required:goal:vol:steps:1:step:1:1:1");
+    assert_eq!(
+        required[0]["completionPredicate"]["value"]["goalId"],
+        "goal:vol:steps:1:stage:1:1"
+    );
+    assert_eq!(required[0]["objective"], "陆照摸清账房几时没人");
+    assert_eq!(required[0]["estimatedChapterCost"]["preferred"], 3);
+    assert_eq!(required[2]["estimatedChapterCost"]["preferred"], 2);
+    assert_eq!(required[3]["objective"], "陆照找到改约的证据");
+    assert_eq!(required[3]["estimatedChapterCost"]["preferred"], 10);
 }

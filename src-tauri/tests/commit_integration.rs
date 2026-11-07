@@ -240,3 +240,29 @@ fn failed_commit_rolls_back_all_rows_and_revision() {
         0
     );
 }
+
+#[test]
+fn a_delta_that_breaks_a_foreign_key_is_named_in_the_error() {
+    // Real run round 30: chapter 4 failed with only "FOREIGN KEY constraint
+    // failed", and nothing said which part of the bundle broke it.
+    let temp = tempdir().unwrap();
+    let manager = ProjectManager::new(AppPaths::new(temp.path()));
+    let connection = manager
+        .create("project-a", "A", "2026-08-24T00:00:00Z")
+        .unwrap();
+    let mut failed = bundle(
+        "project-a",
+        "fk-key",
+        artifact("project-a", "artifact-1", ArtifactStatus::Candidate),
+    );
+    failed.canon_delta = Some(vec![serde_json::from_value(json!({
+        "factId":"fact:nobody","subjectId":"entity:not-recorded","predicate":"status",
+        "objectJson":{"status":"醒着"}
+    }))
+    .unwrap()]);
+    let error = CommitService::commit(&connection, &failed, "2026-08-24T00:00:01Z")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("FOREIGN KEY"), "{error}");
+    assert!(error.contains("canon fact:nobody"), "{error}");
+}

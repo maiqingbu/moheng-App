@@ -1503,3 +1503,24 @@ fn h01_adapter_reports_event_truncation_and_global_dependency_bound() {
     assert!(edges.truncated);
     println!("H01_BOUNDS_RESULT events=100 events_truncated=true dependency_edges=100 dependency_truncated=true global_max_results=100 status=PASS");
 }
+
+#[test]
+fn fx20_promise_questions_reach_the_continuity_query_and_constraint_questions_stay_planning() {
+    let routed = |question: &str| {
+        let scope = resolve_project_scope("p1", 7, question, "DIAGNOSE", "PROJECT").unwrap();
+        plan_support(&scope, question, "2026-08-28T00:00:00Z")
+            .unwrap()
+            .steps
+            .into_iter()
+            .map(|step| step.capability_id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        routed("林舟对姐姐的承诺兑现了吗？"),
+        ["query_continuity", "query_events", "query_evidence"]
+    );
+    assert_eq!(
+        routed("哪些跨卷承诺正在约束下一章？"),
+        ["query_plan_route", "diagnose_planning_constraints"]
+    );
+}

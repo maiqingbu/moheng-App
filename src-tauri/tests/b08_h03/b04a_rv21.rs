@@ -1,5 +1,8 @@
 use super::*;
 
+/// A completion claim whose dependencies or predicate are unmet never
+/// satisfies the task (2026-10-19): the claim is kept as progress and
+/// recorded, and the chapter commits.
 #[test]
 fn b08_task_satisfied_requires_satisfied_dependencies_and_completion_predicate() {
     let temp = tempfile::tempdir().unwrap();
@@ -15,7 +18,7 @@ fn b08_task_satisfied_requires_satisfied_dependencies_and_completion_predicate()
         [project_id],
     ).unwrap();
     drop(connection);
-    let error = execute_command_impl(
+    let result = execute_command_impl(
         &state,
         json!({
             "type":"production_start","commandId":"cmd:b08:task-completion",
@@ -25,11 +28,23 @@ fn b08_task_satisfied_requires_satisfied_dependencies_and_completion_predicate()
                 "entityIds":["entity:actual:linzhou"],"references":[]}
         }),
     )
-    .unwrap_err();
-    assert_eq!(error, "B08_TASK_COMPLETION_PREDICATE_UNSATISFIED");
+    .unwrap();
+    assert_eq!(result["finalStatus"], "committed");
     let connection = state.manager.open(project_id, "B08 task", NOW).unwrap();
-    assert_eq!(
-        b08_committed_final_count_for_chapter(&connection, project_id, &chapter_id),
-        0
-    );
+    let claimed: String = connection
+        .query_row(
+            "SELECT json_extract(p.payload_json,'$.audit.normalization.downgradedTaskClaims') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ReviewReport'",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(claimed.contains("task:actual"));
+    let satisfied: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM state_deltas WHERE project_id=?1 AND state_id='task:actual' AND json_extract(value_json,'$.status')='SATISFIED'",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(satisfied, 0);
 }

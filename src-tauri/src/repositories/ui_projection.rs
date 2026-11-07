@@ -234,7 +234,16 @@ pub fn decisions(
             let outcome: String = row.get(2)?;
             let category = payload.get("category").and_then(Value::as_str).unwrap_or("项目事项");
             let priority = payload.get("priority").and_then(Value::as_str).unwrap_or("normal");
-            Ok(json!({
+            // WM-2a (owner decision 2026-11-02): plan and continuity reminders
+            // may be remembered as an owner correction.
+            let rememberable = payload
+                .get("heldBack")
+                .and_then(Value::as_array)
+                .is_some_and(|held| {
+                    held.iter()
+                        .any(|item| matches!(item["field"].as_str(), Some("plan" | "continuity")))
+                });
+            Ok(json!({"rememberable":rememberable,
                 "id":row.get::<_,String>(0)?,"decisionType":row.get::<_,String>(1)?,"title":payload.get("title").and_then(Value::as_str).unwrap_or(category),
                 "summary":row.get::<_,String>(3)?,"category":category,"priority":priority,
                 "status":if outcome == "OPEN" || outcome == "PENDING" { "pending" } else { "resolved" },

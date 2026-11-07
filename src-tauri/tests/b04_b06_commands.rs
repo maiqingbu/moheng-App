@@ -737,7 +737,7 @@ fn b2_hard_context_overflow_reports_source_sizes_without_writes() {
     let manager = ProjectManager::new(AppPaths::new(temp.path()));
     let connection = manager.create("p-b2-overflow", "B2 overflow", NOW).unwrap();
     let (volume_id, chapter_id) =
-        seed_authority_with_large_world_rule(&connection, "p-b2-overflow", 5000);
+        seed_authority_with_large_world_rule(&connection, "p-b2-overflow", 10_000);
     let revision_before = connection
         .query_row::<i64, _, _>(
             "SELECT revision FROM project_meta WHERE project_id='p-b2-overflow'",
@@ -940,7 +940,8 @@ fn b_r2_01_canon_overflow_blocks_formal_context_manifest() {
             "INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:b04:overflow',?1,'Overflow','CHARACTER',?2,?2)",
             libsql_rusqlite::params![project_id, NOW],
         ).unwrap();
-        for index in 0..100 {
+        // QC-1: past the state source limit (1000 since 2026-10-26).
+        for index in 0..ai_novel_production_system_core::narrative::STATE_SOURCE_LIMIT {
             connection.execute(
                 "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,created_at,updated_at) VALUES (?1,?2,'entity:b04:lead','HARD_CONTEXT',?3,'A',?4,?4)",
                 libsql_rusqlite::params![format!("fact:overflow:{index}"), project_id, json!(index).to_string(), NOW],
@@ -956,7 +957,7 @@ fn b_r2_01_canon_overflow_blocks_formal_context_manifest() {
 #[test]
 fn b_r2_01_knowledge_overflow_blocks_formal_context_manifest() {
     assert_context_manifest_blocks_hard_overflow("KNOWLEDGE", |connection, project_id, _| {
-        for index in 0..101 {
+        for index in 0..=ai_novel_production_system_core::narrative::STATE_SOURCE_LIMIT {
             connection.execute(
                 "INSERT INTO canon_knowledge(knowledge_id,project_id,knower_id,epistemic_state,created_at,updated_at) VALUES (?1,?2,'entity:b04:lead','KNOWS',?3,?3)",
                 libsql_rusqlite::params![format!("knowledge:overflow:{index}"), project_id, NOW],
@@ -1044,7 +1045,9 @@ fn b_r2_01_unavailable_hard_source_returns_typed_blocker_with_scope() {
 }
 
 #[test]
-fn b2_selected_canon_scope_over_budget_reports_required_sources() {
+fn qc1_selected_canon_scope_over_budget_is_trimmed_and_records_what_it_left_out() {
+    // QC-1 (owner decision 2026-10-26): the compiler leaves facts out of an
+    // over-budget context instead of failing, and names each one.
     let temp = tempfile::tempdir().unwrap();
     let project_id = "p-context-derived-scope-overflow";
     let manager = ProjectManager::new(AppPaths::new(temp.path()));
@@ -1059,8 +1062,9 @@ fn b2_selected_canon_scope_over_budget_reports_required_sources() {
             libsql_rusqlite::params![entity_id, project_id, NOW],
         ).unwrap();
         connection.execute(
-            "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,source_chapter_id,valid_from_chapter_id,created_at,updated_at) VALUES (?1,?2,?3,'HARD_CONTEXT','true','A','chapter:b04:1','chapter:b04:1',?4,?4)",
-            libsql_rusqlite::params![format!("fact:derived:{index}"), project_id, entity_id, NOW],
+            "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,source_chapter_id,valid_from_chapter_id,created_at,updated_at) VALUES (?1,?2,?3,'HARD_CONTEXT',?5,'A','chapter:b04:1','chapter:b04:1',?4,?4)",
+            // Large enough that 100 selected facts exceed the hard budget.
+            libsql_rusqlite::params![format!("fact:derived:{index}"), project_id, entity_id, NOW, serde_json::json!({"detail":"线".repeat(60)}).to_string()],
         ).unwrap();
     }
     drop(connection);
@@ -1069,14 +1073,27 @@ fn b2_selected_canon_scope_over_budget_reports_required_sources() {
     let entity_ids = (0..100)
         .map(|index| format!("entity:derived:{index}"))
         .collect::<Vec<_>>();
-    let error = query_context_manifest_impl(
+    let manifest = query_context_manifest_impl(
         &state,
         json!({"projectId":project_id,"volumeId":volume_id,"chapterId":chapter_id,"executionMode":"LONG_FORM","entityIds":entity_ids,"references":[]}),
     )
-    .unwrap_err();
-    assert!(error.contains("CONTEXT_HARD_BUDGET_EXCEEDED"), "{error}");
-    assert!(error.contains("CANON"), "{error}");
-    assert!(error.contains("fact:derived"), "{error}");
+    .unwrap();
+    assert!(
+        manifest["budget"]["hardTokens"].as_i64().unwrap() <= 8192,
+        "{manifest}"
+    );
+    let left_out = manifest["omittedSoftSources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|source| {
+            source["sourceRef"]["kind"] == "CANON"
+                && source["sourceRef"]["ref"]
+                    .as_str()
+                    .is_some_and(|reference| reference.starts_with("fact:derived"))
+        })
+        .count();
+    assert!(left_out > 0 && left_out < 100, "{left_out}");
 }
 
 #[test]
@@ -1119,7 +1136,7 @@ fn b_r2_01_planning_blocks_before_model_and_persists_no_context_after_reopen() {
         .create(project_id, "Context completeness", NOW)
         .unwrap();
     let (volume_id, _) =
-        seed_authority_with_large_world_rule_and_r1_signing(&connection, project_id, 5000);
+        seed_authority_with_large_world_rule_and_r1_signing(&connection, project_id, 10_000);
     drop(connection);
 
     let gateway = Arc::new(PlanningGateway {

@@ -1,0 +1,873 @@
+//! CRAFT v3 opening craft setup (CRAFT_V3_DESIGN §4.1): three story-bible
+//! candidates from the model, three rule-built style-card candidates, the
+//! user's confirmation of each, and the local-only style sample.
+//!
+//! Candidates are committed without a canonical head; only an explicit user
+//! confirmation advances the StoryBible / StyleCard head.
+
+use crate::commit::CommitService;
+use crate::generated::types::{ArtifactRef, CommitBundle, CommitReceipt};
+use crate::generated::validators::{validate_story_bible_r1, validate_style_card_r1};
+use crate::hash::sha256_canonical;
+use crate::production::ProductionModelGateway;
+use crate::project_db::ProjectHandle;
+use crate::project_entry::{
+    artifact, artifact_ref, bundle, commit_entry_job_bundle, project_scope, run_entry_model_job,
+};
+use crate::repositories::craft;
+use crate::repositories::project_entry::{self, EntryArtifactRow};
+use crate::style_card;
+use serde_json::{json, Value};
+
+pub const GENERATE_STORY_BIBLE: &str = "GENERATE_STORY_BIBLE";
+const CANDIDATE_COUNT: usize = 3;
+const MAX_SAMPLE_CHARS: usize = 20_000;
+pub(crate) const QUOTE_MARKS: &[char] = &['“', '”', '「', '」', '"'];
+
+/// What differs between confirming a story bible and a style card.
+struct Stage {
+    artifact_type: &'static str,
+    id_prefix: &'static str,
+    /// The request payload key holding the user's edited version.
+    edit_key: &'static str,
+    /// The fields a model or the user writes; the rest is metadata.
+    fields: &'static [&'static str],
+    decision_type: &'static str,
+    candidates_domain: &'static str,
+    confirmed_domain: &'static str,
+    check: fn(Value) -> Result<Value, String>,
+}
+
+const STORY_BIBLE: Stage = Stage {
+    artifact_type: "StoryBible",
+    id_prefix: "story-bible",
+    edit_key: "bible",
+    fields: &[
+        "angle",
+        "normalWorld",
+        "mechanism",
+        "protagonist",
+        "emotionalAnchor",
+        "antagonist",
+        "cast",
+        "openingArc",
+    ],
+    decision_type: "STORY_BIBLE_CONFIRMATION",
+    candidates_domain: "B11_STORY_BIBLE_CANDIDATES",
+    confirmed_domain: "B11_STORY_BIBLE_CONFIRMED",
+    check: checked_bible,
+};
+
+const STYLE_CARD: Stage = Stage {
+    artifact_type: "StyleCard",
+    id_prefix: "style-card",
+    edit_key: "card",
+    fields: &[
+        "label",
+        "targets",
+        "narration",
+        "openingStructure",
+        "rules",
+        "forbidden",
+        "examples",
+    ],
+    decision_type: "STYLE_CARD_CONFIRMATION",
+    candidates_domain: "B11_STYLE_CARD_CANDIDATES",
+    confirmed_domain: "B11_STYLE_CARD_CONFIRMED",
+    check: checked_card,
+};
+
+fn row_ref(row: &EntryArtifactRow) -> ArtifactRef {
+    ArtifactRef {
+        artifact_id: row.artifact_id.clone(),
+        version: row.version,
+        payload_hash: row.payload_hash.clone(),
+    }
+}
+
+fn next_generation(
+    connection: &ProjectHandle,
+    project_id: &str,
+    artifact_type: &str,
+) -> Result<i64, String> {
+    Ok(
+        project_entry::latest_generation(connection, project_id, artifact_type)
+            .map_err(|error| error.to_string())?
+            .unwrap_or(0)
+            + 1,
+    )
+}
+
+/// Style descriptions must stay descriptions: a quoted line in them is copied
+/// verbatim into chapters (CRAFT_V3_DESIGN §4.1).
+fn ready_sentence_path(bible: &Value) -> Option<String> {
+    let mut fields = vec![
+        (
+            "protagonist.humorStyle".to_string(),
+            &bible["protagonist"]["humorStyle"],
+        ),
+        (
+            "protagonist.innerVoiceStyle".to_string(),
+            &bible["protagonist"]["innerVoiceStyle"],
+        ),
+    ];
+    for (index, member) in bible["cast"].as_array().into_iter().flatten().enumerate() {
+        fields.push((format!("cast[{index}].speechStyle"), &member["speechStyle"]));
+    }
+    fields
+        .into_iter()
+        .find(|(_, value)| {
+            value
+                .as_str()
+                .is_some_and(|text| text.contains(QUOTE_MARKS))
+        })
+        .map(|(path, _)| path)
+}
+
+fn checked_bible(bible: Value) -> Result<Value, String> {
+    validate_story_bible_r1(&bible).map_err(|error| format!("STORY_BIBLE_CONTRACT:{error}"))?;
+    if let Some(path) = ready_sentence_path(&bible) {
+        return Err(format!("STORY_BIBLE_READY_SENTENCE:{path}"));
+    }
+    Ok(bible)
+}
+
+fn checked_card(card: Value) -> Result<Value, String> {
+    validate_style_card_r1(&card).map_err(|error| format!("STYLE_CARD_CONTRACT:{error}"))?;
+    Ok(card)
+}
+
+fn with_fields(mut base: Value, source: &Value, fields: &[&str]) -> Value {
+    for field in fields {
+        base[*field] = source.get(*field).cloned().unwrap_or(Value::Null);
+    }
+    base
+}
+
+/// Builds the candidates bundle for `stage` from already checked payloads.
+#[allow(clippy::too_many_arguments)]
+fn candidates_bundle(
+    stage: &Stage,
+    project_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    expected_revision: i64,
+    now: &str,
+    payloads: Vec<Value>,
+    parents: Vec<ArtifactRef>,
+    generation: i64,
+) -> Result<CommitBundle, String> {
+    let artifacts = payloads
+        .into_iter()
+        .enumerate()
+        .map(|(index, payload)| {
+            artifact(
+                project_id,
+                format!(
+                    "{}:{project_id}:{command_id}:{}",
+                    stage.id_prefix,
+                    index + 1
+                ),
+                stage.artifact_type,
+                project_scope(),
+                payload,
+                parents.clone(),
+                "B11::CraftSetupOwner",
+                command_id,
+                now,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    bundle(
+        project_id,
+        command_id,
+        idempotency_key,
+        Some(expected_revision),
+        now,
+        artifacts,
+        None,
+        None,
+        stage.candidates_domain,
+        json!({"candidateCount":CANDIDATE_COUNT,"generation":generation})
+            .as_object()
+            .cloned()
+            .unwrap_or_default(),
+    )
+}
+
+/// Asks the model for three story bibles built on the saved story core and
+/// commits them as candidates.
+#[allow(clippy::too_many_arguments)]
+pub fn commit_story_bible_candidates(
+    connection: &ProjectHandle,
+    project_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    expected_revision: i64,
+    now: &str,
+    request: &Value,
+    gateway: &dyn ProductionModelGateway,
+) -> Result<CommitReceipt, String> {
+    let constitution = project_entry::canonical_head(connection, project_id, "StoryConstitution")
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "B11_STORY_SETUP_REQUIRED".to_string())?;
+    let constitution_ref = row_ref(&constitution);
+    let generation = next_generation(connection, project_id, STORY_BIBLE.artifact_type)?;
+    let input = json!({
+        "prompt":"Generate exactly three substantially different story bibles for the story core in the JSON field input below. Return only the required JSON object.",
+        "capability":GENERATE_STORY_BIBLE,
+        "input":{
+            "storyCore":constitution.payload["storyCore"],
+            "adjustment":request.pointer("/payload/adjustment").and_then(Value::as_str).unwrap_or(""),
+            "generation":generation,
+            // P2: the methods selected for this step.
+            "craftGuidance":crate::chapter_craft::setup_guidance("story_setup")?
+        }
+    });
+    let (run, candidates) = run_entry_model_job(
+        connection,
+        project_id,
+        command_id,
+        idempotency_key,
+        now,
+        GENERATE_STORY_BIBLE,
+        "story-bible",
+        "b11-craft-setup",
+        input,
+        generation,
+        gateway,
+        &|run| {
+            run.parsed
+                .as_ref()
+                .and_then(|output| output["bibles"].as_array())
+                .filter(|items| items.len() == CANDIDATE_COUNT)
+                .ok_or_else(|| "STORY_BIBLE_COUNT_INVALID".to_string())?
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    let metadata = json!({
+                        "payloadSchema":"story-bible.r1","stage":"CANDIDATE","generation":generation,
+                        "variant":format!("MODEL_{}", index + 1),"storyConstitutionRef":constitution_ref,
+                        "confirmedFromRef":null,"createdAt":now
+                    });
+                    checked_bible(with_fields(metadata, item, STORY_BIBLE.fields))
+                })
+                .collect::<Result<Vec<_>, _>>()
+        },
+    )?;
+    let commit = candidates_bundle(
+        &STORY_BIBLE,
+        project_id,
+        command_id,
+        idempotency_key,
+        expected_revision,
+        now,
+        candidates,
+        vec![constitution_ref],
+        generation,
+    )?;
+    commit_entry_job_bundle(connection, project_id, commit, &run.job_id, now)
+}
+
+fn genre_text(connection: &ProjectHandle, project_id: &str) -> Result<String, String> {
+    let brief = project_entry::latest_artifact_by_type(connection, project_id, "CreativeBrief")
+        .map_err(|error| error.to_string())?;
+    let mut parts = brief
+        .and_then(|row| row.payload["preferences"].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if let Some(row) = project_entry::canonical_head(connection, project_id, "StoryConstitution")
+        .map_err(|error| error.to_string())?
+    {
+        parts.extend(
+            row.payload["storyCore"]["style"]
+                .as_str()
+                .map(ToOwned::to_owned),
+        );
+    }
+    Ok(parts.join(" "))
+}
+
+/// Builds three style-card candidates by rule, from market archetypes or the
+/// saved local sample, and commits them as candidates.
+pub fn commit_style_card_candidates(
+    connection: &ProjectHandle,
+    project_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    expected_revision: i64,
+    now: &str,
+    request: &Value,
+) -> Result<CommitReceipt, String> {
+    let generation = next_generation(connection, project_id, STYLE_CARD.artifact_type)?;
+    let text = |key: &str| {
+        request
+            .pointer(&format!("/payload/{key}"))
+            .and_then(Value::as_str)
+    };
+    let cards = match text("source").unwrap_or("MARKET_ARCHETYPE") {
+        "MARKET_ARCHETYPE" => {
+            let recommended =
+                style_card::recommend_archetypes(&genre_text(connection, project_id)?)?;
+            let primary = text("primary").unwrap_or(&recommended[0]).to_owned();
+            let secondary = text("secondary")
+                .map(ToOwned::to_owned)
+                .or_else(|| recommended.iter().find(|id| **id != primary).cloned())
+                .ok_or_else(|| "STYLE_ARCHETYPE_PAIR_INVALID".to_string())?;
+            style_card::archetype_candidates(&primary, &secondary, generation, now)?
+        }
+        "USER_SAMPLE" => {
+            let sample = craft::style_sample(connection, project_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "STYLE_SAMPLE_MISSING".to_string())?;
+            style_card::sample_candidates(&sample.body, &sample.digest, generation, now)?
+        }
+        other => return Err(format!("STYLE_CARD_SOURCE_INVALID:{other}")),
+    };
+    let commit = candidates_bundle(
+        &STYLE_CARD,
+        project_id,
+        command_id,
+        idempotency_key,
+        expected_revision,
+        now,
+        cards,
+        vec![],
+        generation,
+    )?;
+    CommitService::commit(connection, &commit, now).map_err(|error| error.to_string())
+}
+
+/// Commits the user's (possibly edited) choice among `stage`'s candidates as
+/// its canonical head, linked to the candidate it came from.
+#[allow(clippy::too_many_arguments)]
+fn commit_confirmation(
+    stage: &Stage,
+    connection: &ProjectHandle,
+    project_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    expected_revision: i64,
+    now: &str,
+    request: &Value,
+) -> Result<CommitReceipt, String> {
+    let id = request
+        .pointer("/payload/candidateId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "CRAFT_CANDIDATE_REQUIRED".to_string())?;
+    let chosen = project_entry::artifact_by_id(connection, project_id, id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "CRAFT_CANDIDATE_NOT_FOUND".to_string())?;
+    if chosen.artifact_type != stage.artifact_type
+        || chosen.artifact_status != "COMMITTED"
+        || chosen.payload["stage"] != "CANDIDATE"
+    {
+        return Err("CRAFT_CANDIDATE_NOT_SELECTABLE".into());
+    }
+    let candidate_ref = row_ref(&chosen);
+    let edited = request
+        .pointer(&format!("/payload/{}", stage.edit_key))
+        .unwrap_or(&chosen.payload);
+    let mut payload = with_fields(chosen.payload.clone(), edited, stage.fields);
+    payload["stage"] = json!("CONFIRMED");
+    payload["confirmedFromRef"] = json!(candidate_ref);
+    payload["createdAt"] = json!(now);
+    let confirmed = artifact(
+        project_id,
+        format!("{}:{project_id}:{command_id}", stage.id_prefix),
+        stage.artifact_type,
+        project_scope(),
+        (stage.check)(payload)?,
+        vec![candidate_ref.clone()],
+        "B11::CraftSetupOwner",
+        command_id,
+        now,
+    )?;
+    let confirmed_ref = artifact_ref(&confirmed);
+    let head = json!({"artifactType":stage.artifact_type,"scope":project_scope(),"artifactId":confirmed_ref.artifact_id,"version":confirmed_ref.version,"payloadHash":confirmed_ref.payload_hash});
+    let decision = json!({
+        "decisionId":format!("decision:{project_id}:{command_id}"),
+        "decisionType":stage.decision_type,"outcome":"APPROVED","reason":"用户确认并编辑候选",
+        "sourceRef":confirmed_ref.artifact_id,
+        "payloadJson":{"candidateRef":candidate_ref,"explicitUserConfirmation":true}
+    });
+    let commit = bundle(
+        project_id,
+        command_id,
+        idempotency_key,
+        Some(expected_revision),
+        now,
+        vec![confirmed],
+        Some(vec![head]),
+        Some(vec![decision]),
+        stage.confirmed_domain,
+        json!({"canonicalHead":stage.artifact_type,"explicitUserConfirmation":true})
+            .as_object()
+            .cloned()
+            .unwrap_or_default(),
+    )?;
+    CommitService::commit(connection, &commit, now).map_err(|error| error.to_string())
+}
+
+/// P3 (owner decision 2026-11-03): the story bible change the model drafted
+/// from the owner's words (`output`: `applies` and `changes`, each a dotted
+/// `path` into the bible and its new value `after`), or `None` when the words
+/// are not about the bible. Each change is an item with what the bible says
+/// now (`before`); `patch` carries the whole top-level fields it touches, and
+/// the changed bible passes the same checks as a new one.
+pub fn draft_setup_change(
+    artifact_id: &str,
+    bible: &Value,
+    output: &Value,
+) -> Result<Option<Value>, String> {
+    let changes = output["changes"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    if output["applies"] != json!(true) || changes.is_empty() {
+        return Ok(None);
+    }
+    let mut changed = bible.clone();
+    let mut items = Vec::new();
+    let mut fields = Vec::new();
+    for change in changes {
+        let path = change["path"].as_str().unwrap_or_default();
+        let invalid = || format!("SETUP_DRAFT_PATH_INVALID:{path}");
+        let field = path.split('.').next().unwrap_or_default();
+        if !STORY_BIBLE.fields.contains(&field) || change["after"].is_null() {
+            return Err(invalid());
+        }
+        let pointer = format!("/{}", path.replace('.', "/"));
+        let slot = changed.pointer_mut(&pointer).ok_or_else(invalid)?;
+        let before = std::mem::replace(slot, change["after"].clone());
+        items.push(json!({"path":path,"before":before,"after":change["after"]}));
+        if !fields.contains(&field) {
+            fields.push(field);
+        }
+    }
+    let changed = (STORY_BIBLE.check)(changed)?;
+    let pick = |source: &Value| {
+        fields
+            .iter()
+            .map(|field| ((*field).to_owned(), source[*field].clone()))
+            .collect::<serde_json::Map<_, _>>()
+    };
+    Ok(Some(json!({
+        "targetAuthority":{"artifactType":STORY_BIBLE.artifact_type,"artifactId":artifact_id},
+        "items":items,
+        "base":pick(bible),
+        "patch":pick(&changed)
+    })))
+}
+
+/// The most written chapters' sentences listed for one changed item.
+const WRITTEN_CONFLICTS_SHOWN: usize = 5;
+
+/// P3: `items` (a draft's changes) each with `writtenConflicts`: the
+/// sentences of written `chapters` (number and body) that still say a phrase
+/// of the old value, for the owner to decide on a retcon. Phrases are the
+/// old value's parts of two or more characters between punctuation.
+pub fn written_conflicts(items: &Value, chapters: &[(i64, String)]) -> Value {
+    let mut items = items.clone();
+    for item in items.as_array_mut().into_iter().flatten() {
+        let before = item["before"].as_str().unwrap_or_default().to_owned();
+        let phrases = before
+            .split(|c: char| "，、。；：,;:和与及".contains(c))
+            .map(str::trim)
+            .filter(|phrase| phrase.chars().count() >= 2)
+            .collect::<Vec<_>>();
+        let conflicts = chapters
+            .iter()
+            .flat_map(|(chapter_no, body)| {
+                body.split_inclusive(['。', '！', '？'])
+                    .filter(|sentence| phrases.iter().any(|phrase| sentence.contains(phrase)))
+                    .map(move |sentence| json!({"chapterNo":chapter_no,"quote":sentence.trim()}))
+            })
+            .take(WRITTEN_CONFLICTS_SHOWN)
+            .collect::<Vec<_>>();
+        item["writtenConflicts"] = json!(conflicts);
+    }
+    items
+}
+
+/// The most sentences sent to the model's conflict check.
+const CONFLICT_CANDIDATES_SENT: usize = 40;
+
+/// The person a changed bible field is about: the protagonist's, the
+/// antagonist's or a cast member's name; none for the world or mechanism.
+fn person_named_by(bible: &Value, path: &str) -> Option<String> {
+    let mut parts = path.split('.');
+    let name = match parts.next()? {
+        field @ ("protagonist" | "antagonist") => &bible[field]["name"],
+        "cast" => &bible["cast"][parts.next()?.parse::<usize>().ok()?]["name"],
+        _ => return None,
+    };
+    name.as_str().filter(|name| !name.is_empty()).map(ToOwned::to_owned)
+}
+
+/// Debt from P3: the sentences of written `chapters` that name the person a
+/// changed item is about, numbered for the model to judge which contradict
+/// the change (old settings said in other words).
+pub fn conflict_candidates(bible: &Value, items: &Value, chapters: &[(i64, String)]) -> Vec<Value> {
+    let named = items
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let path = item["path"].as_str()?;
+            Some((path.to_owned(), person_named_by(bible, path)?))
+        })
+        .collect::<Vec<_>>();
+    chapters
+        .iter()
+        .flat_map(|(chapter_no, body)| {
+            body.split_inclusive(['。', '！', '？']).map(move |sentence| (chapter_no, sentence.trim()))
+        })
+        .filter_map(|(chapter_no, sentence)| {
+            let paths = named
+                .iter()
+                .filter(|(_, name)| sentence.contains(name.as_str()))
+                .map(|(path, _)| path.clone())
+                .collect::<Vec<_>>();
+            (!paths.is_empty()).then_some((chapter_no, sentence, paths))
+        })
+        .take(CONFLICT_CANDIDATES_SENT)
+        .enumerate()
+        .map(|(id, (chapter_no, sentence, paths))| {
+            json!({"id":id,"chapterNo":chapter_no,"quote":sentence,"paths":paths})
+        })
+        .collect()
+}
+
+/// `items` with the sentences the model judged to contradict them added to
+/// their `writtenConflicts`, each once and within the shown limit; a pick
+/// that is no candidate of that item is ignored.
+pub fn with_judged_conflicts(items: &Value, candidates: &[Value], judged: &Value) -> Value {
+    let mut items = items.clone();
+    for pick in judged["conflicts"].as_array().into_iter().flatten() {
+        let path = pick["path"].as_str().unwrap_or_default();
+        let Some(candidate) = candidates.iter().find(|candidate| {
+            candidate["id"] == pick["id"]
+                && candidate["paths"].as_array().is_some_and(|paths| paths.iter().any(|p| p == path))
+        }) else {
+            continue;
+        };
+        let Some(item) = items
+            .as_array_mut()
+            .into_iter()
+            .flatten()
+            .find(|item| item["path"] == path)
+        else {
+            continue;
+        };
+        let conflict = json!({"chapterNo":candidate["chapterNo"],"quote":candidate["quote"]});
+        let listed = item["writtenConflicts"].as_array().cloned().unwrap_or_default();
+        if !listed.contains(&conflict) && listed.len() < WRITTEN_CONFLICTS_SHOWN {
+            item["writtenConflicts"] = json!(listed.into_iter().chain([conflict]).collect::<Vec<_>>());
+        }
+    }
+    items
+}
+
+/// P3: an approved change request's patch to the confirmed story bible,
+/// checked as a new bible is and written as its next version by this owner.
+pub fn apply_typed_change(
+    project_id: &str,
+    target: &crate::repositories::change_retcon::AuthorityHeadRecord,
+    scope: &Value,
+    patch: &Value,
+    decision_id: &str,
+    command_id: &str,
+    now: &str,
+) -> Result<crate::planning::PlanningChangeMutation, String> {
+    let mut candidate = target.payload.clone();
+    crate::planning::merge_change_patch(&mut candidate, patch);
+    let candidate = (STORY_BIBLE.check)(candidate)?;
+    let payload_hash = sha256_canonical(&candidate).map_err(|error| error.to_string())?;
+    let artifact = serde_json::from_value(json!({
+        "artifactId":target.artifact_id,"projectId":project_id,"artifactType":STORY_BIBLE.artifact_type,
+        "scope":scope,"version":target.version + 1,"schemaVersion":"m0a.artifact.v1",
+        "artifactStatus":"CANDIDATE","semanticLifecycle":"APPROVED_PLAN","authorityLevel":"B",
+        "payload":candidate,"payloadHash":payload_hash,"dependencyRefs":[],
+        "provenance":{"createdBy":"B11::CraftSetupOwner","commandId":command_id,"decisionRefs":[decision_id]},
+        "createdAt":now
+    }))
+    .map_err(|error| format!("B11_ARTIFACT:{error}"))?;
+    let head = serde_json::from_value(json!({
+        "artifactType":STORY_BIBLE.artifact_type,"scope":scope,"artifactId":target.artifact_id,
+        "version":target.version + 1,"payloadHash":payload_hash
+    }))
+    .map_err(|error| format!("B11_HEAD:{error}"))?;
+    let owner_receipt = json!({
+        "owner":"B11::CraftSetupOwner","operation":"apply_typed_change",
+        "artifactType":STORY_BIBLE.artifact_type,"artifactId":target.artifact_id,
+        "sourceHead":{"version":target.version,"payloadHash":target.payload_hash},
+        "resultHead":{"version":target.version + 1,"payloadHash":payload_hash},
+        "invocationCount":1,"directB12HeadMutationCount":0,"semanticValidation":"PASS"
+    });
+    Ok(crate::planning::PlanningChangeMutation {
+        artifact,
+        head,
+        owner_receipt,
+    })
+}
+
+/// Commits the user's (possibly edited) story bible as the StoryBible head.
+pub fn commit_story_bible_confirmation(
+    connection: &ProjectHandle,
+    project_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    expected_revision: i64,
+    now: &str,
+    request: &Value,
+) -> Result<CommitReceipt, String> {
+    commit_confirmation(
+        &STORY_BIBLE,
+        connection,
+        project_id,
+        command_id,
+        idempotency_key,
+        expected_revision,
+        now,
+        request,
+    )
+}
+
+/// Commits the user's (possibly edited) style card as the StyleCard head.
+pub fn commit_style_card_confirmation(
+    connection: &ProjectHandle,
+    project_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    expected_revision: i64,
+    now: &str,
+    request: &Value,
+) -> Result<CommitReceipt, String> {
+    commit_confirmation(
+        &STYLE_CARD,
+        connection,
+        project_id,
+        command_id,
+        idempotency_key,
+        expected_revision,
+        now,
+        request,
+    )
+}
+
+/// Saves the user's style sample on this machine only; it is not an
+/// artifact and does not advance the project revision.
+pub fn save_style_sample(
+    connection: &ProjectHandle,
+    project_id: &str,
+    now: &str,
+    request: &Value,
+) -> Result<String, String> {
+    let body = request
+        .pointer("/payload/text")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .ok_or_else(|| "STYLE_SAMPLE_REQUIRED".to_string())?;
+    if body.chars().count() > MAX_SAMPLE_CHARS {
+        return Err("STYLE_SAMPLE_TOO_LARGE".into());
+    }
+    let digest = crate::skill_deployment::sha256_hex(body.as_bytes());
+    craft::save_style_sample(connection, project_id, &digest, body, now)
+        .map_err(|error| error.to_string())?;
+    Ok(digest)
+}
+
+fn stage_view(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    artifact_type: &str,
+) -> Result<Value, String> {
+    let (rows, _, _) =
+        project_entry::list_artifacts(connection, project_id, artifact_type, None, 100)
+            .map_err(|error| error.to_string())?;
+    let with_id = |row: EntryArtifactRow| {
+        let mut payload = row.payload;
+        payload["id"] = json!(row.artifact_id);
+        payload
+    };
+    let candidates = rows
+        .into_iter()
+        .filter(|row| row.payload["stage"] == "CANDIDATE")
+        .collect::<Vec<_>>();
+    let generation = candidates
+        .iter()
+        .filter_map(|row| row.payload["generation"].as_i64())
+        .max();
+    let mut latest = candidates
+        .into_iter()
+        .filter(|row| row.payload["generation"].as_i64() == generation)
+        .collect::<Vec<_>>();
+    latest.sort_by(|left, right| left.artifact_id.cmp(&right.artifact_id));
+    let confirmed = project_entry::canonical_head(connection, project_id, artifact_type)
+        .map_err(|error| error.to_string())?
+        .map(with_id);
+    Ok(
+        json!({"candidates":latest.into_iter().map(with_id).collect::<Vec<_>>(),"confirmed":confirmed}),
+    )
+}
+
+/// The craft setup projection: both stages, the archetype library and the
+/// local sample with its metrics.
+pub fn query_craft_setup(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+) -> Result<Value, String> {
+    let sample = craft::style_sample(connection, project_id)
+        .map_err(|error| error.to_string())?
+        .map(|sample| {
+            let metrics = style_card::measure(&sample.body)
+                .by_target()
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), json!(value)))
+                .collect::<serde_json::Map<_, _>>();
+            json!({"text":sample.body,"digest":sample.digest,"savedAt":sample.saved_at,"metrics":metrics,
+                "minChars":style_card::MIN_SAMPLE_CHARS})
+        });
+    let archetypes = style_card::archetypes()?
+        .iter()
+        .map(|item| json!({"id":item["id"],"name":item["name"],"genres":item["genres"]}))
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "storyBible":stage_view(connection, project_id, STORY_BIBLE.artifact_type)?,
+        "styleCard":stage_view(connection, project_id, STYLE_CARD.artifact_type)?,
+        "sample":sample,
+        "archetypes":archetypes
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bible() -> Value {
+        serde_json::from_str(include_str!(
+            "../../contracts/fixtures/valid/narrative-story-bible-r1.json"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_setup_change_draft_shows_each_change_as_before_and_after() {
+        // P3 (owner decision 2026-11-03): only the story bible, each item
+        // shown as what it was and what it becomes.
+        let draft = draft_setup_change(
+            "story-bible:p3",
+            &bible(),
+            &json!({"applies":true,"changes":[
+                {"path":"antagonist.method","after":"收买码头的账房"},
+                {"path":"cast.1.speechStyle","after":"说话慢，句句带刺"}
+            ]}),
+        )
+        .unwrap()
+        .expect("a draft");
+        assert_eq!(
+            draft["targetAuthority"],
+            json!({"artifactType":"StoryBible","artifactId":"story-bible:p3"})
+        );
+        assert_eq!(
+            draft["items"][0],
+            json!({"path":"antagonist.method","before":"借据、打手和码头的规矩","after":"收买码头的账房"})
+        );
+        assert_eq!(draft["items"][1]["before"], "满嘴俗语");
+        // The patch carries whole top-level fields, so arrays stay whole.
+        assert_eq!(draft["patch"]["antagonist"]["name"], "彭三");
+        assert_eq!(draft["patch"]["antagonist"]["method"], "收买码头的账房");
+        assert_eq!(draft["patch"]["cast"][0]["speechStyle"], "话少，开口就呛人");
+        assert_eq!(draft["base"]["cast"][1]["speechStyle"], "满嘴俗语");
+    }
+
+    #[test]
+    fn a_setup_change_lists_where_written_chapters_still_say_the_old_value() {
+        // P3: chapters already written that conflict with the new setting are
+        // listed for the owner to decide on a retcon.
+        let items = json!([
+            {"path":"antagonist.method","before":"借据、打手和码头的规矩","after":"收买码头的账房"},
+            {"path":"cast.1.speechStyle","before":"满嘴俗语","after":"说话慢"}
+        ]);
+        let chapters = vec![
+            (4, "彭三把借据拍在桌上。打手堵住了门。林满没说话。".to_string()),
+            (5, "雨下了一夜，面馆照常开门。".to_string()),
+            (6, "老董又来赊账，满嘴俗语地说着软话。".to_string()),
+        ];
+        let listed = written_conflicts(&items, &chapters);
+        assert_eq!(
+            listed[0]["writtenConflicts"],
+            json!([
+                {"chapterNo":4,"quote":"彭三把借据拍在桌上。"},
+                {"chapterNo":4,"quote":"打手堵住了门。"}
+            ])
+        );
+        assert_eq!(
+            listed[1]["writtenConflicts"],
+            json!([{"chapterNo":6,"quote":"老董又来赊账，满嘴俗语地说着软话。"}])
+        );
+    }
+
+    #[test]
+    fn sentences_naming_the_person_a_change_is_about_go_to_the_conflict_check() {
+        // Debt from P3: written chapters that say the old setting in other
+        // words are found by asking the model about the sentences naming
+        // that person.
+        let items = json!([
+            {"path":"antagonist.method","before":"借据、打手和码头的规矩","after":"收买码头的账房"},
+            {"path":"cast.1.speechStyle","before":"满嘴俗语","after":"说话慢"}
+        ]);
+        let chapters = vec![
+            (4, "彭三笑着递过一张欠条。林满没说话。".to_string()),
+            (6, "老董张口就是乡下俗话。彭三也在。".to_string()),
+        ];
+        let candidates = conflict_candidates(&bible(), &items, &chapters);
+        assert_eq!(
+            candidates,
+            vec![
+                json!({"id":0,"chapterNo":4,"quote":"彭三笑着递过一张欠条。","paths":["antagonist.method"]}),
+                json!({"id":1,"chapterNo":6,"quote":"老董张口就是乡下俗话。","paths":["cast.1.speechStyle"]}),
+                json!({"id":2,"chapterNo":6,"quote":"彭三也在。","paths":["antagonist.method"]})
+            ]
+        );
+        // The model's picks join the literal ones, once each.
+        let listed = written_conflicts(&items, &chapters);
+        let merged = with_judged_conflicts(
+            &listed,
+            &candidates,
+            &json!({"conflicts":[{"path":"cast.1.speechStyle","id":1},{"path":"antagonist.method","id":0},{"path":"antagonist.method","id":7}]}),
+        );
+        assert_eq!(merged[0]["writtenConflicts"], json!([{"chapterNo":4,"quote":"彭三笑着递过一张欠条。"}]));
+        assert_eq!(merged[1]["writtenConflicts"], json!([{"chapterNo":6,"quote":"老董张口就是乡下俗话。"}]));
+    }
+
+    #[test]
+    fn a_request_that_is_not_about_the_story_bible_has_no_draft() {
+        let none = draft_setup_change("story-bible:p3", &bible(), &json!({"applies":false,"changes":[]}));
+        assert_eq!(none, Ok(None));
+    }
+
+    #[test]
+    fn a_setup_change_draft_is_checked_like_the_story_bible_itself() {
+        // A path outside the bible's fields, or one that does not exist.
+        for path in ["storyCore.premise", "antagonist.secret", "cast.9.name"] {
+            let error = draft_setup_change(
+                "story-bible:p3",
+                &bible(),
+                &json!({"applies":true,"changes":[{"path":path,"after":"x"}]}),
+            )
+            .unwrap_err();
+            assert!(error.starts_with("SETUP_DRAFT_PATH_INVALID"), "{path}: {error}");
+        }
+        // A quoted line in a speech style is refused, as in a new bible.
+        let error = draft_setup_change(
+            "story-bible:p3",
+            &bible(),
+            &json!({"applies":true,"changes":[{"path":"cast.0.speechStyle","after":"总说“你懂个屁”"}]}),
+        )
+        .unwrap_err();
+        assert!(error.starts_with("STORY_BIBLE_READY_SENTENCE"), "{error}");
+    }
+}

@@ -1161,9 +1161,28 @@ impl ProjectManager {
                 let _ = connection
                     .execute_batch("PRAGMA wal_checkpoint(FULL); PRAGMA journal_mode = DELETE;");
                 drop(connection);
-                std::fs::rename(&database, database.with_extension("db.pre-restore"))?;
+                // FX-19: the replaced database's WAL/SHM must leave with it;
+                // left behind, SQLite replays them into the restored file.
+                let sidecar = |path: &Path, suffix: &str| {
+                    std::path::PathBuf::from(format!("{}{suffix}", path.display()))
+                };
+                let previous = database.with_extension("db.pre-restore");
+                if let Ok(live) = open_connection(&database, false) {
+                    let _ = live.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+                }
+                std::fs::rename(&database, &previous)?;
+                for suffix in ["-wal", "-shm"] {
+                    let file = sidecar(&database, suffix);
+                    if file.exists() {
+                        std::fs::rename(&file, sidecar(&previous, suffix))?;
+                    }
+                }
                 if let Err(error) = std::fs::rename(&staging, &database) {
-                    let _ = std::fs::rename(database.with_extension("db.pre-restore"), &database);
+                    let _ = std::fs::rename(&previous, &database);
+                    for suffix in ["-wal", "-shm"] {
+                        let _ =
+                            std::fs::rename(sidecar(&previous, suffix), sidecar(&database, suffix));
+                    }
                     return Err(error.into());
                 }
                 let ready = open_connection(&database, false)?;
@@ -1181,7 +1200,10 @@ impl ProjectManager {
                         "RESTORE_NOT_READY_AFTER_REPLACE".into(),
                     ));
                 }
-                let _ = std::fs::remove_file(database.with_extension("db.pre-restore"));
+                let _ = std::fs::remove_file(&previous);
+                for suffix in ["-wal", "-shm"] {
+                    let _ = std::fs::remove_file(sidecar(&previous, suffix));
+                }
                 Ok(outcome)
             })();
             if outcome.is_err() {
