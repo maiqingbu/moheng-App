@@ -1485,7 +1485,7 @@ fn after_a_step_is_done_the_next_chapter_works_on_the_next_step() {
 #[test]
 fn a_chapter_whose_audit_marks_no_event_still_records_its_main_event() {
     // Real runs rounds 26-27: 455 facts, not one marked as an event by the
-    // audit; the system marks each chapter's main event itself.
+    // audit; the system keeps a provisional event marker for each chapter.
     let (state, _temp, _gateway) = state();
     let (project_id, _) = create_approved_book_plan(&state);
     let connection = state.manager.open(&project_id, "", NOW).unwrap();
@@ -1498,6 +1498,20 @@ fn a_chapter_whose_audit_marks_no_event_still_records_its_main_event() {
         .unwrap();
     // Chapter 1's audit marks no event.
     assert_eq!(events, 1);
+}
+
+#[test]
+fn a_fallback_event_description_is_a_bounded_excerpt_of_its_evidence() {
+    let (state, _temp, _gateway) = state();
+    let (project_id, _) = create_approved_book_plan(&state);
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let (description, evidence, origin): (String, String, String) = connection.query_row(
+        "SELECT json_extract(e.payload_json,'$.event.description'), json_extract(e.payload_json,'$.evidenceRange.quote'), json_extract(e.payload_json,'$.event.eventTypeSource') FROM canon_events e JOIN chapters c ON c.chapter_id=e.chapter_id WHERE e.project_id=?1 AND c.chapter_no=1",
+        [&project_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    ).unwrap();
+    assert!(!description.is_empty() && evidence.starts_with(&description), "fallback descriptions must be copied from their evidence");
+    assert!(description.chars().count() <= 160);
+    assert_eq!(origin, "fallback_fact");
 }
 
 #[test]

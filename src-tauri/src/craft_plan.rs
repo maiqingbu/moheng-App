@@ -1069,6 +1069,7 @@ pub const CONTINUITY_KINDS: &[&str] = &[
 const MAX_DETAILS_PER_CHAPTER: usize = 15;
 /// How many established facts the planner and the writer are given.
 pub const MAX_ESTABLISHED_FACTS: usize = 40;
+const PLACE_FOLLOWING_CONTEXT_CHARS: usize = 160;
 
 /// The continuity details of an audit reply that are complete, of a known
 /// kind and quoted from the chapter body (whitespace ignored).
@@ -1090,6 +1091,24 @@ pub fn continuity_details(audit: &Value, body: &str) -> Vec<Value> {
             !quote.is_empty() && body.contains(&quote)
         })
         .take(MAX_DETAILS_PER_CHAPTER)
-        .map(|item| json!({"subject":text(&item["subject"]),"kind":text(&item["kind"]),"detail":text(&item["detail"])}))
+        .map(|item| {
+            let mut detail = text(&item["detail"]).to_string();
+            if text(&item["kind"]) == "PLACE" {
+                let quote = squeeze(text(&item["quote"]));
+                let mut matches = body.match_indices(&quote);
+                if let (Some((start, _)), None) = (matches.next(), matches.next()) {
+                    let following: String = body[start + quote.len()..]
+                        .chars()
+                        .take(PLACE_FOLLOWING_CONTEXT_CHARS)
+                        .collect();
+                    if !following.is_empty() {
+                        detail.insert_str(0, "审计引用的状态（可能早于章末）：");
+                        detail.push_str("；引文后续原文（忽略空白，最多160字，可能有省略；未确认章末状态）：");
+                        detail.push_str(&following);
+                    }
+                }
+            }
+            json!({"subject":text(&item["subject"]),"kind":text(&item["kind"]),"detail":detail})
+        })
         .collect()
 }

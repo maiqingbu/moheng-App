@@ -4602,19 +4602,15 @@ fn run_chapter_production_inner(
         }
     }
     // P1 (real runs rounds 26-27: 455 facts, not one marked as an event):
-    // without an event from the audit, the chapter's first fact marks its
-    // main event, described by the plan's change of situation; a resolved
-    // mystery marks the next fact.
-    let chapter_event = plan_payload["craft"]["situationChange"]["after"]
-        .as_str()
-        .or_else(|| plan_payload["chapterGoal"].as_str())
-        .unwrap_or_default();
+    // Without an event from the audit, the first fact supplies a provisional
+    // situation-change marker. Its description must be sourced from the
+    // cited passage, not the plan. A resolved mystery marks the next fact.
     let has_event = extraction
         .canon_candidates
         .iter()
         .any(|item| item.event_type.is_some());
     let marks = (!has_event)
-        .then(|| ("SITUATION_CHANGE", json!({"description":chapter_event})))
+        .then_some(("SITUATION_CHANGE", Value::Null))
         .into_iter()
         .chain(
             resolved_mysteries
@@ -4625,8 +4621,17 @@ fn run_chapter_production_inner(
         .canon_candidates
         .iter()
         .filter(|item| item.event_type.is_none())
-        .map(|item| item.fact_id.clone())
         .zip(marks)
+        .map(|(item, (kind, payload))| {
+            let payload = if kind == "SITUATION_CHANGE" {
+                json!({"description":item.evidence.quote.chars().take(160).collect::<String>(),
+                    "descriptionSource":"evidence_quote", "descriptionTruncated":item.evidence.quote.chars().count() > 160,
+                    "eventTypeSource":"fallback_fact"})
+            } else {
+                payload
+            };
+            (item.fact_id.clone(), (kind, payload))
+        })
         .collect::<BTreeMap<_, _>>();
     // Relations last, after the facts that record their entities.
     let mut canon_candidates = extraction.canon_candidates.iter().collect::<Vec<_>>();

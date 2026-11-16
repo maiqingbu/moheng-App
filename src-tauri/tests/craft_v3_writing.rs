@@ -32,6 +32,8 @@ struct CraftGateway {
     /// Every chapter has `COUGH_LINE`, and its first rewrite adds a simile.
     cough_line: bool,
     cough_rewrites: AtomicUsize,
+    /// An audited place changes after the sentence the audit cited.
+    place_state: bool,
 }
 
 /// The inputs of every call to `capability`, in call order.
@@ -48,6 +50,8 @@ const TROPE_SENTENCE: &str = "林满倒吸一口凉气，转身进了面馆。";
 const COUGH_LINE: &str = "陈婆的咳声从甬道那头传下来，一下，两下，第三下咽回去了。";
 /// Clashes with chapter 1's detail that 林满 takes his soy milk unsweetened.
 const SUGAR_SENTENCE: &str = "林满往豆浆里加了两勺糖。";
+const PLACE_QUOTE: &str = "坛沿浊黄水光到了最高处，就是不溢。";
+const PLACE_FOLLOWING: &str = "水光向上拱起，漫过沿口。";
 
 /// A chapter in the 番茄 range (1800–2200, LD-1.5) with one stock phrasing.
 fn long_body(chapter: usize) -> String {
@@ -112,6 +116,9 @@ impl ProductionModelGateway for CraftGateway {
                 if self.cough_line {
                     body = body.replacen('\n', &format!("\n{COUGH_LINE}\n"), 1);
                 }
+                if self.place_state {
+                    body = body.replacen('\n', &format!("\n{PLACE_QUOTE}{PLACE_FOLLOWING}\n"), 1);
+                }
                 json!({"body":body})
             }
             "REWRITE_PASSAGES"
@@ -162,6 +169,11 @@ impl ProductionModelGateway for CraftGateway {
                         {"subject":"林满","kind":"PREFERENCE","detail":"喝豆浆不加糖","quote":"货单第1页写着1箱桐油"},
                         {"subject":"林满","kind":"HABIT","detail":"编出来的习惯","quote":"正文里没有这句"}
                     ]);
+                    if self.place_state {
+                        audit["continuityDetails"].as_array_mut().unwrap().push(json!({
+                            "subject":"废丹坛","kind":"PLACE","detail":"水光不溢","quote":PLACE_QUOTE
+                        }));
+                    }
                 }
                 audit
             }
@@ -392,6 +404,26 @@ fn habits_and_looks_from_the_audit_reach_the_next_chapter_as_established_facts()
     );
     let renders = inputs("RENDER_CHAPTER_CRAFT");
     assert_eq!(renders[1]["establishedFacts"][0]["detail"], "喝豆浆不加糖");
+}
+
+#[test]
+fn a_place_s_following_text_reaches_the_next_chapter_through_the_receipt() {
+    // 假如审核引用地点的早期状态，当下一章开始规划和写作时，
+    // 那么回执中保留的后续原文应作为未确认材料进入两次模型输入。
+    let (_temp, state, gateway, project_id) = project_ready_to_write_with(
+        "place-following",
+        CraftGateway { place_state: true, ..CraftGateway::default() },
+    );
+    write_next_chapter(&state, &project_id, "place-following:production:1");
+    write_next_chapter(&state, &project_id, "place-following:production:2");
+    let calls = gateway.calls.lock().unwrap();
+    for capability in ["PLAN_CHAPTER_CRAFT", "RENDER_CHAPTER_CRAFT"] {
+        let calls = inputs(&calls, capability);
+        let facts = calls.last().unwrap()["establishedFacts"].as_array().unwrap();
+        let place = facts.iter().find(|fact| fact["subject"] == "废丹坛").unwrap();
+        assert!(place["detail"].as_str().unwrap().contains(PLACE_FOLLOWING));
+        assert!(place["detail"].as_str().unwrap().contains("未确认章末状态"));
+    }
 }
 
 #[test]
