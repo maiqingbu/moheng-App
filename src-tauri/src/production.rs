@@ -4265,7 +4265,6 @@ fn run_chapter_production_inner(
         };
         let fits = |text: &str| length_range.accepts(character_count(text));
         let mut rewrite_error = None;
-        let mut sent_to_rewrite = Vec::new();
         if (!to_fix.is_empty() || !repeated.is_empty()) && room_for_polish(2)? {
             craft_signals.findings = to_fix
                 .iter()
@@ -4299,9 +4298,6 @@ fn run_chapter_production_inner(
             let edits = apply_edits_that_fit(&body, &rewrite, &additions, |text| {
                 fits(text) && !repeats(text)
             });
-            if rewrite_error.is_none() {
-                sent_to_rewrite.extend(edits.passages_tried(&narrative_findings_before));
-            }
             applied = edits.applied;
             if applied > 0 {
                 body = edits.body;
@@ -4449,7 +4445,6 @@ fn run_chapter_production_inner(
                             && duplicate_in_chapter(text).is_none()
                             && repeated_chars(text) <= repeats_before
                     });
-                    sent_to_rewrite.extend(edits.passages_tried(&narrative_left));
                     let (revised, count) = (edits.body, edits.applied);
                     if count > 0 {
                         let errors_before = continuity_errors.len();
@@ -4460,7 +4455,7 @@ fn run_chapter_production_inner(
                         if let Some((input, sentences)) =
                             continuity_request(&revised, &[], &revised_history)
                         {
-                            let (checked, _, _, reported) = judge(
+                            let (mut checked, _, _, reported) = judge(
                                 craft_step(
                                     "continuity-repair-check",
                                     "CHECK_CONTINUITY",
@@ -4486,8 +4481,31 @@ fn run_chapter_production_inner(
                                     still_present.push(finding.clone());
                                 }
                             }
+                            // So is a contradiction whose sentence is unchanged.
+                            let before = body_sentences(&body);
+                            for item in &left {
+                                let sentence = item["sentence"]
+                                    .as_u64()
+                                    .and_then(|index| before.get(index as usize))
+                                    .map(|(_, _, sentence)| sentence);
+                                let now = sentence.and_then(|sentence| {
+                                    sentences.iter().position(|other| other == sentence)
+                                });
+                                if let Some(now) = now.filter(|_| {
+                                    !checked
+                                        .iter()
+                                        .any(|other| other["established"] == item["established"])
+                                }) {
+                                    let mut item = item.clone();
+                                    item["sentence"] = json!(now);
+                                    checked.push(item);
+                                }
+                            }
                             if continuity_errors.len() == errors_before
-                                && checked.len() + still_present.len() < remaining
+                                && crate::chapter_craft::named_findings_left(
+                                    (&narrative_left, &left),
+                                    (&still_present, &checked),
+                                ) < remaining
                             {
                                 left = checked;
                                 narrative_left = still_present;
@@ -4540,10 +4558,7 @@ fn run_chapter_production_inner(
                         &body,
                         chapter_number,
                     );
-                    crate::chapter_craft::release_restated_states(
-                        &mut confirmation.blockers,
-                        &sent_to_rewrite,
-                    );
+                    crate::chapter_craft::release_restated_states(&mut confirmation.blockers);
                     confirmation
                 };
                 match craft_step(
@@ -8211,26 +8226,8 @@ fn whitespace_insensitive_unique_span(body: &[char], quote: &str) -> Option<(usi
 struct FittedEdits {
     body: String,
     applied: usize,
-    /// The passages of edits that are not in `body`.
-    refused: Vec<String>,
     /// The chapter with every edit, when that was not acceptable.
     refused_whole: Option<String>,
-}
-
-impl FittedEdits {
-    /// The quotes of `findings` the rewrite was given and whose edit, if it
-    /// made one, was applied.
-    fn passages_tried<'a>(&'a self, findings: &'a [Value]) -> impl Iterator<Item = String> + 'a {
-        findings
-            .iter()
-            .filter_map(|finding| finding["quote"].as_str())
-            .filter(|quote| {
-                !self.refused.iter().any(|refused| {
-                    crate::chapter_craft::overlapping_continuity_quote(refused, quote)
-                })
-            })
-            .map(ToOwned::to_owned)
-    }
 }
 
 /// The rewrite's edits together when the result is `acceptable`, else one by
@@ -8252,7 +8249,6 @@ fn apply_edits_that_fit(
     let mut fitted = FittedEdits {
         body: body.to_string(),
         applied: 0,
-        refused: Vec::new(),
         refused_whole: None,
     };
     match apply(body, edits) {
@@ -8278,12 +8274,6 @@ fn apply_edits_that_fit(
         }
         None => {}
     }
-    fitted.refused = edits
-        .iter()
-        .filter_map(|edit| edit["quote"].as_str())
-        .filter(|quote| locate_unique_quote(&fitted.body, quote).is_some())
-        .map(ToOwned::to_owned)
-        .collect();
     fitted
 }
 
@@ -10159,14 +10149,6 @@ mod tests {
         let fitted = apply_edits_that_fit(body, &rewrite, &[], |text| text.chars().count() <= 20);
         assert_eq!(fitted.body, "甲句改好了。乙句在这里。丙句改好了。");
         assert_eq!(fitted.applied, 2);
-        let findings = [
-            json!({"quote":"甲句在这里。"}),
-            json!({"quote":"乙句在这里。"}),
-        ];
-        assert_eq!(
-            fitted.passages_tried(&findings).collect::<Vec<_>>(),
-            ["甲句在这里。"]
-        );
     }
 
     #[test]

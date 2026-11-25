@@ -2591,19 +2591,71 @@ pub(crate) fn ground_continuity_confirmation(
     }
 }
 
-/// Real run 2026-11-25: a chapter was held for describing a lasting mark
-/// again. A state described again only holds the chapter when the rewrite was
-/// given that passage and left it.
-pub(crate) fn release_restated_states(blockers: &mut Vec<Value>, sent_to_rewrite: &[String]) {
+/// Owner decision 2026-11-25: a lasting state described again is a reminder
+/// and never holds the chapter; an action or a disclosure replayed does.
+pub(crate) fn release_restated_states(blockers: &mut Vec<Value>) {
     blockers.retain(|finding| {
         let proof = &finding["evidence"]["hardEvidence"];
-        let quote = finding["quote"].as_str().unwrap_or_default();
-        proof["relation"] != "COMPLETED_OUTCOME_REPLAYED"
-            || proof["replays"] != "STATE"
-            || sent_to_rewrite
-                .iter()
-                .any(|sent| overlapping_continuity_quote(sent, quote))
+        proof["relation"] != "COMPLETED_OUTCOME_REPLAYED" || proof["replays"] != "STATE"
     });
+}
+
+/// How many of the findings a repair was given are still among those `left`
+/// in the revised chapter: the same passage, or the same earlier passage or
+/// fact again. Each one left stands for one given; the others are not the
+/// repair's.
+pub(crate) fn named_findings_left(
+    given: (&[Value], &[Value]),
+    left: (&[Value], &[Value]),
+) -> usize {
+    let count = |given: &[Value], left: &[Value], same: &[fn(&Value, &Value) -> bool]| {
+        let mut left = left.iter().collect::<Vec<_>>();
+        let mut given = given.iter().collect::<Vec<_>>();
+        let before = given.len();
+        for same in same {
+            given.retain(|finding| {
+                let found = left.iter().position(|other| same(finding, other));
+                found.map(|index| left.swap_remove(index)).is_none()
+            });
+        }
+        before - given.len()
+    };
+    let same_quote = |one: &Value, other: &Value| one["quote"] == other["quote"];
+    let same_fact = |one: &Value, other: &Value| one["established"] == other["established"];
+    count(given.0, left.0, &[same_quote, same_earlier_passage])
+        + count(given.1, left.1, &[same_fact])
+}
+
+/// Whether two findings cite the same earlier passage: overlapping sentences
+/// of one chapter, or, within the chapter itself, the same quote.
+fn same_earlier_passage(one: &Value, other: &Value) -> bool {
+    let cited = |finding: &Value| {
+        let evidence = finding.get("comparison").unwrap_or(&finding["evidence"]);
+        let sentence = |key: &str| {
+            evidence[key]
+                .as_u64()
+                .or(evidence["priorSentence"].as_u64())
+        };
+        (
+            prior_chapter_number(evidence).and_then(Value::as_i64),
+            sentence("firstSentence").zip(sentence("lastSentence")),
+            evidence["priorQuote"].as_str().map(ToOwned::to_owned),
+        )
+    };
+    let (chapter, sentences, quote) = cited(one);
+    let (other_chapter, other_sentences, other_quote) = cited(other);
+    match (chapter, other_chapter) {
+        (Some(chapter), Some(other_chapter)) => {
+            chapter == other_chapter
+                && sentences.zip(other_sentences).is_some_and(
+                    |((first, last), (other_first, other_last))| {
+                        first <= other_last && other_first <= last
+                    },
+                )
+        }
+        (None, None) => quote.is_some() && quote == other_quote,
+        _ => false,
+    }
 }
 
 fn prior_chapter_number(evidence: &Value) -> Option<&Value> {
@@ -2612,7 +2664,7 @@ fn prior_chapter_number(evidence: &Value) -> Option<&Value> {
         .or_else(|| evidence.get("chapter"))
 }
 
-pub(crate) fn overlapping_continuity_quote(left: &str, right: &str) -> bool {
+fn overlapping_continuity_quote(left: &str, right: &str) -> bool {
     !left.is_empty()
         && !right.is_empty()
         && (exact_punctuation_matched_quote(left, right).is_some()
@@ -3309,24 +3361,58 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_state_described_again_holds_the_chapter_only_after_the_rewrite_left_it() {
-        let finding = |relation: &str, replays: &str| {
-            json!({"quote":"灰斑爬到第一指节。",
-                "evidence":{"hardEvidence":{"relation":relation,"replays":replays}}})
-        };
-        let held = |sent: &[&str]| {
-            let mut blockers = vec![
-                finding("COMPLETED_OUTCOME_REPLAYED", "STATE"),
-                finding("COMPLETED_OUTCOME_REPLAYED", "ACTION"),
-                finding("INCOMPATIBLE_STATES", "STATE"),
-            ];
-            let sent = sent.iter().map(ToString::to_string).collect::<Vec<_>>();
-            release_restated_states(&mut blockers, &sent);
-            blockers.len()
-        };
-        assert_eq!(held(&[]), 2);
-        assert_eq!(held(&["另一句。"]), 2);
-        assert_eq!(held(&["小指垂着。灰斑爬到第一指节。"]), 3);
+    fn a_state_described_again_never_holds_the_chapter() {
+        let finding = |relation: &str, replays: &str| json!({"evidence":{"hardEvidence":{"relation":relation,"replays":replays}}});
+        let mut blockers = vec![
+            finding("COMPLETED_OUTCOME_REPLAYED", "STATE"),
+            finding("COMPLETED_OUTCOME_REPLAYED", "ACTION"),
+            finding("INCOMPATIBLE_STATES", "STATE"),
+        ];
+        release_restated_states(&mut blockers);
+        assert_eq!(blockers.len(), 2);
+        assert_eq!(blockers[0]["evidence"]["hardEvidence"]["replays"], "ACTION");
+    }
+
+    /// Real run 2026-11-25: the repair fixed two of three passages, the check
+    /// found three others, and the repair was thrown away.
+    #[test]
+    fn a_repair_is_judged_by_the_passages_it_was_given() {
+        let named = |quote: &str, prior: u64| json!({"quote":quote,"evidence":{"priorChapter":2,"priorSentence":prior}});
+        let given = [
+            named("拖痕断开一条线。", 106),
+            named("柜子露出一角。", 107),
+            named("退后半步。", 103),
+        ];
+        let found = |left: &[Value]| named_findings_left((&given, &[]), (left, &[]));
+        // Two passages are fixed; the third is unchanged.
+        let others = [
+            named("印子发烫。", 35),
+            named("印子透红。", 35),
+            named("退后半步。", 103),
+        ];
+        assert_eq!(found(&others), 1);
+        // Worded differently but the same earlier passage again.
+        assert_eq!(found(&[named("拖痕朝外翻着。", 106)]), 1);
+        // Of three findings on one earlier passage, the one left counts once.
+        let alike = [named("甲。", 35), named("乙。", 35), named("丙。", 35)];
+        assert_eq!(
+            named_findings_left((&alike, &[]), (&[named("丙。", 35)], &[])),
+            1
+        );
+        // A rule's finding and the model's are the same when they cite the
+        // same sentences.
+        let rule =
+            json!({"quote":"甲。","comparison":{"chapter":2,"firstSentence":34,"lastSentence":36}});
+        assert_eq!(
+            named_findings_left((&[rule], &[]), (&[named("乙。", 35)], &[])),
+            1
+        );
+        let fact = json!({"sentence":4,"established":"印子平复了大半"});
+        let same = json!({"sentence":9,"established":"印子平复了大半"});
+        let facts =
+            |left: &[Value]| named_findings_left((&[], &[fact.clone(), fact.clone()]), (&[], left));
+        assert_eq!(facts(&[same]), 1);
+        assert_eq!(facts(&[]), 0);
     }
 
     const RANGE: ChapterLengthRange = ChapterLengthRange {
