@@ -722,18 +722,20 @@ impl DurableJobService {
         previous_job_id: &str,
         chapter_id: &str,
     ) -> Result<(), RuntimeError> {
-        let previous: Option<(String, Option<String>)> = connection
+        let previous: Option<(String, Option<String>, Option<String>)> = connection
             .query_row(
-                "SELECT status, chapter_id FROM jobs WHERE project_id=?1 AND job_id=?2",
+                "SELECT status, chapter_id, error_code FROM jobs WHERE project_id=?1 AND job_id=?2",
                 libsql_rusqlite::params![project_id, previous_job_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
-        let Some((status, previous_chapter_id)) = previous else {
+        let Some((status, previous_chapter_id, error_code)) = previous else {
             return Err(RuntimeError::RetryJobNotFound);
         };
         // FX-15: a user-paused job resumes as a retry that reuses its completed steps.
-        if !matches!(status.as_str(), "FAILED" | "PAUSED")
+        let review_retry = status == "BLOCKED"
+            && error_code.as_deref() == Some(super::production::NARRATIVE_REVIEW_REQUIRED);
+        if (!matches!(status.as_str(), "FAILED" | "PAUSED") && !review_retry)
             || previous_chapter_id.as_deref() != Some(chapter_id)
         {
             return Err(RuntimeError::RetryJobInvalid);
@@ -804,26 +806,16 @@ impl DurableJobService {
         error_code: &str,
         now: &str,
     ) -> Result<(), RuntimeError> {
-        let status: Option<String> = connection
-            .query_row(
-                "SELECT status FROM jobs WHERE project_id=?1 AND job_id=?2",
-                libsql_rusqlite::params![project_id, job_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if matches!(
-            status.as_deref(),
-            Some(
-                "QUEUED"
-                    | "RUNNING"
-                    | "PAUSING"
-                    | "PAUSED"
-                    | "WAITING_MODEL"
-                    | "WAITING_DECISION"
-                    | "WAITING_BUDGET"
-            )
-        ) {
-            Self::fail_job(connection, project_id, job_id, error_code, now)?;
+        let updated = connection.execute(
+            "UPDATE jobs SET status='FAILED',error_code=?1,updated_at=?2
+             WHERE project_id=?3 AND job_id=?4
+             AND status IN ('QUEUED','RUNNING','PAUSING','PAUSED','WAITING_MODEL','WAITING_DECISION','WAITING_BUDGET')
+             AND (status<>'WAITING_DECISION' OR error_code IS NOT 'UNKNOWN_REMOTE_OUTCOME')",
+            libsql_rusqlite::params![error_code, now, project_id, job_id],
+        )?;
+        if updated != 0 {
+            Self::release_lease(connection, project_id, job_id, now)?;
+            Self::reconcile_runtime_projection(connection, project_id, now)?;
         }
         Ok(())
     }
@@ -949,6 +941,20 @@ impl DurableJobService {
             return Err(RuntimeError::LeaseHeld);
         }
         Ok(())
+    }
+
+    pub(crate) fn checkpoint_boundary(
+        connection: &Connection,
+        project_id: &str,
+        job_id: &str,
+        stage: &str,
+    ) -> Result<Option<Value>, RuntimeError> {
+        let boundary: Option<String> = connection.query_row(
+            "SELECT boundary_json FROM job_checkpoints WHERE project_id=?1 AND job_id=?2 AND stage=?3",
+            libsql_rusqlite::params![project_id, job_id, stage],
+            |row| row.get(0),
+        ).optional()?;
+        boundary.map(|raw| serde_json::from_str(&raw).map_err(Into::into)).transpose()
     }
 
     pub fn save_checkpoint(
@@ -1418,6 +1424,18 @@ impl ModelTransport for FakeModelTransport {
 pub struct DurableModelRunner;
 
 impl DurableModelRunner {
+    pub(crate) fn is_recorded(
+        connection: &Connection,
+        project_id: &str,
+        model_run_id: &str,
+    ) -> Result<bool, RuntimeError> {
+        Ok(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM model_runs WHERE project_id=?1 AND model_run_id=?2)",
+            libsql_rusqlite::params![project_id, model_run_id],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn project_budget_id(project_id: &str) -> String {
         format!("budget:project:{project_id}")
     }
@@ -1573,12 +1591,17 @@ impl DurableModelRunner {
                 connection.query_row("SELECT project_id FROM project_meta LIMIT 1", [], |row| {
                     row.get(0)
                 })?;
-            connection.execute(
-                "UPDATE jobs SET status='FAILED', error_code=?1, updated_at=?2 WHERE project_id=?3 AND job_id=?4 AND status NOT IN ('COMPLETED','CANCELLED')",
+            // Chapter production owns the terminal decision after its
+            // bounded resend or optional review step. A rejected model
+            // payload must not revoke its lease mid-attempt.
+            let ended = connection.execute(
+                "UPDATE jobs SET status='FAILED', error_code=?1, updated_at=?2 WHERE project_id=?3 AND job_id=?4 AND job_type<>'CHAPTER' AND status NOT IN ('COMPLETED','CANCELLED')",
                 libsql_rusqlite::params![job_error_code, now, project_id, job_id],
             )?;
-            DurableJobService::release_lease(connection, &project_id, job_id, now)?;
-            DurableJobService::reconcile_runtime_projection(connection, &project_id, now)?;
+            if ended != 0 {
+                DurableJobService::release_lease(connection, &project_id, job_id, now)?;
+                DurableJobService::reconcile_runtime_projection(connection, &project_id, now)?;
+            }
         }
         Ok(())
     }

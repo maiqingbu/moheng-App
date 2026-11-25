@@ -895,6 +895,8 @@ pub struct ContextManifestR1Budget {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChapterPlanR1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_step_rules_digest: Option<String>,
     pub payload_schema: serde_json::Value,
     pub chapter_id: String,
     pub compiled_from_project_revision: i64,
@@ -943,6 +945,8 @@ pub struct ChapterPlanR2 {
     pub compiled_from_project_revision: i64,
     pub compiled_from_state_digest: String,
     pub context_manifest_ref: ArtifactRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_step_rules_digest: Option<String>,
     pub chapter_goal: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chapter_role: Option<String>,

@@ -37,6 +37,32 @@
         }
       }
     },
+    "narrativeIssues": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "required": ["sentence", "chapter", "priorSentence", "currentQuote", "priorQuote", "kind", "reason"],
+        "properties": {
+          "sentence": { "type": "integer", "minimum": 0 },
+          "chapter": { "type": ["integer", "null"], "minimum": 1 },
+          "priorSentence": { "type": "integer", "minimum": 0 },
+          "currentQuote": { "type": "string", "minLength": 4, "maxLength": 180 },
+          "priorQuote": { "type": "string", "minLength": 4, "maxLength": 180 },
+          "kind": { "enum": ["REPEATED_EVENT", "STATE_CONFLICT"] },
+          "reason": { "type": "string", "minLength": 1, "maxLength": 180 },
+          "hardEvidence": {
+            "type": "object",
+            "required": ["relation", "priorOutcome", "currentOutcome"],
+            "properties": {
+              "relation": { "enum": ["COMPLETED_OUTCOME_REPLAYED", "INCOMPATIBLE_STATES"] },
+              "priorOutcome": { "type": "string", "minLength": 4, "maxLength": 180 },
+              "currentOutcome": { "type": "string", "minLength": 4, "maxLength": 180 }
+            }
+          }
+        }
+      }
+    },
     "catchphrases": {
       "type": "array",
       "items": {

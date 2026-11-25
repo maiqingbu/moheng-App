@@ -55,8 +55,12 @@ pub fn plan_crafts_before(
 ) -> Result<Vec<(i64, serde_json::Value)>, libsql_rusqlite::Error> {
     let mut statement = connection.prepare(
         "SELECT c.chapter_no, json_set(json_extract(p.payload_json,'$.craft'),'$.chapterGoal',json_extract(p.payload_json,'$.chapterGoal')) FROM chapters c \
-         JOIN artifact_payloads f ON f.artifact_id=c.final_artifact_id AND f.version=c.final_version \
+         JOIN canonical_heads h ON h.project_id=c.project_id AND h.artifact_type='FinalChapter' \
+         AND h.scope_level='CHAPTER' AND json_extract(h.scope_key,'$.chapterId')=c.chapter_id \
+         AND h.artifact_id=c.final_artifact_id AND h.version=c.final_version \
+         JOIN artifact_payloads f ON f.artifact_id=h.artifact_id AND f.version=h.version AND f.payload_hash=h.payload_hash \
          JOIN artifact_payloads p ON p.artifact_id=json_extract(f.payload_json,'$.chapterPlanRef.artifactId') AND p.version=json_extract(f.payload_json,'$.chapterPlanRef.version') \
+         AND p.payload_hash=json_extract(f.payload_json,'$.chapterPlanRef.payloadHash') \
          WHERE c.project_id=?1 AND c.status='COMMITTED' AND json_extract(p.payload_json,'$.craft') IS NOT NULL \
          AND c.chapter_no < ?2 \
          ORDER BY c.chapter_no",

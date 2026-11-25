@@ -100,6 +100,9 @@ pub fn normalize_chapter_plan_model_output(
             plan[field] = value.clone();
         }
     }
+    if let Some(digest) = authoritative_bindings.pointer("/volumeDirection/currentStage/ruleDigest") {
+        plan["stageStepRulesDigest"] = digest.clone();
+    }
     if let Some(items) = plan
         .get_mut("knowledgeBoundaries")
         .and_then(Value::as_array_mut)
@@ -1880,16 +1883,7 @@ fn validate_chapter_plan_change_semantics(
         &triggered_threads,
         horizon_capacity_after_chapter(connection, project_id, chapter_id)?,
     )?;
-    let states = crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
-        connection,
-        project_id,
-        &route_task_ids
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        100,
-    )
-    .map_err(|error| error.to_string())?;
+    let states = route_task_states(connection, project_id, &route)?;
     let states = states
         .iter()
         .map(|state| {
@@ -2115,18 +2109,62 @@ pub fn task_ready(
         Some("BLOCKED") => return Err("TASK_DEPENDENCY_UNMET".into()),
         _ => {}
     }
-    for dependency in task
-        .get("dependsOnTaskIds")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-    {
+    for dependency in task_prerequisite_ids(task_ref, route_plan)? {
         if states.get(dependency).copied() != Some("SATISFIED") {
             return Err("TASK_DEPENDENCY_UNMET".into());
         }
     }
     Ok(())
+}
+
+pub(crate) fn task_prerequisite_ids<'a>(
+    task_ref: &str,
+    route_plan: &'a Value,
+) -> Result<BTreeSet<&'a str>, String> {
+    let tasks = route_plan["tasks"].as_array().ok_or("VOLUME_PLAN_TASKS_REQUIRED")?;
+    let by_id = tasks.iter().filter_map(|task| Some((task["taskId"].as_str()?, task)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let root = by_id.get(task_ref).ok_or("TASK_SCOPE_VIOLATION")?;
+    let dependencies = |task: &'a Value| task["dependsOnTaskIds"].as_array().into_iter()
+        .flatten().filter_map(Value::as_str).collect::<Vec<_>>();
+    let mut pending = dependencies(root);
+    let mut visited = BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if id == task_ref {
+            return Err("TASK_DEPENDENCY_UNMET".into());
+        }
+        if visited.insert(id) {
+            pending.extend(dependencies(by_id.get(id).ok_or("TASK_DEPENDENCY_UNMET")?));
+        }
+    }
+    Ok(visited)
+}
+
+pub(crate) fn route_task_states(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    route: &Value,
+) -> Result<Vec<crate::repositories::narrative::TaskStateRecord>, String> {
+    let ids = route["tasks"].as_array().into_iter().flatten()
+        .filter_map(|task| task["taskId"].as_str()).collect::<Vec<_>>();
+    crate::repositories::narrative::NarrativeRepository::task_states_by_ids_complete(
+        connection, project_id, &ids,
+    ).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+#[test]
+fn a_satisfied_immediate_dependency_cannot_hide_a_reopened_prerequisite() {
+    let route = json!({"tasks":[
+        {"taskId":"task:a","class":"REQUIRED","dependsOnTaskIds":[]},
+        {"taskId":"task:b","class":"REQUIRED","dependsOnTaskIds":["task:a"]},
+        {"taskId":"task:c","class":"REQUIRED","dependsOnTaskIds":["task:b"]}
+    ]});
+    assert_eq!(
+        task_ready("task:c", &route, &[("task:a","ACTIVE"),("task:b","SATISFIED")]).unwrap_err(),
+        "TASK_DEPENDENCY_UNMET"
+    );
+    assert!(task_ready("task:c", &route, &[("task:a","SATISFIED"),("task:b","SATISFIED")]).is_ok());
 }
 
 pub fn validate_reservation_actions(
@@ -2733,6 +2771,11 @@ pub fn fit_lenient_plan_shape(plan: &mut Value, remaining_chapter_capacity: i64)
     else {
         return as_problem(notes);
     };
+    let reported = scenes.len();
+    scenes.retain(Value::is_object);
+    if scenes.len() != reported {
+        notes.push(format!("系统剔除了 {} 个非对象场景", reported - scenes.len()));
+    }
     let people = |scene: &Value| scene["people"].as_array().map_or(0, Vec::len);
     while scenes.len() > 1 {
         // Too many scenes: the neighbours with the fewest events together
@@ -3153,16 +3196,7 @@ pub fn recompile_chapter_plan_owner_with_decisions(
         horizon_capacity_after_chapter(connection, project_id, chapter_id)?,
     )?;
     if let Some(route) = route_payload.as_ref() {
-        let states = crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
-            connection,
-            project_id,
-            &route_task_ids
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            100,
-        )
-        .map_err(|error| error.to_string())?;
+        let states = route_task_states(connection, project_id, route)?;
         let states = states
             .iter()
             .map(|state| {
@@ -3388,6 +3422,21 @@ pub fn commit_opening_chapter_plan_owner(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn round55_lenient_plan_preserves_scenes_when_the_model_appends_key_names() {
+        let scene = |place: &str| json!({
+            "place":place,"conflict":"需要对照刻度","readerQuestion":"谁校准过刻度？",
+            "people":[{"name":"陆照"},{"name":"师姐"}],"events":["对照刻度"]
+        });
+        let mut plan = json!({"chapterGoal":"查明刻度来源","craft":{"scenes":[
+            scene("石缝"),scene("丹房"),"readerQuestion","estimatedCharacters"
+        ]}});
+        let reminder = fit_lenient_plan_shape(&mut plan, 10).unwrap();
+        let scenes = plan["craft"]["scenes"].as_array().unwrap();
+        assert_eq!(scenes.len(), 2);
+        assert_eq!(scenes[1]["place"], "丹房");
+        assert!(reminder.contains("2 个非对象场景"));
+    }
 
     #[test]
     fn a_book_plan_keeps_its_mysteries_in_step_with_what_is_recorded() {

@@ -8,6 +8,47 @@ use ai_novel_production_system_core::chapter_craft::{
 };
 use serde_json::json;
 
+#[test]
+fn published_prose_can_ground_a_repeated_event_without_shared_wording() {
+    let current = "罐口又一次淌出浊黄的水，众人都当是头一回。沈砚赶到。";
+    let earlier = [json!({"chapterNo":6,"sentences":[{"number":0,"text":"陆照破开封泥。"},{"number":1,"text":"坛水漫过沿口，沿石阶流下。"}]})];
+    let reported = [
+        json!({"sentence":0,"chapter":6,"priorSentence":1,"priorQuote":"坛水漫过沿口，沿石阶流下。","currentQuote":"罐口又一次淌出浊黄的水","kind":"REPEATED_EVENT","reason":"正文把已发生的溢出再次写成首次。"}),
+        json!({"sentence":1,"chapter":6,"priorSentence":0,"priorQuote":"坛水漫过沿口","currentQuote":"沈砚赶到","kind":"STATE_CONFLICT","reason":"无依据"}),
+    ];
+    let findings = ai_novel_production_system_core::chapter_craft::narrative_continuity_findings(
+        &reported, &earlier, current,
+    );
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0]["code"], "repeated_event");
+    assert!(findings[0]["problem"].as_str().unwrap().contains("坛水漫过沿口"));
+}
+
+#[test]
+fn a_same_chapter_state_reset_must_cite_a_passage_before_the_conflict() {
+    let body = "陆照拾起药膳碗，将它扣在石阶上。柳明漪把那只碗放回石阶。";
+    let report = json!({"sentence":1,"chapter":null,"priorSentence":0,"priorQuote":"陆照拾起药膳碗，将它扣在石阶上。","currentQuote":"柳明漪把那只碗放回石阶","kind":"STATE_CONFLICT","reason":"段落之间没有写碗回到柳明漪手中。"});
+    let check = |reported| ai_novel_production_system_core::chapter_craft::narrative_continuity_findings(&[reported], &[], body);
+    assert_eq!(check(report.clone()).len(), 1);
+    let mut forward = report;
+    forward["sentence"] = json!(0);
+    assert!(check(forward).is_empty());
+}
+
+#[test]
+fn chapter_and_sentence_numbers_resolve_to_committed_prose() {
+    let current = "坛水头一回从坛口淌了下来。";
+    let earlier = [json!({"chapterNo":6,"sentences":[{"number":0,"text":"陆照破开封泥。"},{"number":1,"text":"坛水漫过沿口，沿石阶流下。"}]})];
+    let reported = [json!({"sentence":0,"chapter":6,"priorSentence":1,
+        "currentQuote":"坛水头一回从坛口淌了下来.","priorQuote":"坛水漫过沿口,沿石阶流下.",
+        "kind":"REPEATED_EVENT","reason":"把已经发生的溢出再次写成首次。"})];
+    let findings = ai_novel_production_system_core::chapter_craft::narrative_continuity_findings(
+        &reported, &earlier, current,
+    );
+    assert_eq!(findings.len(), 1);
+    assert!(findings[0]["problem"].as_str().unwrap().contains("坛水漫过沿口，沿石阶流下。"));
+}
+
 const EARLIER: [&str; 3] = [
     "“理论上，这不归我管。”林薇说。理论上他该走了。他低头看表。",
     "“理论上可以。”林薇把咖啡推过去。沈砚低头看了一眼。理论上没人会查。",

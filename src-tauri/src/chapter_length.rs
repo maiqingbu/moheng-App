@@ -159,25 +159,19 @@ pub fn character_count(text: &str) -> i64 {
 
 /// LD-4: `body` shortened by deleting its sentences (numbered as in
 /// `chapter_craft::sentence_spans`) in the order `cut` names them, until
-/// it is at most the range's target. A cut is skipped when it would take
+/// it fits the accepted range. A cut is skipped when it would take
 /// the chapter below the minimum, when it is the last sentence (the
-/// planned ending) or when it is half of a line of dialogue.
+/// planned ending), when it carries dialogue or connects nearby dialogue,
+/// or when the next sentence in the same paragraph refers back to its actor.
 pub fn cut_sentences(body: &str, cut: &[usize], range: ChapterLengthRange) -> String {
     let spans = crate::chapter_craft::sentence_spans(body);
     let mut removed = vec![false; spans.len()];
     let mut shortened = body.to_string();
     for &number in cut {
-        if character_count(&shortened) <= range.target() {
+        if range.accepts(character_count(&shortened)) {
             break;
         }
-        let Some(&(start, end)) = spans.get(number) else {
-            continue;
-        };
-        let sentence = &body[start..end];
-        if removed[number]
-            || number + 1 == spans.len()
-            || sentence.matches('“').count() != sentence.matches('”').count()
-        {
+        if !can_cut_sentence(body, &spans, number) || removed[number] {
             continue;
         }
         removed[number] = true;
@@ -189,6 +183,24 @@ pub fn cut_sentences(body: &str, cut: &[usize], range: ChapterLengthRange) -> St
         }
     }
     shortened
+}
+
+pub(crate) fn can_cut_sentence(body: &str, spans: &[(usize, usize)], number: usize) -> bool {
+    let Some(&[(start, end), (next_start, next_end)]) =
+        spans.get(number..).and_then(<[_]>::first_chunk::<2>)
+    else {
+        return false;
+    };
+    let sentence = &body[start..end];
+    let contains_dialogue = |&(start, end): &(usize, usize)| body[start..end].contains(['“', '”']);
+    let bridges_dialogue = spans[..number].iter().rev().take(2).any(contains_dialogue)
+        && spans[number + 1..].iter().take(2).any(contains_dialogue);
+    if sentence.contains(['“', '”']) || bridges_dialogue {
+        return false;
+    }
+    let same_paragraph = !body[end..next_start].contains('\n');
+    let next_refers_to_actor = body[next_start..next_end].trim_start().starts_with(['他', '她', '它']);
+    !(same_paragraph && next_refers_to_actor)
 }
 
 /// `body` without the `removed` sentences; a line they emptied goes, with
@@ -254,13 +266,25 @@ mod tests {
     }
 
     #[test]
-    fn ld4_a_long_chapter_loses_the_chosen_sentences_in_order_until_it_reaches_the_target() {
+    fn ld4_a_long_chapter_loses_the_chosen_sentences_in_order_until_it_fits_the_accepted_range() {
         let range = ChapterLengthRange { min: 50, max: 70 };
         let cut = cut_sentences(&lines_of_ten(10), &[2, 5, 7, 0, 1, 3], range);
         assert_eq!(
             cut,
-            "第03句话写在这里。\n第04句话写在这里。\n第06句话写在这里。\n第08句话写在这里。\n第09句话写在这里。"
+            "第00句话写在这里。\n第01句话写在这里。\n第03句话写在这里。\n第04句话写在这里。\n第06句话写在这里。\n第08句话写在这里。\n第09句话写在这里。"
         );
+    }
+
+    #[test]
+    fn round61_a_cut_stops_before_removing_an_object_introduction_if_length_is_already_accepted() {
+        let body = format!("{}\n一枚青丸滚出来，停在陆照鞋尖前。\n陆照后来把青丸攥进袖口。", lines_of_ten(10));
+        let length = character_count(&body);
+        let max = length * 10 / 11;
+        let range = ChapterLengthRange { min: max - 30, max };
+        assert!(length > range.ceiling());
+        let shortened = cut_sentences(&body, &[0, 10], range);
+        assert!(range.accepts(character_count(&shortened)));
+        assert!(shortened.contains("一枚青丸滚出来"), "{shortened}");
     }
 
     #[test]
@@ -286,6 +310,26 @@ mod tests {
             cut_sentences(body, &[1], range),
             "第00句话写在这里。\n\n第02句话写在这里。"
         );
+    }
+
+    #[test]
+    fn a_cut_keeps_the_scene_opener_that_identifies_the_next_sentences_actor() {
+        let body = "山脚豆腐坊的檐下挂着竹帘，陈婆正把一板豆干从屉里起出来，热气腾腾。她看见陆照，没说话。\n\n檐下的水慢慢滴了下来。\n\n陆照接过碟子。";
+        let range = ChapterLengthRange { min: 20, max: 58 };
+        let shortened = cut_sentences(body, &[0, 2], range);
+        assert!(shortened.starts_with("山脚豆腐坊"), "{shortened}");
+        assert!(!shortened.contains("水慢慢滴"), "{shortened}");
+    }
+
+    #[test]
+    fn round56_a_cut_preserves_the_question_answer_and_speaker_transition() {
+        let body = "柳医修问：“你今年多大？”\n\n陆照没答。\n\n“阿沅。”\n\n“嗯。”\n\n檐下的雪慢慢化了。\n\n陆照合上断杵。";
+        let range = ChapterLengthRange { min: 5, max: 12 };
+        let shortened = cut_sentences(body, &[0, 1, 2, 3, 4], range);
+        assert!(shortened.contains("你今年多大？"));
+        assert!(shortened.contains("陆照没答。"));
+        assert!(shortened.contains("“阿沅。”\n\n“嗯。”"));
+        assert!(!shortened.contains("檐下的雪慢慢化了。"));
     }
 
     #[test]

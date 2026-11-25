@@ -446,6 +446,23 @@ describe('R2 文档修订对应的前端行为', () => {
     expect(page.textContent).toContain('当前必需证据超出预算')
     expect(Array.from(page.querySelectorAll('button')).some(button => button.textContent?.includes('开始第'))).toBe(false)
   })
+  it('Given 新的签约回执尚未绑定总纲 When 展示 Then 不允许继续长篇生产', async () => {
+    production({
+      signing: { status: 'PASS', confirmation: { confirmed: true } },
+      bookPlan: { status: 'APPROVED', reapprovalRequired: true },
+      nextChapter: { id: 'c', number: 4, volumeId: 'v', executionMode: 'LONG_FORM', planReady: true },
+    })
+    const page = await render(ProductionCenter)
+    expect(Array.from(page.querySelectorAll('button')).some(button => button.textContent?.includes('开始第'))).toBe(false)
+  })
+  it('Given 下一章未编译章计划 When 展示 Then 不沿用已完成章的生产按钮', async () => {
+    production({
+      nextChapter: { id: 'c', number: 4, volumeId: 'v', executionMode: 'LONG_FORM', planReady: false },
+    })
+    const page = await render(ProductionCenter)
+    expect(page.textContent).toContain('下一章的章计划尚未编译')
+    expect(Array.from(page.querySelectorAll('button')).some(button => button.textContent?.includes('开始第'))).toBe(false)
+  })
   it('Given 缺少任务实际状态 When 展示 Then 不补造未开始状态', async () => {
     volume()
     const page = await render(VolumeWorkspace)
@@ -463,6 +480,17 @@ describe('R2 文档修订对应的前端行为', () => {
     harness.store.volumeDetail.volume.status = 'CLOSED'
     const page = await render(VolumeWorkspace)
     expect(page.querySelector('[data-action="prepare"]')).toBeNull()
+  })
+  it('Given 历史回执允许交接且当前退出条件已失效 When 展示 Then 下一卷显示待复核', async () => {
+    volume()
+    harness.store.volumeDetail.volume.status = 'CLOSED'
+    harness.store.volumeLifecycle = {
+      volumeId: 'v', projectRevision: 2,
+      planningState: { closeReadiness: 'BLOCKED', exitConditionGap: 1 },
+      latestClose: { nextVolumeEligibility: 'ELIGIBLE' },
+    }
+    const page = await render(VolumeWorkspace)
+    expect(page.querySelector('[data-handoff-readiness]')?.textContent).toContain('待复核')
   })
   it('Given 完结状态需要复核但各检查均 READY When 确认 Then 仍不能提交', async () => {
     harness.port = {

@@ -33,6 +33,11 @@ const taskReality = computed(() => planRoute.value?.taskReality ?? [])
 const realityStatus = (taskId: unknown) => { const value = taskReality.value.find(item => String(item.stateId) === String(taskId))?.value as Record<string, unknown> | undefined; return typeof value?.status === 'string' ? value.status : 'UNKNOWN' }
 const tasksByClass = (taskClass: string) => tasks.value.filter(task => String(task.class) === taskClass)
 const closeReady = computed(() => planningState.value.closeReadiness === 'READY')
+const handoffReadiness = computed(() => {
+  const close = lifecycle.value?.latestClose
+  if (!close) return '待关闭'
+  return closeReady.value ? statusLabel(close.nextVolumeEligibility ?? '待关闭') : '待复核'
+})
 const remainingTasks = computed(() => Array.isArray(planningState.value.remainingTaskIds) ? planningState.value.remainingTaskIds as string[] : [])
 const responsibilities = computed(() => Array.isArray(planningState.value.unresolvedResponsibilities) ? planningState.value.unresolvedResponsibilities as Array<Record<string, unknown>> : [])
 const routeReplans = computed(() => lifecycle.value?.routeReplans ?? [])
@@ -258,7 +263,7 @@ onUnmounted(() => {
       <div class="metric-grid compact-grid">
         <MetricCard label="关闭准入" :value="closeReady ? '可关闭' : '条件未满足'" :note="`待补条件 ${String(planningState.exitConditionGap ?? 0)} 项`" />
         <MetricCard label="待完成重点" :value="String(planningState.requiredTasksRemaining ?? '—')" note="来自当前实际进展" />
-        <MetricCard label="下一卷" :value="statusLabel(lifecycle.latestClose?.nextVolumeEligibility ?? '待关闭')" note="关闭记录中的下一步判断" />
+        <MetricCard label="下一卷" :value="handoffReadiness" note="按当前退出条件判断" data-handoff-readiness />
         <MetricCard label="记录版本" :value="String(planningState.generatedRevision ?? lifecycle.projectRevision)" note="可重新生成的当前记录" />
       </div>
       <div v-if="remainingTasks.length" class="muted" style="margin-top:10px">还有 {{ remainingTasks.length }} 项任务待完成。</div>

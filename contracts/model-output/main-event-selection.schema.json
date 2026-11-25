@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "selection of an evidenced main event",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "goalReview": {
+          "description": "Independent chapter-goal assessment. The runtime checks this separately from event selection."
+        },
+        "firstSentence": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "outcomeSentence": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "eventType": {
+          "enum": [
+            null,
+            "DISCOVERY",
+            "CONFRONTATION",
+            "LOSS",
+            "GAIN",
+            "REVEAL",
+            "BETRAYAL",
+            "ALLIANCE",
+            "DEATH",
+            "SITUATION_CHANGE"
+          ]
+        }
+      },
+      "required": [
+        "firstSentence",
+        "outcomeSentence",
+        "eventType"
+      ],
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "properties": {
+            "firstSentence": {
+              "type": "null"
+            },
+            "outcomeSentence": {
+              "type": "null"
+            },
+            "eventType": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "firstSentence": {
+              "type": "integer"
+            },
+            "outcomeSentence": {
+              "type": "integer"
+            },
+            "eventType": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "goalReview": {
+          "description": "Independent chapter-goal assessment. The runtime checks this separately from event selection."
+        },
+        "actionSentence": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "outcomeSentence": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "eventType": {
+          "enum": [
+            null,
+            "DISCOVERY",
+            "CONFRONTATION",
+            "LOSS",
+            "GAIN",
+            "REVEAL",
+            "BETRAYAL",
+            "ALLIANCE",
+            "DEATH",
+            "SITUATION_CHANGE"
+          ]
+        },
+        "outcomeQuote": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 4,
+          "maxLength": 160
+        }
+      },
+      "required": [
+        "actionSentence",
+        "outcomeSentence",
+        "eventType",
+        "outcomeQuote"
+      ],
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "properties": {
+            "actionSentence": {
+              "type": "null"
+            },
+            "outcomeSentence": {
+              "type": "null"
+            },
+            "eventType": {
+              "type": "null"
+            },
+            "outcomeQuote": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "actionSentence": {
+              "type": "integer"
+            },
+            "outcomeSentence": {
+              "type": "integer"
+            },
+            "eventType": {
+              "type": "string"
+            },
+            "outcomeQuote": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

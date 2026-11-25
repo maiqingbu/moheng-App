@@ -977,6 +977,20 @@ fn craft_previous_chapters_report_goals_and_endings_newest_first() {
             }
         }
     }
+    for (event_id, kind, payload) in [
+        ("event:actual", "DISCOVERY", "{}"),
+        ("event:fallback", "SITUATION_CHANGE", r#"{"event":{"eventTypeSource":"fallback_fact"}}"#),
+        ("event:planned", "SITUATION_CHANGE", r#"{"event":{"description":"计划占位"}}"#),
+    ] {
+        connection.execute(
+            "INSERT INTO canon_events(event_id,project_id,chapter_id,event_type,payload_json,created_at) VALUES (?1,'p1','chap:craft:3',?2,?3,?4)",
+            libsql_rusqlite::params![event_id, kind, payload, NOW],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO canon_evidence(evidence_id,project_id,event_id,final_chapter_id,source_artifact_id,source_version,evidence_type,quote,created_at) VALUES (?1,'p1',?1,'chap:craft:3','art:craft:final-3',1,'ACTUAL_NARRATIVE','第3章结尾。',?2)",
+            libsql_rusqlite::params![event_id, NOW],
+        ).unwrap();
+    }
     let history = ai_novel_production_system_core::repositories::ops::chapter_history(
         &connection,
         "p1",
@@ -995,6 +1009,7 @@ fn craft_previous_chapters_report_goals_and_endings_newest_first() {
     assert_eq!(history.bodies.len(), 2);
     assert!(history.bodies[0].ends_with("第3章结尾。"));
     assert_eq!(history.bodies[0].chars().count(), 300 + 6);
+    assert_eq!(history.actual_events, vec![serde_json::json!({"chapterNo":3,"eventType":"DISCOVERY","quote":"第3章结尾。"})]);
     let first = ai_novel_production_system_core::repositories::ops::chapter_history(
         &connection,
         "p1",

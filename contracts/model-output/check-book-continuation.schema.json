@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "first-volume continuation of the committed opening",
+  "type": "object",
+  "required": [
+    "issues"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "issues": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "required": [
+          "stage",
+          "step",
+          "plannedQuote",
+          "openingChapter",
+          "openingSentence",
+          "openingQuote",
+          "reason"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "stage": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "step": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "plannedQuote": {
+            "type": "string",
+            "minLength": 4,
+            "maxLength": 160
+          },
+          "openingChapter": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3
+          },
+          "openingSentence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "openingQuote": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          }
+        }
+      }
+    }
+  }
+}

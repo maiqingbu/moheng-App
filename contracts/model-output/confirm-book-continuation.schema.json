@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "confirmation of the same material opening outcome",
+  "type": "object",
+  "required": [
+    "confirmedCandidates"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "confirmedCandidates": {
+      "type": "array",
+      "maxItems": 5,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "required": [
+          "number",
+          "openingOutcomeQuote",
+          "plannedOutcomeQuote"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "number": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4
+          },
+          "openingOutcomeQuote": {
+            "type": "string",
+            "minLength": 4,
+            "maxLength": 160
+          },
+          "plannedOutcomeQuote": {
+            "type": "string",
+            "minLength": 4,
+            "maxLength": 160
+          }
+        }
+      }
+    }
+  }
+}

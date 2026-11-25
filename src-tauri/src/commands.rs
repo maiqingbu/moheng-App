@@ -3812,12 +3812,12 @@ pub fn query_volume_lifecycle_impl(state: &KernelState, request: Value) -> Resul
     state
         .manager
         .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
-            let planning_state = crate::repositories::volume_lifecycle::VolumeLifecycleRepository::planning_projection(
+            let planning_state = crate::volume_lifecycle::VolumeLifecycleOwner::read_planning_state(
                 connection,
                 project_id,
                 volume_id,
             )
-            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?
+            .map_err(ManagerError::ProjectCommand)?
             .unwrap_or_else(|| json!({
                 "status": "NOT_MATERIALIZED",
                 "projectId": project_id,
@@ -6864,10 +6864,19 @@ pub fn direct_volume(
     idempotency_key: &str,
     requested_at: &str,
 ) -> Result<Value, String> {
+    if !state.production_gateway.plans_book_direction() {
+        return Ok(Value::Null);
+    }
     let handle = state
         .manager
         .open(project_id, "", requested_at)
         .map_err(|error| error.to_string())?;
+    use crate::repositories::narrative::NarrativeRepository;
+    let revision = NarrativeRepository::project_revision(&handle, project_id)
+        .map_err(|error| error.to_string())?;
+    let current = crate::signing::approved_book_plan_ref(&handle, project_id)?
+        .ok_or("GOAL_CONTRACT_BOOK_PLAN_APPROVED_REQUIRED")?;
+    crate::signing::require_current_signing_for_long_form_if_present(&handle, project_id)?;
     let planned = crate::book_direction::plan_volume(
         &handle,
         state.production_gateway.as_ref(),
@@ -6875,24 +6884,15 @@ pub fn direct_volume(
         volume_id,
         (command_id, idempotency_key, requested_at),
     )?;
-    let revision = |handle: &crate::project_db::ProjectHandle| {
-        crate::repositories::narrative::NarrativeRepository::project_revision(handle, project_id)
-            .map_err(|error| error.to_string())
-    };
     let commit_id = format!("{command_id}:volume-direction");
     let Some(book_plan) = planned.direction else {
         let Some(reminder) = planned.reminder else {
             return Ok(Value::Null);
         };
-        let bundle: CommitBundle = serde_json::from_value(json!({"commitId":format!("commit:{commit_id}"),"projectId":project_id,"commandId":commit_id,"idempotencyKey":format!("{idempotency_key}:volume-direction"),"expectedProjectRevision":revision(&handle)?,"contractVersion":"m0a.v1","createdAt":requested_at,"artifacts":[],"decisionUpdates":[reminder]})).map_err(|e| e.to_string())?;
+        let bundle: CommitBundle = serde_json::from_value(json!({"commitId":format!("commit:{commit_id}"),"projectId":project_id,"commandId":commit_id,"idempotencyKey":format!("{idempotency_key}:volume-direction"),"expectedProjectRevision":revision,"contractVersion":"m0a.v1","createdAt":requested_at,"artifacts":[],"decisionUpdates":[reminder]})).map_err(|e| e.to_string())?;
         CommitService::commit(&handle, &bundle, requested_at).map_err(|e| e.to_string())?;
         return Ok(json!("TEMPLATE"));
     };
-    let current = crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
-        &handle, project_id, "BookPlan",
-    )
-    .map_err(|e| e.to_string())?
-    .ok_or_else(|| "GOAL_CONTRACT_BOOK_PLAN_APPROVED_REQUIRED".to_string())?;
     crate::generated::validators::validate_book_plan_r1(&book_plan)
         .map_err(|error| format!("BOOK_PLAN_CONTRACT:{error}"))?;
     let artifact_id = format!("plan:bookplan:{project_id}");
@@ -6907,7 +6907,7 @@ pub fn direct_volume(
     let mysteries =
         crate::planning::book_mystery_deltas_for(&handle, project_id, &book_plan, &artifact_id, version)?;
     let artifact: ArtifactEnvelope = serde_json::from_value(json!({"artifactId":artifact_id,"projectId":project_id,"artifactType":"BookPlan","scope":{"level":"PROJECT"},"version":version,"schemaVersion":"m0a.artifact.v1","artifactStatus":"CANDIDATE","payload":book_plan,"payloadHash":hash,"dependencyRefs":[current],"provenance":{"createdBy":"B07::PlanningOwner","commandId":commit_id,"modelRunId":planned.model_run_id},"createdAt":requested_at})).map_err(|e| e.to_string())?;
-    let bundle: CommitBundle = serde_json::from_value(json!({"commitId":format!("commit:{commit_id}"),"projectId":project_id,"commandId":commit_id,"idempotencyKey":format!("{idempotency_key}:volume-direction"),"expectedProjectRevision":revision(&handle)?,"contractVersion":"m0a.v1","createdAt":requested_at,"artifacts":[artifact],"headUpdates":[{"artifactType":"BookPlan","scope":{"level":"PROJECT"},"artifactId":artifact_id,"version":version,"payloadHash":hash}],"obligationDelta":(!mysteries.is_empty()).then_some(mysteries)})).map_err(|e| e.to_string())?;
+    let bundle: CommitBundle = serde_json::from_value(json!({"commitId":format!("commit:{commit_id}"),"projectId":project_id,"commandId":commit_id,"idempotencyKey":format!("{idempotency_key}:volume-direction"),"expectedProjectRevision":revision,"contractVersion":"m0a.v1","createdAt":requested_at,"artifacts":[artifact],"headUpdates":[{"artifactType":"BookPlan","scope":{"level":"PROJECT"},"artifactId":artifact_id,"version":version,"payloadHash":hash}],"obligationDelta":(!mysteries.is_empty()).then_some(mysteries)})).map_err(|e| e.to_string())?;
     let mut expected = CommitService::commit(&handle, &bundle, requested_at)
         .map_err(|e| e.to_string())?
         .after_revision;
@@ -7231,6 +7231,9 @@ fn compile_current_chapter_plan(
     if execution_mode != "LONG_FORM" {
         return Err("B08_EXECUTION_MODE_MISMATCH".into());
     }
+    crate::book_direction::require_first_volume_direction(
+        &handle, state.production_gateway.as_ref(), project_id, &volume_id, true,
+    )?;
     let budget_id = DurableModelRunner::chapter_budget_id(&handle, project_id, chapter_id)
         .map_err(|error| error.to_string())?;
     let authority = {
@@ -7370,13 +7373,9 @@ fn compile_current_chapter_plan(
         length_range,
     )?;
     planner.extend_input(&mut planning_input);
-    let bindings = json!({
-        "chapterId":chapter_id,
-        "compiledFromProjectRevision":planning_revision,
-        "compiledFromStateDigest":state_digest,
-        "contextManifestRef":context_ref,
-        "horizonPreviewCapacity":planning_input["horizonPreviewCapacity"]
-    });
+    if planner.capability() == crate::craft_plan::PLAN_CHAPTER_CRAFT {
+        history.extend_continuation_input(&mut planning_input);
+    }
     let triggered_threads = context_input
         .continuity_threads
         .iter()
@@ -7388,8 +7387,10 @@ fn compile_current_chapter_plan(
     let explicit_scope = request
         .pointer("/payload/scopeSelection")
         .is_some_and(|value| !value.is_null());
-    let task_states = context_input
-        .task_states
+    // Check the full dependency chain locally. The model still sees the
+    // selected context window, including its immediate dependencies.
+    let route_states = crate::planning::route_task_states(&handle, project_id, &route_payload)?;
+    let task_states = route_states
         .iter()
         .map(|state| {
             (
@@ -7407,7 +7408,7 @@ fn compile_current_chapter_plan(
         let mut plan = crate::planning::normalize_chapter_plan_model_output(
             raw,
             &triggered_threads,
-            &bindings,
+            &planning_input,
         );
         plan["compiledFromProjectRevision"] = json!(planning_revision);
         plan["compiledFromStateDigest"] = json!(state_digest);
@@ -7434,7 +7435,7 @@ fn compile_current_chapter_plan(
         }
         // Checked here, not only at commit, so the planner gets the reason
         // and one more try.
-        let horizon_capacity = bindings["horizonPreviewCapacity"].as_i64().unwrap_or(0);
+        let horizon_capacity = planning_input["horizonPreviewCapacity"].as_i64().unwrap_or(0);
         let craft = planner.check_craft(&plan, horizon_capacity, length_range);
         crate::production::note_if_lenient(lenient, &mut problems, craft)?;
         problems.extend(planner.reminders(&plan));
@@ -8037,14 +8038,23 @@ fn execute_planning_command_with_observer(
                 observer,
             )?;
         }
-        let planned = crate::book_direction::plan(
+        let planned = match crate::book_direction::plan(
             &handle,
             state.production_gateway.as_ref(),
             project_id,
             command_id,
             idempotency_key,
             requested_at,
-        )?;
+        ) {
+            Ok(planned) => planned,
+            Err(error) => {
+                if let Some(job_id) = b02_plan_job.as_deref() {
+                    DurableJobService::fail_b02_phase_job(&handle, project_id, job_id, &error, requested_at)
+                        .map_err(|failure| failure.to_string())?;
+                }
+                return Err(error);
+            }
+        };
         direction_run_id = planned.model_run_id;
         direction_reminder = planned.reminder;
         payload = crate::planning::approve_book_plan(
@@ -8067,6 +8077,9 @@ fn execute_planning_command_with_observer(
         }
     }
     if artifact_type == "VolumePlan" {
+        crate::book_direction::require_first_volume_direction(
+            &handle, state.production_gateway.as_ref(), project_id, &scope_key, false,
+        )?;
         let intent = crate::repositories::narrative::NarrativeRepository::canonical_head_ref(
             &handle,
             project_id,

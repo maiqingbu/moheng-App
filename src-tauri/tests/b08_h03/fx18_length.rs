@@ -60,6 +60,10 @@ impl ProductionModelGateway for LengthGateway {
                 .body_lengths
                 .get(renders)
                 .unwrap_or_else(|| self.body_lengths.last().unwrap());
+            if capability == "ADJUST_CHAPTER_LENGTH" && input["patchOnly"] == true {
+                response.output = fixture_length_insertions(input, length);
+                return Ok(response);
+            }
             let body = response.output["body"].as_str().unwrap().to_string();
             let filler = length.saturating_sub(body.chars().count() + 1);
             response.output["body"] = json!(format!("{body}\n{}", varied_prose(filler)));
@@ -139,7 +143,8 @@ fn fx18_a_chapter_brought_into_the_range_by_its_adjustment_is_kept() {
     let adjust = gateway.inputs("ADJUST_CHAPTER_LENGTH");
     assert_eq!(adjust.len(), 1);
     assert_eq!(adjust[0]["currentChars"], 900);
-    assert_eq!(adjust[0]["targetChars"], 2500);
+    assert_eq!(adjust[0]["targetChars"], 2024);
+    assert_eq!(adjust[0]["patchOnly"], true);
     assert_eq!(
         final_word_count(&state, "p-fx18-adjusted", &chapter_id),
         Some(2500)
@@ -157,8 +162,7 @@ fn fx18_chapter_still_outside_the_range_after_its_adjustment_is_not_committed() 
         "{error}"
     );
     assert_eq!(gateway.inputs("RENDER_CHAPTER").len(), 1);
-    // LD-7: an expansion that adds nothing is not asked for again.
-    assert_eq!(gateway.inputs("ADJUST_CHAPTER_LENGTH").len(), 1);
+    assert_eq!(gateway.inputs("ADJUST_CHAPTER_LENGTH").len(), 2);
     assert_eq!(gateway.inputs("AUDIT_EXTRACT").len(), 0);
     assert_eq!(
         final_word_count(&state, "p-fx18-still-short", &chapter_id),

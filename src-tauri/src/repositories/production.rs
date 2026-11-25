@@ -3,6 +3,8 @@
 use libsql_rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 
+pub(crate) const NARRATIVE_REVIEW_REQUIRED: &str = "B08_NARRATIVE_REVIEW_REQUIRED";
+
 #[derive(Debug, thiserror::Error)]
 pub enum ProductionRepositoryError {
     #[error("sqlite: {0}")]
@@ -175,6 +177,68 @@ fn b02_phase_steps_with_labels(phases: &[&str], current: Option<&str>, status: &
 pub const CHAPTER_RUN_ALLOWANCE: i64 = 16;
 
 impl ProductionRepository {
+    pub(crate) fn expects_first_volume_direction(
+        connection: &Connection,
+        project_id: &str,
+    ) -> Result<bool, ProductionRepositoryError> {
+        if crate::craft_plan::confirmed_bible(connection, project_id)
+            .map_err(ProductionRepositoryError::Narrative)?.is_some()
+        {
+            return Ok(true);
+        }
+        Ok(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM model_runs WHERE project_id=?1 AND capability='PLAN_BOOK_DIRECTION')",
+            [project_id], |row| row.get(0),
+        )?)
+    }
+
+    /// Save the uncommitted text and pause its production attempt together.
+    pub(crate) fn hold_continuity_candidate(
+        connection: &Connection,
+        candidate: &crate::generated::types::ArtifactEnvelope,
+        job_id: &str,
+        now: &str,
+    ) -> Result<(), ProductionRepositoryError> {
+        let project_id = &candidate.project_id;
+        connection.execute_batch("SAVEPOINT narrative_review_hold")?;
+        let result = (|| {
+            super::artifacts::ArtifactRepository::insert_candidate(connection, project_id, candidate)
+                .map_err(|error| ProductionRepositoryError::Narrative(error.to_string()))?;
+            let changed = connection.execute(
+                "UPDATE jobs SET status='BLOCKED',current_stage='CANDIDATE',error_code=?1,updated_at=?2 WHERE project_id=?3 AND job_id=?4 AND status IN ('RUNNING','WAITING_MODEL')",
+                libsql_rusqlite::params![NARRATIVE_REVIEW_REQUIRED, now, project_id, job_id],
+            )?;
+            if changed != 1 {
+                return Err(ProductionRepositoryError::Narrative("B08_CHAPTER_JOB_NOT_ACTIVE".into()));
+            }
+            super::runtime::DurableJobService::release_lease(connection, project_id, job_id, now)
+                .map_err(|error| ProductionRepositoryError::Narrative(error.to_string()))?;
+            super::runtime::DurableJobService::set_runtime_state(
+                connection, project_id, "PAUSED", Some(NARRATIVE_REVIEW_REQUIRED), now,
+            )
+            .map_err(|error| ProductionRepositoryError::Narrative(error.to_string()))?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => connection.execute_batch("RELEASE narrative_review_hold").map_err(Into::into),
+            Err(error) => {
+                connection.execute_batch("ROLLBACK TO narrative_review_hold; RELEASE narrative_review_hold")?;
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn active_continuity_hold(
+        connection: &Connection,
+        project_id: &str,
+    ) -> Result<Option<(String, String)>, ProductionRepositoryError> {
+        Ok(connection.query_row(
+            "SELECT j.job_id,j.chapter_id FROM jobs j JOIN chapters c ON c.project_id=j.project_id AND c.chapter_id=j.chapter_id WHERE j.project_id=?1 AND j.job_type='CHAPTER' AND j.status='BLOCKED' AND j.error_code=?2 AND c.status<>'COMMITTED' ORDER BY c.chapter_no,j.updated_at DESC,j.rowid DESC LIMIT 1",
+            libsql_rusqlite::params![project_id, NARRATIVE_REVIEW_REQUIRED],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?)
+    }
+
     /// Model runs the chapter has used against its limit: the larger of the
     /// commit gate's count (model runs of the chapter's jobs) and the runtime
     /// budget's count (reservations), so a limit above it satisfies both.
@@ -298,7 +362,7 @@ impl ProductionRepository {
             .map_err(|error| ProductionRepositoryError::Serialization(error.to_string()))?;
         let job: Option<ProductionJobRow> = connection
             .query_row(
-                "SELECT job_id, COALESCE(current_stage,'IDLE'), chapter_id, status, error_code FROM jobs WHERE project_id=?1 ORDER BY CASE WHEN job_type='CHAPTER' THEN 0 ELSE 1 END, updated_at DESC, job_id DESC LIMIT 1",
+                "SELECT job_id, COALESCE(current_stage,'IDLE'), chapter_id, status, error_code FROM jobs WHERE project_id=?1 ORDER BY CASE WHEN job_type='CHAPTER' THEN 0 ELSE 1 END, updated_at DESC, rowid DESC LIMIT 1",
                 [project_id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )
@@ -460,7 +524,7 @@ impl ProductionRepository {
             let sql = if canonical {
                 "SELECT json_object('artifactId',h.artifact_id,'version',h.version,'payloadHash',h.payload_hash) FROM canonical_heads h WHERE h.project_id=?1 AND h.artifact_type=?2 AND h.scope_level='CHAPTER' AND h.scope_key=?3"
             } else {
-                "SELECT json_object('artifactId',a.artifact_id,'version',a.version,'payloadHash',a.payload_hash) FROM artifacts a WHERE a.project_id=?1 AND a.artifact_type=?2 AND a.scope_level='CHAPTER' AND a.scope_key=?3 ORDER BY a.created_at DESC,a.version DESC LIMIT 1"
+                "SELECT json_object('artifactId',a.artifact_id,'version',a.version,'payloadHash',a.payload_hash) FROM artifacts a WHERE a.project_id=?1 AND a.artifact_type=?2 AND a.scope_level='CHAPTER' AND a.scope_key=?3 ORDER BY a.created_at DESC,a.version DESC,a.rowid DESC LIMIT 1"
             };
             connection
                 .query_row(
@@ -735,23 +799,18 @@ impl ProductionRepository {
         let book_plan_uses_current_signing = if let (Some(book_plan), Some(signing)) =
             (book_plan_ref.as_ref(), signing_ref.as_ref())
         {
-            connection.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM artifact_dependencies WHERE source_artifact_id=?1 AND source_version=?2 AND target_artifact_id=?3 AND target_version=?4 AND target_payload_hash=?5)",
-                    libsql_rusqlite::params![
-                        book_plan.artifact_id,
-                        book_plan.version,
-                        signing.artifact_id,
-                        signing.version,
-                        signing.payload_hash
-                    ],
-                    |row| row.get::<_, bool>(0),
-                )?
+            super::narrative::NarrativeRepository::book_plan_uses_signing(
+                connection, project_id, book_plan, signing,
+            ).map_err(|error| ProductionRepositoryError::Narrative(error.to_string()))?
         } else {
             false
         };
         let book_plan_reapproval_required = book_plan_status == "APPROVED"
             && signing_is_current_and_confirmed
             && !book_plan_uses_current_signing;
+        let first_volume_direction_missing = book_plan_status == "APPROVED"
+            && book_plan_payload.as_ref().is_some_and(|payload| !crate::book_direction::has_first_volume_direction(payload))
+            && Self::expects_first_volume_direction(connection, project_id)?;
         let book_plan_operation = b02_operation
             .as_ref()
             .filter(|(_, kind, _, _, _)| kind == crate::repositories::runtime::B02_BOOK_PLAN_KIND);
@@ -775,33 +834,21 @@ impl ProductionRepository {
             "ref":book_plan_ref.as_ref().map(|reference| json!({"artifactId":reference.artifact_id,"version":reference.version,"payloadHash":reference.payload_hash})),
             "seedPreserved":seed_count > 0,
             "reapprovalRequired":book_plan_reapproval_required,
+            "firstVolumeDirectionMissing":first_volume_direction_missing,
             "steps":book_plan_steps
         });
-        let next_chapter_has_volume_plan = if let Some((_, _, _, volume_id)) = next_chapter.as_ref()
-        {
-            crate::repositories::narrative::NarrativeRepository::volume_plan_route(
-                connection, project_id, volume_id,
-            )
-            .map_err(|error| ProductionRepositoryError::Narrative(error.to_string()))?
-            .is_some()
-        } else {
-            false
-        };
         let next_chapter_projection = if let Some((id, number, title, volume_id)) = next_chapter {
-            let is_opening =
-                crate::repositories::project_entry::is_opening_chapter(connection, project_id, &id)
-                    .map_err(|error| ProductionRepositoryError::Narrative(error.to_string()))?;
-            let execution_mode = if !next_chapter_has_volume_plan && is_opening {
-                "OPENING_BOOTSTRAP"
-            } else if plan_projection.is_some() {
-                "LONG_FORM"
-            } else {
-                "OPENING_BOOTSTRAP"
-            };
+            let execution_mode = crate::planning::resolve_chapter_execution_mode(connection, project_id, &id)
+                .map_err(ProductionRepositoryError::Narrative)?;
             let quota = Self::chapter_quota(connection, project_id, &id)?;
-            Some(
-                json!({"id":id,"number":number,"title":title,"volumeId":volume_id,"executionMode":execution_mode,"quota":quota}),
-            )
+            let mut next = json!({"id":id,"number":number,"title":title,"volumeId":volume_id,"executionMode":execution_mode,"quota":quota});
+            if execution_mode == "LONG_FORM" {
+                let plan = super::narrative::NarrativeRepository::canonical_head_ref(
+                    connection, project_id, "ChapterPlan", &id,
+                ).map_err(|error| ProductionRepositoryError::Narrative(error.to_string()))?;
+                next["planReady"] = json!(plan.is_some());
+            }
+            Some(next)
         } else {
             None
         };
@@ -810,9 +857,18 @@ impl ProductionRepository {
             .as_ref()
             .and_then(|(_, _, _, _, error_code)| error_code.clone());
         let is_active = matches!(job_status.as_deref(), Some("RUNNING" | "WAITING_MODEL"));
-        let can_retry =
-            matches!(job_status.as_deref(), Some("FAILED" | "PAUSED")) && final_ref.is_none();
-        let gate_status = if job_status.as_deref() == Some("FAILED") {
+        let held_draft = Self::active_continuity_hold(connection, project_id)?
+            .map(|(held_job, _)| {
+                connection.query_row(
+                    "SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p USING(artifact_id,version) WHERE a.project_id=?1 AND a.artifact_type='ChapterCandidate' AND a.artifact_status='CANDIDATE' AND json_extract(a.provenance_json,'$.jobId')=?2 AND json_extract(p.payload_json,'$.continuityReview.jobId')=?2 LIMIT 1",
+                    libsql_rusqlite::params![project_id, held_job], |row| row.get::<_, String>(0),
+                ).optional().map(|raw| raw.and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                    .map(|draft| json!({"jobId":held_job,"body":draft["body"],"findings":draft["continuityReview"]["findings"]})))
+            }).transpose()?.flatten();
+        let quality_held = !is_active && held_draft.is_some();
+        let can_retry = (matches!(job_status.as_deref(), Some("FAILED" | "PAUSED")) || quality_held)
+            && final_ref.is_none();
+        let gate_status = if job_status.as_deref() == Some("FAILED") || quality_held {
             "BLOCKED"
         } else if final_ref.is_some() {
             "PASS"
@@ -841,9 +897,9 @@ impl ProductionRepository {
             "triggeredContinuity":plan_projection.as_ref().and_then(|plan| plan.get("continuityActions")).cloned().unwrap_or_else(|| json!([])),
             "newResponsibilities":new_responsibilities,
             "openForeshadows":open_foreshadows,
-            "gate":{"status":gate_status,"reason":if job_status.as_deref()==Some("FAILED") {job_error.clone().unwrap_or_else(|| "MODEL_TRANSPORT_FAILED".into())} else if stale_status=="PLAN_STALE" {"PLAN_STALE / RECOMPILE_REQUIRED".into()} else {"".into()}},
+            "gate":{"status":gate_status,"reason":if quality_held {NARRATIVE_REVIEW_REQUIRED.into()} else if job_status.as_deref()==Some("FAILED") {job_error.clone().unwrap_or_else(|| "MODEL_TRANSPORT_FAILED".into())} else if stale_status=="PLAN_STALE" {"PLAN_STALE / RECOMPILE_REQUIRED".into()} else {"".into()}},
             "stale":{"status":stale_status,"reason":if stale_status=="PLAN_STALE" {"Relevant authority changed"} else {""}},"modelRuns":model_runs,"candidateRef":candidate_ref,"finalChapterRef":final_ref,"reconciliation":reconciliation,"repair":repair,
-            "creativeSkills":creative_skills,"quality":quality,"tasteProfile":taste_profile,
+            "creativeSkills":creative_skills,"quality":quality,"tasteProfile":taste_profile,"heldDraft":held_draft,
             "readerDesire":quality.get("softAssessment").cloned().unwrap_or(Value::Null),
             "openingProgress":opening_progress,
             "costSummary":cost_summary,"committedChapters":runtime.1,"candidateChapters":runtime.3

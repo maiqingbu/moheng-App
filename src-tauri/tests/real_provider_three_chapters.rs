@@ -87,6 +87,7 @@ fn retryable_real_production_error(error: &str) -> bool {
         // repeated goal) is retried like model output variance.
         "B08_PLAN_",
         "B08_RENDER_LENGTH_OUT_OF_RANGE",
+        "B08_RENDER_REPEATED_PHRASES",
         "B08_AUDIT_INCOMPLETE",
         "B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS",
         // A declared reservation the audit says this chapter revealed early:
@@ -102,8 +103,35 @@ fn retryable_real_production_error(error: &str) -> bool {
     .any(|prefix| error.starts_with(prefix))
 }
 
+fn rejected_expansion_has_saved_draft(
+    state: &KernelState,
+    project_id: &str,
+    command_id: &str,
+    error: &str,
+) -> bool {
+    if error != "B08_RENDER_DUPLICATE_SPAN" {
+        return false;
+    }
+    let job_id = StableIdentityFactory::from_command(StableIdKind::Job, command_id).unwrap();
+    let conn = state.manager.open(project_id, "", NOW).unwrap();
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM jobs j JOIN job_checkpoints k USING(project_id,job_id)
+           WHERE j.project_id=?1 AND j.job_id=?2 AND j.job_type='CHAPTER'
+             AND j.status='FAILED' AND j.current_stage='RENDER' AND k.stage='RENDER'
+             AND json_type(k.boundary_json,'$.body')='text')",
+        libsql_rusqlite::params![project_id,job_id],
+        |row| row.get(0),
+    ).unwrap()
+}
+
 fn budget_exhausted(error: &str) -> bool {
     error.contains("BUDGET_EXCEEDED") || error.contains("budget hard limit")
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChapterRecovery {
+    SimulateAuthorActions,
+    StopAtAuthorGate,
 }
 
 fn execute_real_production(
@@ -114,9 +142,10 @@ fn execute_real_production(
     execution_mode: &str,
     command_prefix: &str,
     chapter_goal: &str,
+    recovery: ChapterRecovery,
+    initial_retry_job: Option<String>,
 ) -> serde_json::Value {
-    let mut retry_of_job_id = None;
-    // A quota reset costs an attempt, so a chapter gets six.
+    let mut retry_of_job_id = initial_retry_job;
     for attempt in 0..6 {
         let command_id = if attempt == 0 {
             command_prefix.to_string()
@@ -153,6 +182,12 @@ fn execute_real_production(
                 assert_eq!(response["finalStatus"], "committed");
                 assert_eq!(response["stage"], "COMPLETED");
                 return response;
+            }
+            Err(error) if budget_exhausted(&error) && recovery == ChapterRecovery::StopAtAuthorGate => {
+                panic!("REAL_TEN_CHAPTER_PAUSED reason=BUDGET_EXCEEDED chapterId={chapter_id}: {error}");
+            }
+            Err(error) if error.contains("UNKNOWN_REMOTE_OUTCOME") && recovery == ChapterRecovery::StopAtAuthorGate => {
+                panic!("REAL_TEN_CHAPTER_PAUSED reason=UNKNOWN_REMOTE_OUTCOME chapterId={chapter_id}: {error}");
             }
             Err(error) if budget_exhausted(&error) && attempt < 5 => {
                 // What the user does in the app: reset this chapter's quota.
@@ -200,7 +235,8 @@ fn execute_real_production(
                 }
                 retry_of_job_id = None;
             }
-            Err(error) if retryable_real_production_error(&error) && attempt < 5 => {
+            Err(error) if attempt < 5 && (retryable_real_production_error(&error)
+                || rejected_expansion_has_saved_draft(state, project_id, &command_id, &error)) => {
                 retry_of_job_id = Some(
                     StableIdentityFactory::from_command(StableIdKind::Job, &command_id).unwrap(),
                 );
@@ -609,6 +645,8 @@ fn configured_provider_generates_and_reloads_three_real_chapters() {
             "OPENING_BOOTSTRAP",
             &format!("{prefix}:produce:{}", index + 1),
             chapter_goal,
+            ChapterRecovery::SimulateAuthorActions,
+            None,
         );
         assert!(receipt["finalChapterRef"]["artifactId"].as_str().is_some());
     }
@@ -704,6 +742,8 @@ fn configured_provider_generates_and_reloads_three_real_chapters() {
             "LONG_FORM",
             &format!("{prefix}:production-4"),
             "推进调查并让真实选择产生可验证后果。",
+            ChapterRecovery::SimulateAuthorActions,
+            None,
         );
         assert_eq!(production4["stage"], "COMPLETED");
         let after = {
@@ -863,51 +903,35 @@ fn compile_real_chapter_plan(
     }
 }
 
-#[test]
-#[ignore = "real provider acceptance: ten chapters and the signing evaluation; spends configured API budget"]
-fn configured_provider_writes_ten_chapters_and_evaluates_signing() {
-    assert_eq!(
-        std::env::var("MOHENG_RUN_REAL_TEN_CHAPTERS").as_deref(),
-        Ok("1"),
-        "set MOHENG_RUN_REAL_TEN_CHAPTERS=1 to acknowledge real API use"
-    );
-    let (paths, state) = real_state();
-    let _models = ModelOverride::from_env(&paths);
-    let run = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
-    let prefix = format!("real-ten-chapters:{run}");
-    let title = format!("Harness 真实十章验收 {run}");
-    let (project_id, opening) = create_real_project(&state, &prefix, &title);
-    confirm_craft_setup(&state, &prefix, &project_id);
-    let opening_goals = OPENING_GOALS;
-    for (index, chapter_id) in opening.iter().enumerate() {
+fn write_and_sign_real_opening(
+    state: &KernelState,
+    project_id: &str,
+    prefix: &str,
+    opening: &[String],
+    first_uncommitted: usize,
+    mut retry_job: Option<String>,
+) {
+    for (index, chapter_id) in opening.iter().enumerate().skip(first_uncommitted) {
         execute_real_production(
-            &state,
-            &project_id,
-            chapter_id,
-            None,
-            "OPENING_BOOTSTRAP",
-            &format!("{prefix}:produce:{}", index + 1),
-            opening_goals[index],
+            state, project_id, chapter_id, None, "OPENING_BOOTSTRAP",
+            &format!("{prefix}:produce:{}", index + 1), OPENING_GOALS[index],
+            ChapterRecovery::StopAtAuthorGate, retry_job.take(),
         );
     }
-
     // Signing evaluation of the golden three chapters.
     let evaluation = execute(
-        &state,
+        state,
         json!({
             "type":"opening_evaluate","commandId":format!("{prefix}:opening-evaluate"),
             "idempotencyKey":format!("{prefix}:opening-evaluate:key"),"projectId":project_id,
-            "expectedRevision":current_revision(&state, &project_id),"requestedAt":NOW,"payload":{}
+            "expectedRevision":current_revision(state, project_id),"requestedAt":NOW,"payload":{}
         }),
     );
     let signing = {
-        let connection = state.manager.open(&project_id, "", NOW).unwrap();
+        let connection = state.manager.open(project_id, "", NOW).unwrap();
         ai_novel_production_system_core::repositories::production::ProductionRepository::center_projection(
             &connection,
-            &project_id,
+            project_id,
         )
         .unwrap()["signing"]
             .clone()
@@ -922,40 +946,100 @@ fn configured_provider_writes_ten_chapters_and_evaluates_signing() {
         .find(|item| item["platformId"] == "FANQIE" && item["status"] == "PASS")
         .expect("Fanqie passes the signing evaluation");
     execute(
-        &state,
+        state,
         json!({
             "type":"signing_confirm","commandId":format!("{prefix}:signing-confirm"),
             "idempotencyKey":format!("{prefix}:signing-confirm:key"),"projectId":project_id,
-            "expectedRevision":current_revision(&state, &project_id),"requestedAt":NOW,
+            "expectedRevision":current_revision(state, project_id),"requestedAt":NOW,
             "payload":{"platformId":fanqie["platformId"]}
         }),
     );
+}
 
-    for (step, command) in [
-        ("book-plan", "book_plan_revise"),
-        ("volume-intent", "planning_create_volume_intent"),
-        ("volume-plan", "planning_create_volume_plan"),
-    ] {
-        let volume_id: String = state
-            .manager
-            .open(&project_id, "", NOW)
+#[test]
+#[ignore = "real provider acceptance: ten chapters and the signing evaluation; spends configured API budget"]
+fn configured_provider_writes_ten_chapters_and_evaluates_signing() {
+    assert_eq!(
+        std::env::var("MOHENG_RUN_REAL_TEN_CHAPTERS").as_deref(),
+        Ok("1"),
+        "set MOHENG_RUN_REAL_TEN_CHAPTERS=1 to acknowledge real API use"
+    );
+    let resumed_project = std::env::var("MOHENG_REAL_TEN_CHAPTERS_RESUME_PROJECT").ok();
+    let resume_route = std::env::var("MOHENG_REAL_TEN_CHAPTERS_RESUME_ROUTE").as_deref() == Ok("1");
+    let resume_opening_job = std::env::var("MOHENG_REAL_TEN_CHAPTERS_RESUME_OPENING_JOB").ok();
+    let reset_opening_quota = std::env::var("MOHENG_REAL_TEN_CHAPTERS_RESET_OPENING_QUOTA").as_deref() == Ok("1");
+    assert!(!resume_route || resumed_project.is_some(), "route resume requires a signed project");
+    assert!(resume_opening_job.is_none() || (resumed_project.is_some() && !resume_route));
+    assert!(!reset_opening_quota || resume_opening_job.is_some());
+    let (paths, state) = real_state();
+    let _models = ModelOverride::from_env(&paths);
+    let run = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let prefix = format!("real-ten-chapters:{run}");
+    let project_id = if let (Some(project_id), Some(previous_job)) = (resumed_project.as_ref(), resume_opening_job) {
+        let connection = state.manager.open(project_id, "", NOW).unwrap();
+        let opening = connection.prepare(
+            "SELECT chapter_id,status FROM chapters WHERE project_id=?1 AND chapter_no BETWEEN 1 AND 3 ORDER BY chapter_no",
+        ).unwrap().query_map([project_id], |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?)))
+            .unwrap().collect::<Result<Vec<_>,_>>().unwrap();
+        assert_eq!(opening.len(), OPENING_GOALS.len());
+        let first_uncommitted = opening.iter().take_while(|(_, status)| status == "COMMITTED").count();
+        assert!(first_uncommitted < opening.len());
+        assert!(opening[first_uncommitted..].iter().all(|(_, status)| status == "PLANNED"));
+        let (chapter_id, _) = &opening[first_uncommitted];
+        ai_novel_production_system_core::repositories::runtime::DurableJobService::validate_retry_source(
+            &connection, project_id, &previous_job, chapter_id,
+        ).unwrap();
+        drop(connection);
+        println!("REAL_TEN_CHAPTER_STARTED projectId={project_id}");
+        if reset_opening_quota {
+            let command_id = format!("acceptance:opening-quota:{previous_job}");
+            let receipt = execute(
+                &state,
+                json!({
+                    "type":"production_reset_chapter_quota","commandId":command_id,
+                    "idempotencyKey":format!("{command_id}:key"),"projectId":project_id,
+                    "expectedRevision":current_revision(&state, project_id),"requestedAt":NOW,
+                    "payload":{"chapterId":chapter_id}
+                }),
+            );
+            println!("REAL_OPENING_QUOTA_RESET chapterId={chapter_id} quota={}",receipt["result"]["chapterQuota"]);
+        }
+        let chapter_ids = opening.into_iter().map(|(id,_)| id).collect::<Vec<_>>();
+        write_and_sign_real_opening(&state, project_id, &prefix, &chapter_ids,
+            first_uncommitted, Some(previous_job));
+        project_id.clone()
+    } else if let Some(project_id) = resumed_project {
+        let connection = state.manager.open(&project_id, "", NOW).unwrap();
+        let committed = connection
+            .prepare("SELECT chapter_no FROM chapters WHERE project_id=?1 AND status='COMMITTED' ORDER BY chapter_no")
             .unwrap()
-            .query_row(
-                "SELECT volume_id FROM volumes WHERE project_id=?1 ORDER BY volume_no LIMIT 1",
-                [&project_id],
-                |row| row.get(0),
-            )
+            .query_map([&project_id], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        execute(
-            &state,
-            json!({
-                "type":command,"commandId":format!("{prefix}:{step}"),
-                "idempotencyKey":format!("{prefix}:{step}:key"),"projectId":project_id,
-                "expectedRevision":current_revision(&state, &project_id),"requestedAt":NOW,
-                "payload":{"volumeId":volume_id}
-            }),
-        );
-    }
+        assert_eq!(committed, vec![1, 2, 3], "resume at the signed opening");
+        let signing = ai_novel_production_system_core::repositories::production::ProductionRepository::center_projection(
+            &connection, &project_id,
+        ).unwrap()["signing"].clone();
+        assert_eq!(signing["status"], "PASS");
+        assert_eq!(signing["confirmation"]["confirmed"], true);
+        println!("REAL_TEN_CHAPTER_STARTED projectId={project_id}");
+        let evaluation = json!({"projectId":project_id,"resumedFromSignedOpening":true});
+        println!("REAL_SIGNING_EVALUATION response={evaluation} signing={signing}");
+        project_id
+    } else {
+        let title = format!("Harness 真实十章验收 {run}");
+        let (project_id, opening) = create_real_project(&state, &prefix, &title);
+        println!("REAL_TEN_CHAPTER_STARTED projectId={project_id}");
+        confirm_craft_setup(&state, &prefix, &project_id);
+        write_and_sign_real_opening(&state, &project_id, &prefix, &opening, 0, None);
+
+        project_id
+    };
+
     let volume_id: String = state
         .manager
         .open(&project_id, "", NOW)
@@ -966,6 +1050,38 @@ fn configured_provider_writes_ten_chapters_and_evaluates_signing() {
             |row| row.get(0),
         )
         .unwrap();
+    if resume_route {
+        use ai_novel_production_system_core::repositories::narrative::NarrativeRepository;
+        let connection = state.manager.open(&project_id, "", NOW).unwrap();
+        ai_novel_production_system_core::signing::require_current_signing_for_long_form_if_present(
+            &connection, &project_id,
+        ).unwrap();
+        let book_ref = NarrativeRepository::canonical_project_head_ref(&connection, &project_id, "BookPlan")
+            .unwrap().expect("route resume requires a canonical BookPlan");
+        let book = NarrativeRepository::artifact_payload_by_ref(&connection, &project_id, &book_ref)
+            .unwrap().expect("route resume requires the BookPlan payload");
+        assert_eq!(book["planningMaturity"], "APPROVED");
+        let route = NarrativeRepository::volume_plan_route(&connection, &project_id, &volume_id)
+            .unwrap().expect("route resume requires an existing canonical VolumePlan");
+        println!("REAL_TEN_CHAPTER_ROUTE_RESUMED volumeId={volume_id} bookHash={} routeHash={}",
+            book_ref.payload_hash, route.payload_hash);
+    } else {
+        for (step, command) in [
+            ("book-plan", "book_plan_revise"),
+            ("volume-intent", "planning_create_volume_intent"),
+            ("volume-plan", "planning_create_volume_plan"),
+        ] {
+            execute(
+                &state,
+                json!({
+                    "type":command,"commandId":format!("{prefix}:{step}"),
+                    "idempotencyKey":format!("{prefix}:{step}:key"),"projectId":project_id,
+                    "expectedRevision":current_revision(&state, &project_id),"requestedAt":NOW,
+                    "payload":{"volumeId":volume_id}
+                }),
+            );
+        }
+    }
 
     for number in 4..=10_i64 {
         let existing: Option<String> = state
@@ -1009,6 +1125,8 @@ fn configured_provider_writes_ten_chapters_and_evaluates_signing() {
             "LONG_FORM",
             &format!("{prefix}:produce:{number}"),
             "承接上一章结尾，推进主线调查，并让主角的选择产生可核对的后果。",
+            ChapterRecovery::StopAtAuthorGate,
+            None,
         );
     }
 
@@ -1267,6 +1385,8 @@ fn configured_provider_compares_the_craft_skills_on_and_off() {
                 "OPENING_BOOTSTRAP",
                 &format!("{prefix}:{arm}:produce:{}", index + 1),
                 OPENING_GOALS[index],
+                ChapterRecovery::SimulateAuthorActions,
+                None,
             );
         }
         let evaluation = execute(
