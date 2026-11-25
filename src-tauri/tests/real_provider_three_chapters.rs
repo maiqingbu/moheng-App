@@ -67,7 +67,12 @@ fn execute_model_step(state: &KernelState, request: serde_json::Value) -> serde_
                 assert_eq!(response["finalStatus"], "committed");
                 return response;
             }
-            Err(error) if error.contains("P01_MODEL_JSON_INVALID") && attempt < ATTEMPTS => {
+            // A direction that fails its checks is planned again (real run 2026-11-25, round 7).
+            Err(error)
+                if (error.contains("P01_MODEL_JSON_INVALID")
+                    || error.starts_with("B07_BOOK_DIRECTION_REQUIRED:"))
+                    && attempt < ATTEMPTS =>
+            {
                 println!("REAL_SETUP_REGENERATE attempt={attempt} error={error}");
             }
             Err(error) => panic!("real setup failed: {error}"),
@@ -1122,7 +1127,7 @@ fn configured_provider_writes_ten_chapters_and_evaluates_signing() {
             ("volume-intent", "planning_create_volume_intent"),
             ("volume-plan", "planning_create_volume_plan"),
         ] {
-            execute(
+            execute_model_step(
                 &state,
                 json!({
                     "type":command,"commandId":format!("{prefix}:{step}"),

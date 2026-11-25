@@ -1180,6 +1180,7 @@ pub fn plan_chapter_with_feedback(
         ) {
             let mut previous = last.clone();
             crate::book_direction::tidy(&mut previous, &input);
+            crate::book_direction::drop_replayed_steps(&mut previous, &feedback);
             feedback["previousDirection"] = previous;
         }
         if craft_chapter {

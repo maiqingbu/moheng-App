@@ -670,6 +670,38 @@ fn planned_outcome(target: &str) -> &str {
         .unwrap_or(outcome)
 }
 
+/// How a problem names step `step` (from 1) of the stage at `stage_index`.
+fn step_location(stage_index: usize, step: u64) -> String {
+    format!("阶段 {} 的第 {step} 步", stage_index + 1)
+}
+
+/// Takes the first volume's steps that `feedback` says replay the opening out
+/// of the direction handed back: given back, the planner keeps them.
+pub(crate) fn drop_replayed_steps(direction: &mut Value, feedback: &Value) {
+    let replayed = |stage_index: usize, index: usize| {
+        let start = format!("{}「", step_location(stage_index, index as u64 + 1));
+        items(feedback, "problems")
+            .iter()
+            .any(|problem| text(problem).starts_with(&start))
+    };
+    let seeds = direction["volumeIntentSeeds"].as_array_mut();
+    let first = seeds
+        .into_iter()
+        .flatten()
+        .find(|seed| seed["volumeNo"] == 1);
+    let stages = first.and_then(|seed| seed["stages"].as_array_mut());
+    for (stage_index, stage) in stages.into_iter().flatten().enumerate() {
+        if let Some(steps) = stage["steps"].as_array_mut() {
+            let mut index = 0..;
+            steps.retain(|_| {
+                index
+                    .next()
+                    .is_some_and(|index| !replayed(stage_index, index))
+            });
+        }
+    }
+}
+
 struct OpeningReplayReview {
     candidates: Vec<(Value, String)>,
     unbound: Vec<Value>,
@@ -722,7 +754,7 @@ fn ground_opening_replays(
                 .or_else(|| locate(body, cited))?
         };
         let location = match issue["step"].as_u64() {
-            Some(step) => format!("阶段 {} 的第 {step} 步", stage_index + 1),
+            Some(step) => step_location(stage_index, step),
             None => format!("阶段 {} 的目标", stage_index + 1),
         };
         let pair = json!({
@@ -1724,6 +1756,25 @@ mod tests {
         // The premise alone is not the step's result.
         assert!(problems("沈砚比对三片碎纸残渣与内网扫描件", opening).is_empty());
         assert!(problems(step, "压痕已经被系统抹平了。").is_empty());
+    }
+
+    #[test]
+    fn round76_a_rejected_replay_is_not_handed_back_to_the_planner() {
+        // Real run round 7: the same step came back in the next two plans.
+        let mut direction = direction();
+        let step = direction["volumeIntentSeeds"][0]["stages"][0]["steps"][1].clone();
+        let problem = format!(
+            "{}「{}」重排了开篇已发生的结果「旧」。",
+            step_location(0, 2),
+            step.as_str().unwrap()
+        );
+        drop_replayed_steps(&mut direction, &json!({"problems":[problem,"别的问题"]}));
+        let stages = &direction["volumeIntentSeeds"][0]["stages"];
+        assert_eq!(
+            stages[0]["steps"],
+            json!(["陆照查清丹房的账·第一步", "陆照查清丹房的账·第三步"])
+        );
+        assert_eq!(stages[1]["steps"].as_array().unwrap().len(), 3);
     }
 
     #[test]
