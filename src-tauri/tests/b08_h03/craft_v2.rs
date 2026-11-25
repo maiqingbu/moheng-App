@@ -320,6 +320,31 @@ fn ld4_a_chapter_too_long_is_cut_by_the_sentences_the_writer_chooses() {
     assert!((2000..=3300).contains(&committed), "{committed}");
 }
 
+#[test]
+fn round75_a_draft_far_too_long_is_written_again_instead_of_cut() {
+    // Owner decision 2026-11-25: a 5202-character draft was cut to 2201 and
+    // half of each conversation was gone.
+    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[4400, 2500]));
+    let project_id = "p-too-long-again";
+    let (_temp, state, chapter_id, result) = produce(gateway.clone(), project_id);
+    result.unwrap();
+    let renders = gateway.inputs("RENDER_CHAPTER");
+    assert_eq!(renders.len(), 2);
+    assert!(renders[1]["outputFeedback"]["instruction"]
+        .as_str()
+        .unwrap()
+        .contains("4400"));
+    assert!(gateway.inputs("CUT_CHAPTER").is_empty());
+    assert_eq!(committed_word_count(&state, project_id, &chapter_id), 2500);
+
+    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[4400]));
+    let (_temp, _state, _chapter_id, result) = produce(gateway.clone(), "p-too-long-twice");
+    assert!(result
+        .unwrap_err()
+        .starts_with("B08_RENDER_LENGTH_OUT_OF_RANGE:4400"));
+    assert!(gateway.inputs("CUT_CHAPTER").is_empty());
+}
+
 fn distinct_cuttable_sentences() -> String {
     (0..60)
         .map(|n| {

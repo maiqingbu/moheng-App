@@ -25,7 +25,8 @@ struct BehaviorGateway {
     report_stage_done: AtomicBool,
     verify_stage_done: AtomicBool,
     invalid_stage_evidence: AtomicBool,
-    recover_stage_evidence: AtomicBool,
+    /// The earlier chapter the verifier cites; 0 cites none.
+    recover_stage_evidence: AtomicUsize,
     split_stage: AtomicBool,
     enforce_length: AtomicBool,
     fail_capability_once: Mutex<Option<&'static str>>,
@@ -219,7 +220,7 @@ impl ProductionModelGateway for BehaviorGateway {
             "RENDER_CHAPTER" => {
                 let chapter_no = self.audit_calls.load(Ordering::SeqCst) + 1;
                 let mut body = Self::quote(chapter_no);
-                if chapter_no == 5 && self.recover_stage_evidence.load(Ordering::SeqCst) {
+                if chapter_no == 5 && self.recover_stage_evidence.load(Ordering::SeqCst) > 0 {
                     body = body.replacen(
                         "林舟在档案室找到了线人周娘子。周娘子亲手交还了账本缺页。",
                         "林舟顺着周娘子的指点，从柜底翻出了带朱印的封套。",
@@ -248,10 +249,14 @@ impl ProductionModelGateway for BehaviorGateway {
                 json!({"firstSentence":0,"outcomeSentence":0,"eventType":"DISCOVERY"})
             }
             "VERIFY_STAGE_STEP" => {
-                if self.recover_stage_evidence.load(Ordering::SeqCst) {
-                    let quote = "林舟在档案室找到了线人周娘子。";
+                let source_chapter = self.recover_stage_evidence.load(Ordering::SeqCst);
+                if source_chapter > 0 {
+                    let quote = match source_chapter {
+                        3 => "两人在档案室核对页码后，决定追问账本缺页的去向。",
+                        _ => "林舟在档案室找到了线人周娘子。",
+                    };
                     json!({"stageStepCompletion":{
-                        "sourceChapter":4,"firstSentence":0,"outcomeSentence":0,"condition":1,
+                        "sourceChapter":source_chapter,"firstSentence":0,"outcomeSentence":0,"condition":1,
                         "actionQuote":quote,"outcomeQuote":quote
                     }})
                 } else if self.invalid_stage_evidence.load(Ordering::SeqCst) {
@@ -584,7 +589,7 @@ fn state_with(
         report_stage_done: AtomicBool::new(false),
         verify_stage_done: AtomicBool::new(false),
         invalid_stage_evidence: AtomicBool::new(false),
-        recover_stage_evidence: AtomicBool::new(false),
+        recover_stage_evidence: AtomicUsize::new(0),
         split_stage: AtomicBool::new(false),
         enforce_length: AtomicBool::new(false),
         fail_capability_once: Mutex::new(None),
@@ -1363,7 +1368,7 @@ fn a_recovered_step_credits_the_source_chapter_without_rewriting_or_claiming_it_
         )
     };
     let source = produce("stage-recovery:four", source_id);
-    gateway.recover_stage_evidence.store(true, Ordering::SeqCst);
+    gateway.recover_stage_evidence.store(4, Ordering::SeqCst);
     let next = command(
         &state,
         &project_id,
@@ -1434,6 +1439,130 @@ fn a_recovered_step_credits_the_source_chapter_without_rewriting_or_claiming_it_
             .unwrap();
     assert_eq!(reopened.value["status"], "ACTIVE");
     assert_eq!(reopened.value["evidenceRefs"], json!([]));
+}
+
+#[test]
+fn round75_a_step_the_opening_already_showed_is_credited_to_its_opening_chapter() {
+    // Real run round 6: chapter 1 had compared the scraps, and the first step
+    // asked for it again; the opening could not be cited.
+    use ai_novel_production_system_core::repositories::narrative::NarrativeRepository;
+    let (state, _temp, gateway) = state_with(true, false);
+    let (project_id, _) = create_approved_book_plan(&state);
+    gateway.select_main_event.store(true, Ordering::SeqCst);
+    gateway.recover_stage_evidence.store(3, Ordering::SeqCst);
+    let volumes =
+        query_volume_list_impl(&state, json!({"projectId":project_id,"pageSize":20})).unwrap();
+    let volume = volumes["items"][0]["id"].as_str().unwrap();
+    let prepared = prepare_stage_chapter(&state, &project_id, volume);
+    let chapter = prepared["chapter"]["chapterId"].as_str().unwrap();
+    command(
+        &state,
+        &project_id,
+        "opening-evidence:four",
+        "production_start",
+        json!({"chapterId":chapter,"volumeId":volume,"executionMode":"LONG_FORM"}),
+    );
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let completed =
+        NarrativeRepository::satisfied_task_chapters(&connection, &project_id, 5).unwrap();
+    let (_, chapter_no) = completed
+        .iter()
+        .find(|(task, _)| task.ends_with(":step:1:1:1"))
+        .expect("the step the opening showed is done");
+    assert_eq!(*chapter_no, 3);
+    drop(connection);
+    let inputs = gateway.inputs.lock().unwrap();
+    let (_, verification) = inputs
+        .iter()
+        .find(|(name, _)| name == "VERIFY_STAGE_STEP")
+        .unwrap();
+    assert_eq!(
+        verification["priorStageSources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|source| source["chapterNo"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    // The writer and the planner still get attempts at the step, not these.
+    let (_, render) = inputs
+        .iter()
+        .find(|(name, input)| name == "RENDER_CHAPTER" && input["chapterId"] == chapter)
+        .unwrap();
+    assert!(render["stageStep"]
+        .get("recentUnverifiedAttempts")
+        .is_none());
+}
+
+#[test]
+fn round75_a_step_unproved_for_its_estimated_chapters_waits_while_the_next_goes_on() {
+    // Owner decision 2026-11-25: real run round 6 worked on one step for seven
+    // chapters. The step is not done; it waits for its proof.
+    use ai_novel_production_system_core::repositories::narrative::NarrativeRepository;
+    let (state, _temp, gateway) = state_with(true, false);
+    let (project_id, _) = create_approved_book_plan(&state);
+    gateway.select_main_event.store(true, Ordering::SeqCst);
+    let volumes =
+        query_volume_list_impl(&state, json!({"projectId":project_id,"pageSize":20})).unwrap();
+    let volume = volumes["items"][0]["id"].as_str().unwrap();
+    let mut prepared = prepare_stage_chapter(&state, &project_id, volume);
+    let route = query_plan_route_impl(&state, json!({"projectId":project_id,"volumeId":volume}))
+        .expect("volume route");
+    let steps = route["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|task| task["class"] == "REQUIRED")
+        .collect::<Vec<_>>();
+    let estimate = steps[0]["estimatedChapterCost"]["preferred"]
+        .as_i64()
+        .unwrap();
+    let planned_step = |chapter_id: &str| {
+        let inputs = gateway.inputs.lock().unwrap();
+        let (_, plan) = inputs
+            .iter()
+            .rfind(|(name, input)| name == "PLAN_STRATEGY" && input["chapterId"] == chapter_id)
+            .unwrap();
+        plan["volumeDirection"]["currentStage"]["taskId"].clone()
+    };
+    for attempt in 0..=estimate {
+        let chapter_id = prepared["chapter"]["chapterId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let expected = &steps[usize::from(attempt == estimate)]["taskId"];
+        assert_eq!(&planned_step(&chapter_id), expected, "attempt {attempt}");
+        command(
+            &state,
+            &project_id,
+            &format!("waiting:produce-{attempt}"),
+            "production_start",
+            json!({"chapterId":chapter_id,"volumeId":volume,"executionMode":"LONG_FORM"}),
+        );
+        if attempt < estimate {
+            prepared = command(
+                &state,
+                &project_id,
+                &format!("waiting:prepare-{attempt}"),
+                "planning_prepare_next_chapter",
+                json!({"volumeId":volume}),
+            );
+            command(
+                &state,
+                &project_id,
+                &format!("waiting:plan-{attempt}"),
+                "planning_compile_chapter_plan",
+                json!({"chapterId":prepared["chapter"]["chapterId"]}),
+            );
+        }
+    }
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    assert!(
+        NarrativeRepository::satisfied_task_chapters(&connection, &project_id, i64::MAX)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]

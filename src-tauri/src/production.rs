@@ -1841,7 +1841,8 @@ fn validate_plan_is_current(
         )
         .map_err(|error| error.to_string())?
         {
-            let states = crate::planning::route_task_states(connection, project_id, &route)?;
+            let states =
+                crate::planning::route_task_states(connection, project_id, volume_id, &route)?;
             let statuses = states
                 .iter()
                 .filter_map(|state| {
@@ -3551,6 +3552,12 @@ fn run_chapter_production_inner(
             let normalized = crate::chapter_craft::normalize_typography(text.trim());
             signing_repetition(&normalized)
         };
+        // Owner decision 2026-11-25: cutting a draft this long left half of
+        // each conversation, so it is written again once instead.
+        let too_long_to_cut = |text: &str| {
+            gateway.enforces_chapter_length()
+                && length_range.is_too_long_to_cut(character_count(text))
+        };
         // LD-2 (real runs rounds 22 and 26): a chapter barely broken into
         // paragraphs is written again once, told to break it up.
         let render_recovery = if copies_prior_chapter(&body) {
@@ -3562,6 +3569,17 @@ fn run_chapter_production_inner(
                     "rejectedFor":RENDER_SIGNING_REPETITION_ERROR,
                     "repeatedPhrase":phrase,
                     "instruction":"该短语在本章和已提交的开篇中累计出现三次或更多。保留本章章纲和新情节，重写这些句子，只把已发生的结果作为前提。"
+                }),
+            ))
+        } else if too_long_to_cut(&body) {
+            Some((
+                "render-too-long",
+                json!({
+                    "rejectedFor":length_error(&body),
+                    "instruction":format!(
+                        "上一稿有 {} 字，要求 {}–{} 字。重写这一章：只写章纲列出的事件，每件写一次；前几章写过的场面和对话只作前提，不再演一遍；一场对话只留推动结果的几句。",
+                        character_count(&body), length_range.min, length_range.max
+                    )
                 }),
             ))
         } else if gateway.enforces_chapter_length()
@@ -3586,6 +3604,9 @@ fn run_chapter_production_inner(
             let body = rendered_body(&result)?;
             if copies_prior_chapter(&body) {
                 return Err(PRIOR_CHAPTER_COPY_ERROR.into());
+            }
+            if too_long_to_cut(&body) {
+                return Err(length_error(&body));
             }
             // A repeat the second draft kept is left to the rewrite; the check
             // before the audit still refuses one it leaves.
@@ -5110,7 +5131,7 @@ fn run_chapter_production_inner(
     let mut verified_step = None;
     if let Some(stage) = &stage_step {
         let task_id = &stage.task_id;
-        let historical_sources = stage_step_history(connection, &project_id, stage)?;
+        let historical_sources = stage_step_history(connection, &project_id, &volume_id, stage)?;
         let profile = gateway.resolve_step_profile("VERIFY_STAGE_STEP")?;
         let mut input = json!({
             "chapterId":chapter_id,"stageStep":stage.input(),
@@ -5158,6 +5179,8 @@ fn run_chapter_production_inner(
             attempt_no: 1,
             repair_round: 0,
         };
+        // Set when the first citations prove the step but for their wording.
+        let mut second_look = false;
         for (index, spec) in [
             spec.clone(),
             follow_up_spec(&spec, ":evidence-feedback", 1)?,
@@ -5196,13 +5219,13 @@ fn run_chapter_production_inner(
                     let Some(payload) = outcome.parsed.as_ref() else {
                         break;
                     };
-                    let completion = &payload["stageStepCompletion"];
-                    let claims_completion = !completion.is_null();
-                    let selection = if claims_completion {
-                        completion
-                    } else {
-                        &payload["stageStepProgress"]
-                    };
+                    let mut selection = payload["stageStepCompletion"].clone();
+                    if selection.is_null() {
+                        selection = payload["stageStepProgress"].clone();
+                    }
+                    if let Some(number) = chapter_number {
+                        drop_own_source_chapter(&mut selection, number);
+                    }
                     if selection.is_null() {
                         hold_back(
                             &mut audit_payload,
@@ -5213,15 +5236,19 @@ fn run_chapter_production_inner(
                         );
                         break;
                     }
-                    if let Some(result) = evaluate_stage_step(
-                        stage,
-                        &body,
-                        &previous_prose,
-                        &historical_sources,
-                        selection,
-                        &chapter_id,
-                        &run_id,
-                    ) {
+                    let verify = |second_look| {
+                        evaluate_stage_step(
+                            stage,
+                            &body,
+                            &previous_prose,
+                            &historical_sources,
+                            &selection,
+                            &chapter_id,
+                            &run_id,
+                            second_look,
+                        )
+                    };
+                    if let Some(result) = verify(second_look) {
                         if result.status() == "SATISFIED" {
                             let source = result.historical_origin(connection, &project_id)?;
                             let origin =
@@ -5251,9 +5278,15 @@ fn run_chapter_production_inner(
                         verified_step = Some(result);
                         break;
                     }
+                    second_look = !second_look && verify(true).is_some();
+                    let instruction = if second_look {
+                        "引文没有直接写明这一步的结果。再读一遍所引的句子和前后文：这一步要求的动作是不是真的做完了、结论是不是真的得出了？是，就引出写明动作和结论的原文；只是拿到、看见、提起或打算做，只返回 stageStepCompletion 为 null。"
+                    } else {
+                        "核对 condition 编号及引文的来源章节。复核旧成果时须填写 priorStageSources 里的 sourceChapter，动作和结果都引同一章。只证明一部分时用 stageStepProgress。找不到可核实的结果时只返回 stageStepCompletion 为 null。"
+                    };
                     input["evidenceFeedback"] = json!({
-                        "instruction":"核对 condition 编号及引文的来源章节。复核旧成果时须填写 priorStageSources 里的 sourceChapter，动作和结果都引同一章。只证明一部分时用 stageStepProgress。找不到可核实的结果时只返回 stageStepCompletion 为 null。",
-                        "previousCitations":stage_step_citations(selection).iter().map(|part| json!({
+                        "instruction":instruction,
+                        "previousCitations":stage_step_citations(&selection).iter().map(|part| json!({
                             "firstSentence":part["firstSentence"],"outcomeSentence":part["outcomeSentence"],
                             "outcomeQuoteCharacters":part["outcomeQuote"].as_str().map(|text| text.chars().count()),
                         })).collect::<Vec<_>>()
@@ -6853,11 +6886,11 @@ fn select_main_event_evidence(
     }))
 }
 
-fn is_required_stage_step(task_id: &str) -> bool {
+pub(crate) fn is_required_stage_step(task_id: &str) -> bool {
     task_id.starts_with("task:required:goal:") && task_id.contains(":step:")
 }
 
-const STAGE_STEP_RULE_VERSION: &str = "stage-step.r3";
+const STAGE_STEP_RULE_VERSION: &str = "stage-step.r4";
 
 pub(crate) fn stage_step_rules(objective: &str) -> Value {
     let conditions = stage_step_objectives(objective)
@@ -6977,34 +7010,50 @@ struct StageStepHistory {
     body: String,
 }
 
+/// The committed chapters that may already show the step's result: the
+/// opening chapters of its volume (owner decision 2026-11-25) and the
+/// chapters that worked on it.
 fn stage_step_history(
     connection: &libsql_rusqlite::Connection,
     project_id: &str,
+    volume_id: &str,
     stage: &PlannedStageStep,
 ) -> Result<Vec<StageStepHistory>, String> {
+    let load = |chapter_no: i64, chapter_id: String| -> Result<_, String> {
+        let Some(final_ref) =
+            NarrativeRepository::committed_final_chapter_head(connection, project_id, &chapter_id)
+                .map_err(|error| error.to_string())?
+        else {
+            return Ok(None);
+        };
+        let payload = load_artifact_payload(connection, project_id, &final_ref)?;
+        Ok(Some(StageStepHistory {
+            chapter_no,
+            chapter_id,
+            body: require(&payload, "/body")?,
+            final_ref,
+        }))
+    };
     let mut history = Vec::new();
+    for chapter_no in 1..=crate::repositories::project_entry::OPENING_CHAPTER_COUNT {
+        let chapter_id = NarrativeRepository::chapter_id_for_number(
+            connection, project_id, volume_id, chapter_no,
+        )
+        .map_err(|error| error.to_string())?;
+        if let Some(chapter_id) = chapter_id {
+            history.extend(load(chapter_no, chapter_id)?);
+        }
+    }
     for attempt in &stage.recent_unverified_attempts {
-        let chapter_id = require(attempt, "/chapterId")?;
         let chapter_no = attempt["chapterNo"]
             .as_i64()
             .ok_or("B08_STAGE_SOURCE_CHAPTER_REQUIRED")?;
-        let final_ref: ArtifactRef = serde_json::from_value(attempt["finalRef"].clone())
+        let expected: ArtifactRef = serde_json::from_value(attempt["finalRef"].clone())
             .map_err(|error| format!("B08_STAGE_SOURCE_REF_INVALID:{error}"))?;
-        if NarrativeRepository::committed_final_chapter_head(connection, project_id, &chapter_id)
-            .map_err(|error| error.to_string())?
-            .as_ref()
-            != Some(&final_ref)
-        {
-            return Err("PLAN_STALE:STAGE_STEP_SOURCE_CHANGED".into());
-        }
-        let payload = load_artifact_payload(connection, project_id, &final_ref)?;
-        let body = require(&payload, "/body")?;
-        history.push(StageStepHistory {
-            chapter_no,
-            chapter_id,
-            final_ref,
-            body,
-        });
+        let source = load(chapter_no, require(attempt, "/chapterId")?)?
+            .filter(|source| source.final_ref == expected)
+            .ok_or("PLAN_STALE:STAGE_STEP_SOURCE_CHANGED")?;
+        history.push(source);
     }
     Ok(history)
 }
@@ -7302,25 +7351,47 @@ fn stage_step_citations(selection: &Value) -> &[Value] {
         .map_or(std::slice::from_ref(selection), Vec::as_slice)
 }
 
-fn stage_step_outcome_is_supported(
+/// What a citation's wording alone says about a step's result. Words only
+/// point at passages to read (PRODUCTION_RULES §4.2): a citation without the
+/// usual ones is read a second time, not refused.
+enum StageStepWording {
+    Shown,
+    Unclear,
+    Refuted,
+}
+
+fn stage_step_wording(
     goal: &str,
     action: &str,
     outcome: &str,
     passages: [&str; 2],
-) -> bool {
+) -> StageStepWording {
     let contains_any = |text: &str, terms: &[&str]| terms.iter().any(|term| text.contains(term));
-    if contains_any(
+    let refuted = contains_any(
         action,
         &["还没有", "尚未", "没有做", "未能", "打算", "想要"],
     ) || contains_any(
         outcome,
         &["还没有比对", "尚未比对", "尚未证实", "未能取得", "尚未查明"],
-    ) || outcome.trim_end_matches(['”', '’']).ends_with(['？', '?'])
+    ) || outcome.trim_end_matches(['”', '’']).ends_with(['？', '?']);
+    let same_origin = goal.contains("确认")
+        && goal.contains("同源")
+        && !contains_any(goal, &["不同源", "并非同源"]);
+    let batches = goal.contains("不同批次");
+    if refuted
+        || same_origin
+            && contains_any(
+                outcome,
+                &["不同源", "并非同源", "不能证实", "无法确认", "无法证实"],
+            )
+        || batches
+            && outcome.contains("同一批")
+            && !contains_any(outcome, &["不是同一批", "非同一批"])
     {
-        return false;
+        return StageStepWording::Refuted;
     }
-    if goal.contains("比对")
-        && !passages.iter().any(|passage| {
+    let compared = !goal.contains("比对")
+        || passages.iter().any(|passage| {
             contains_any(
                 passage,
                 &[
@@ -7340,14 +7411,9 @@ fn stage_step_outcome_is_supported(
                     "差异",
                 ],
             )
-        })
-    {
-        return false;
-    }
-    if goal.contains("确认")
-        && goal.contains("同源")
-        && !contains_any(goal, &["不同源", "并非同源"])
-        && (!contains_any(
+        });
+    let origin_stated = !same_origin
+        || contains_any(
             outcome,
             &[
                 "同源",
@@ -7357,23 +7423,23 @@ fn stage_step_outcome_is_supported(
                 "同一来源",
                 "一个来处",
             ],
-        ) || contains_any(
-            outcome,
-            &["不同源", "并非同源", "不能证实", "无法确认", "无法证实"],
-        ))
-    {
-        return false;
-    }
-    !goal.contains("不同批次")
+        );
+    let batches_shown = !batches
         || passages
             .iter()
-            .any(|passage| different_batches_shown(passage))
+            .any(|passage| different_batches_shown(passage));
+    if compared && origin_stated && batches_shown {
+        StageStepWording::Shown
+    } else {
+        StageStepWording::Unclear
+    }
 }
 
 fn grounded_stage_step_parts(
     body: &str,
     objective: &str,
     selection: &Value,
+    second_look: bool,
 ) -> Option<Vec<StageStepEvidence>> {
     let locate = crate::chapter_craft::exact_punctuation_matched_quote;
     let selections = stage_step_citations(selection);
@@ -7421,14 +7487,17 @@ fn grounded_stage_step_parts(
             };
             let outcome_end =
                 quote_start(&evidence, &outcome_quote)? + outcome_quote.chars().count();
-            if quote_start(action_span, &action)? >= outcome_end
-                || !stage_step_outcome_is_supported(
-                    objective_quote,
-                    &action,
-                    &outcome_quote,
-                    [&action_span.quote, &evidence.quote],
-                )
-            {
+            let shown = match stage_step_wording(
+                objective_quote,
+                &action,
+                &outcome_quote,
+                [&action_span.quote, &evidence.quote],
+            ) {
+                StageStepWording::Shown => true,
+                StageStepWording::Unclear => second_look,
+                StageStepWording::Refuted => false,
+            };
+            if !shown || quote_start(action_span, &action)? >= outcome_end {
                 return None;
             }
             Some(StageStepEvidence {
@@ -7451,12 +7520,28 @@ fn grounded_stage_step_evidence(
     objective: &str,
     selection: &Value,
 ) -> Option<Vec<StageStepEvidence>> {
-    let proofs = grounded_stage_step_parts(body, objective, selection)?;
+    let proofs = grounded_stage_step_parts(body, objective, selection, false)?;
     stage_step_remaining(objective, &proofs)
         .is_empty()
         .then_some(proofs)
 }
 
+/// A citation may name the chapter it belongs to as its source.
+fn drop_own_source_chapter(selection: &mut Value, chapter_no: u32) {
+    let drop_source = |citation: &mut Value| {
+        if citation["sourceChapter"].is_null() || citation["sourceChapter"] == chapter_no {
+            if let Some(citation) = citation.as_object_mut() {
+                citation.remove("sourceChapter");
+            }
+        }
+    };
+    match selection["evidenceParts"].as_array_mut() {
+        Some(parts) => parts.iter_mut().for_each(drop_source),
+        None => drop_source(selection),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn evaluate_stage_step(
     stage: &PlannedStageStep,
     body: &str,
@@ -7465,6 +7550,7 @@ fn evaluate_stage_step(
     selection: &Value,
     chapter_id: &str,
     model_run_id: &str,
+    second_look: bool,
 ) -> Option<VerifiedStageStep> {
     let citations = stage_step_citations(selection);
     if !(1..=3).contains(&citations.len()) {
@@ -7495,8 +7581,9 @@ fn evaluate_stage_step(
             None
         };
         let prose = historical.map_or(body, |source| source.body.as_str());
-        let Some(mut proof) = grounded_stage_step_parts(prose, &stage.objective, citation)
-            .and_then(|proofs| proofs.into_iter().next())
+        let Some(mut proof) =
+            grounded_stage_step_parts(prose, &stage.objective, citation, second_look)
+                .and_then(|proofs| proofs.into_iter().next())
         else {
             continue;
         };
@@ -9839,19 +9926,11 @@ fn validate_task_completion_claim(
         .map_err(|_| "B08_TASK_COMPLETION_PREDICATE_UNSATISFIED")?
         .into_iter()
         .collect::<Vec<_>>();
-    let dependency_states =
-        crate::repositories::narrative::NarrativeRepository::task_states_by_ids_complete(
-            connection,
-            project_id,
-            &dependencies,
-        )
-        .map_err(|error| error.to_string())?;
+    let states = crate::planning::route_task_states(connection, project_id, &volume_id, &route)?;
     if dependencies.iter().any(|dependency| {
-        dependency_states
-            .iter()
-            .find(|state| state.state_id == *dependency)
-            .and_then(|state| state.value.get("status").and_then(Value::as_str))
-            != Some("SATISFIED")
+        !states.iter().any(|state| {
+            state.state_id == *dependency && crate::planning::dependency_met(&state.value)
+        })
     }) {
         return Err("B08_TASK_COMPLETION_PREDICATE_UNSATISFIED".into());
     }
@@ -10687,6 +10766,73 @@ mod tests {
     }
 
     #[test]
+    fn round75_a_comparison_told_without_the_listed_words_counts_on_a_second_look() {
+        // Real run round 6: "一百三十七", "一百三十二", "差五像素" is a
+        // comparison, and the step stayed open for seven chapters.
+        let stage = PlannedStageStep {
+            task_id: "task:required:goal:vol:1:step:1:1:1".into(),
+            objective: "沈砚比对三片碎纸残渣与内网扫描件，发现圆珠笔压痕无法被矢量重描".into(),
+            progress: None,
+            recent_unverified_attempts: Vec::new(),
+        };
+        let body = "三片碎纸被镊子摆成一线。“一百三十七。”小陈说。“扫描件呢？”“一百三十二。”沈砚把放大镜搁下。“停一下，拖出的墨就多五像素宽。可你给我的图里没有。”";
+        let citation = json!({"stageStepProgress":{"evidenceParts":[{
+            "condition":1,"firstSentence":0,"outcomeSentence":6,
+            "actionQuote":"三片碎纸被镊子摆成一线。",
+            "outcomeQuote":"“停一下，拖出的墨就多五像素宽。可你给我的图里没有。”"
+        }]}});
+        let selection = &citation["stageStepProgress"];
+        let look = |second_look| {
+            evaluate_stage_step(
+                &stage,
+                body,
+                &[],
+                &[],
+                selection,
+                "chapter:four",
+                "run:look",
+                second_look,
+            )
+        };
+        assert!(look(false).is_none());
+        assert_eq!(look(true).unwrap().status(), "SATISFIED");
+    }
+
+    #[test]
+    fn round75_a_second_look_still_refuses_a_refuted_or_unfinished_result() {
+        for (goal, outcome) in [
+            (
+                "陆照比对两枚纽扣的纹路，确认二者同源",
+                "纹路对不上，二者并非同源。",
+            ),
+            (
+                "三张不同批次租约附件全部暴露出朱砂补笔痕迹",
+                "三张同一批次的附件上都有朱砂补笔痕迹。",
+            ),
+            ("陆照比对两枚纽扣的纹路", "他还没有比对那两枚纽扣的纹路。"),
+        ] {
+            let selection = json!({"condition":1,"firstSentence":0,"outcomeSentence":0,
+                "actionQuote":outcome,"outcomeQuote":outcome});
+            assert!(
+                grounded_stage_step_parts(outcome, goal, &selection, true).is_none(),
+                "{goal}"
+            );
+        }
+    }
+
+    #[test]
+    fn round75_a_citation_that_names_its_own_chapter_is_read_from_its_own_text() {
+        let mut selection = json!({"evidenceParts":[
+            {"condition":1,"sourceChapter":8},{"condition":1,"sourceChapter":6}]});
+        drop_own_source_chapter(&mut selection, 8);
+        assert!(selection["evidenceParts"][0].get("sourceChapter").is_none());
+        assert_eq!(selection["evidenceParts"][1]["sourceChapter"], 6);
+        let mut single = json!({"condition":1,"sourceChapter":8});
+        drop_own_source_chapter(&mut single, 8);
+        assert!(single.get("sourceChapter").is_none());
+    }
+
+    #[test]
     fn a_comparison_that_proves_different_origins_cannot_complete_a_common_origin_goal() {
         let objective = "陆照比对松脂纽扣和蚀骨粉的纹路，确认二者同源";
         let body = "陆照比对了纽扣背面的刻痕和蚀骨粉纹路，确认二者并非同源。";
@@ -10745,6 +10891,7 @@ mod tests {
             &candidate,
             "chapter:five",
             "run:recover",
+            false,
         )
         .unwrap();
         assert_eq!(proof.status(), "SATISFIED");
@@ -10764,6 +10911,7 @@ mod tests {
             &candidate,
             "chapter:five",
             "run:wrong-source",
+            false,
         )
         .is_none());
     }
@@ -10787,6 +10935,7 @@ mod tests {
             &selection,
             "chapter:test",
             "run:first",
+            false,
         )
         .unwrap();
         assert_eq!(first.status(), "ACTIVE");
@@ -10798,7 +10947,8 @@ mod tests {
             &[],
             &selection,
             "chapter:test",
-            "run:repeat"
+            "run:repeat",
+            false,
         )
         .is_none());
     }
@@ -10822,7 +10972,8 @@ mod tests {
             &[],
             &proof,
             "chapter:test",
-            "run:repeat"
+            "run:repeat",
+            false,
         )
         .is_none());
     }
@@ -10849,6 +11000,7 @@ mod tests {
             &selection,
             "chapter:test",
             "run:chapter5",
+            false,
         )
         .unwrap();
         assert_eq!(checked.status(), "ACTIVE");

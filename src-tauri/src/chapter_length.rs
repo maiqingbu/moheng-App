@@ -108,6 +108,12 @@ impl ChapterLengthRange {
         self.max + self.max / 10
     }
 
+    /// Whether a draft is past 1.3 times the ceiling, too long for cutting
+    /// sentences to leave a chapter.
+    pub fn is_too_long_to_cut(&self, characters: i64) -> bool {
+        characters * 10 > self.ceiling() * 13
+    }
+
     /// The length a chapter aims for: the middle of the range.
     pub fn target(&self) -> i64 {
         (self.min + self.max) / 2

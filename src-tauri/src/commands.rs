@@ -3233,7 +3233,7 @@ pub(crate) fn context_input_from_authority(
             goal_contract_refs.push(gate_policy_ref);
         }
     }
-    let (route_task_refs, route_task_contracts) = if let Some(volume_id) =
+    let (route_task_refs, route_task_contracts, route_payload) = if let Some(volume_id) =
         volume_id.filter(|_| !opening_bootstrap)
     {
         let route = map_context_query(
@@ -3276,9 +3276,9 @@ pub(crate) fn context_input_from_authority(
                     .map(|task_id| (task_id.to_owned(), item.clone()))
             })
             .collect::<BTreeMap<_, _>>();
-        (references, contracts)
+        (references, contracts, payload)
     } else {
-        (Vec::new(), BTreeMap::new())
+        (Vec::new(), BTreeMap::new(), Value::Null)
     };
     let explicit_task_scope = scope_selection
         .as_ref()
@@ -3303,24 +3303,24 @@ pub(crate) fn context_input_from_authority(
                 .take(100)
                 .map(String::as_str)
                 .collect::<Vec<_>>();
-            let satisfied = map_context_query(
-                crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
+            let passed = map_context_query(
+                crate::planning::route_task_states(
                     connection,
                     project_id,
-                    &route_refs,
-                    100,
+                    volume_id.unwrap_or_default(),
+                    &route_payload,
                 ),
                 ContextHardSource::Task,
                 &scope,
             )?
             .into_iter()
-            .filter(|task| task.value.get("status").and_then(Value::as_str) == Some("SATISFIED"))
+            .filter(|task| crate::planning::dependency_met(&task.value))
             .map(|task| task.state_id)
             .collect::<BTreeSet<_>>();
             let mut required_ahead = 0;
             route_refs
                 .into_iter()
-                .filter(|task_ref| !satisfied.contains(*task_ref))
+                .filter(|task_ref| !passed.contains(*task_ref))
                 .filter(|task_ref| {
                     let required = route_task_contracts
                         .get(*task_ref)
@@ -3334,7 +3334,7 @@ pub(crate) fn context_input_from_authority(
                         .into_iter()
                         .flatten()
                         .filter_map(Value::as_str)
-                        .all(|dependency| satisfied.contains(dependency));
+                        .all(|dependency| passed.contains(dependency));
                     if required {
                         required_ahead <= CONTEXT_REQUIRED_TASKS_AHEAD
                     } else {
@@ -7418,7 +7418,8 @@ fn compile_current_chapter_plan(
         .is_some_and(|value| !value.is_null());
     // Check the full dependency chain locally. The model still sees the
     // selected context window, including its immediate dependencies.
-    let route_states = crate::planning::route_task_states(&handle, project_id, &route_payload)?;
+    let route_states =
+        crate::planning::route_task_states(&handle, project_id, &volume_id, &route_payload)?;
     let task_states = route_states
         .iter()
         .map(|state| {
@@ -8313,16 +8314,8 @@ fn execute_planning_command_with_observer(
             .filter(|thread| matches!(thread.authority_level.as_str(), "A" | "B"))
             .map(|thread| thread.thread_id.clone())
             .collect::<Vec<_>>();
-        let route_states = crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
-            &handle,
-            project_id,
-            &route_task_ids
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            100,
-        )
-        .map_err(|e| e.to_string())?;
+        let route_states =
+            crate::planning::route_task_states(&handle, project_id, &volume_id, &route)?;
         let task_states = route_states
             .iter()
             .map(|state| {

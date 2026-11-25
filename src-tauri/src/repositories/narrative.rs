@@ -340,6 +340,9 @@ pub struct CanonEventRecord {
     pub event_ordinal: i64,
 }
 
+/// (count, last chapter number) by (task id, objective).
+pub(crate) type UnprovedStageAttempts = BTreeMap<(String, String), (i64, i64)>;
+
 pub struct NarrativeRepository;
 
 impl NarrativeRepository {
@@ -2084,6 +2087,35 @@ impl NarrativeRepository {
         ).optional()?.flatten();
         raw.map(|value| serde_json::from_str(&value).map_err(Into::into))
             .transpose()
+    }
+
+    /// For each step and its objective, how many of the volume's committed
+    /// chapters before `before_chapter_no` worked on it without proving it,
+    /// and the last of them.
+    pub(crate) fn unproved_stage_attempts(
+        connection: &Connection,
+        project_id: &str,
+        volume_id: &str,
+        before_chapter_no: i64,
+    ) -> Result<UnprovedStageAttempts, NarrativeRepositoryError> {
+        let mut statement = connection.prepare(
+            "WITH reviews AS (
+             SELECT c.chapter_no,json_extract(ap.payload_json,'$.audit.normalization.stageStepVerification') AS review
+             FROM chapters c JOIN canonical_heads r
+               ON r.project_id=c.project_id AND r.artifact_type='ProductionReceipt' AND r.scope_level='CHAPTER'
+               AND r.scope_key=json_object('chapterId',c.chapter_id,'level','CHAPTER')
+             JOIN artifact_payloads p ON p.artifact_id=r.artifact_id AND p.version=r.version
+             JOIN artifact_payloads ap ON ap.artifact_id=json_extract(p.payload_json,'$.auditRef.artifactId')
+               AND ap.version=json_extract(p.payload_json,'$.auditRef.version')
+             WHERE c.project_id=?1 AND c.volume_id=?2 AND c.status='COMMITTED' AND c.chapter_no<?3)
+             SELECT json_extract(review,'$.taskId'),json_extract(review,'$.objective'),COUNT(*),MAX(chapter_no) FROM reviews
+             WHERE json_extract(review,'$.status') IN ('ACTIVE','UNVERIFIED') GROUP BY 1,2",
+        )?;
+        let rows = statement.query_map(
+            libsql_rusqlite::params![project_id, volume_id, before_chapter_no],
+            |row| Ok(((row.get(0)?, row.get(1)?), (row.get(2)?, row.get(3)?))),
+        )?;
+        rows.collect::<Result<_, _>>().map_err(Into::into)
     }
 
     pub(crate) fn recent_unverified_stage_attempts(

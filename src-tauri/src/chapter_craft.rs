@@ -1010,8 +1010,18 @@ fn unique_quote_ending_at<'a>(
     spans: &[(usize, usize)],
     index: usize,
 ) -> Option<&'a str> {
-    let end = spans[index].1;
-    (0..=index)
+    unique_quote(body, spans, (index, index))
+}
+
+/// The sentences numbered `first` to `last`, with as many before them as it
+/// takes to occur once in `body`.
+fn unique_quote<'a>(
+    body: &'a str,
+    spans: &[(usize, usize)],
+    (first, last): (usize, usize),
+) -> Option<&'a str> {
+    let end = spans[last].1;
+    (0..=first)
         .rev()
         .map(|from| &body[spans[from].0..end])
         .find(|quote| body.matches(quote).nth(1).is_none())
@@ -2723,6 +2733,34 @@ pub(crate) fn confirms_same_continuity_pair(candidate: &Value, reported: &Value)
         && continuity_prior_passage_matches(expected, number, prior_quote)
 }
 
+/// The most consecutive sentences a reviewer may quote as one passage.
+const QUOTED_SENTENCES: usize = 3;
+
+/// `quote` as it stands in the sentence numbered `index`, or in up to
+/// `QUOTED_SENTENCES` consecutive sentences that include it, with the numbers
+/// of the first and the last of them (real run 2026-11-25, round 6: passages
+/// quoted in full were refused and a replayed scene went through).
+fn quote_around<'a>(
+    sentence: impl Fn(usize) -> Option<&'a str>,
+    index: usize,
+    quote: &str,
+) -> Option<((usize, usize), String)> {
+    (0..QUOTED_SENTENCES).find_map(|more| {
+        (index.saturating_sub(more)..=index).find_map(|first| {
+            let last = first + more;
+            let located = |numbers: std::ops::Range<usize>| {
+                let passage = numbers.map(&sentence).collect::<Option<String>>()?;
+                exact_punctuation_matched_quote(&passage, quote).map(ToOwned::to_owned)
+            };
+            let found = located(first..last + 1)?;
+            // A quote that stands without the first or the last of them is
+            // not a quote of these sentences.
+            (located(first + 1..last + 1).is_none() && located(first..last).is_none())
+                .then_some(((first, last), found))
+        })
+    })
+}
+
 /// Require an exact passage from a supplied final chapter or an earlier
 /// passage of this chapter before admitting a narrative finding.
 pub fn narrative_continuity_findings(
@@ -2736,8 +2774,6 @@ pub fn narrative_continuity_findings(
         .iter()
         .filter_map(|item| {
             let index = usize::try_from(item["sentence"].as_u64()?).ok()?;
-            let &(start, end) = spans.get(index)?;
-            let current = unique_quote_ending_at(body, &spans, index)?;
             let reason = item["reason"].as_str()?;
             let prior_index = usize::try_from(item["priorSentence"].as_u64()?).ok()?;
             let current_quote = item["currentQuote"].as_str()?;
@@ -2750,20 +2786,25 @@ pub fn narrative_continuity_findings(
             {
                 return None;
             }
-            let current_evidence = exact_punctuation_matched_quote(&body[start..end], current_quote)?;
-            let (sentence, location, source) = if item.get("chapter")?.is_null() {
-                if prior_index >= index {
+            let in_body = |number: usize| spans.get(number).map(|&(from, to)| &body[from..to]);
+            let (sentences, current_evidence) = quote_around(in_body, index, current_quote)?;
+            let current = unique_quote(body, &spans, sentences)?;
+            let (quote, location, source) = if item.get("chapter")?.is_null() {
+                let ((_, last), quote) = quote_around(in_body, prior_index, prior_quote)?;
+                if last >= sentences.0 {
                     return None;
                 }
-                let &(from, to) = spans.get(prior_index)?;
-                (&body[from..to], "本章前文".to_string(), None)
+                (quote, "本章前文".to_string(), None)
             } else {
                 let chapter = item["chapter"].as_i64()?;
                 let entry = prior.iter().find(|entry| entry["chapterNo"] == chapter)?;
-                let sentence = numbered_prior_sentence(entry, prior_index)?;
-                (sentence, format!("第 {chapter} 章原文"), entry.get("source"))
+                let (_, quote) = quote_around(
+                    |number| numbered_prior_sentence(entry, number),
+                    prior_index,
+                    prior_quote,
+                )?;
+                (quote, format!("第 {chapter} 章原文"), entry.get("source"))
             };
-            let quote = exact_punctuation_matched_quote(sentence, prior_quote)?;
             let (code, fix) = match item["kind"].as_str()? {
                 "REPEATED_EVENT" => ("repeated_event", "承接事件已经发生的结果，写出本章真正新增的行动或后果。若是再次尝试或回忆，明确写出区别。"),
                 "STATE_CONFLICT" => ("cross_chapter_state_conflict", "承接前文已经确立的状态。若本章确实有状态变化，用现有情节交代变化的过程。"),
@@ -3359,6 +3400,47 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn round75_a_replay_quoted_over_two_sentences_still_holds() {
+        // Chapter 7 told chapter 6's finding again; the reviewer quoted both
+        // passages in full and numbered one of their sentences.
+        let prior_body = "他抬头。“差五像素。”沈砚把镊子搁下，“圆珠笔的滚珠在转折处停了一下，墨就多拖五像素宽。可你给我的图里，一点拖尾都没有。”小陈没答。";
+        let body = "小陈数完了。\n\n沈砚把镊子搁下，“滚珠在转折处停了一下，墨就多拖五像素。你给我的图里，一点拖尾都没有。”\n\n他站起来。";
+        let prior = [json!({"chapterNo":6,"sentences":numbered_body_sentences(prior_body)})];
+        let prior_quote = "“差五像素。”沈砚把镊子搁下，“圆珠笔的滚珠在转折处停了一下，墨就多拖五像素宽。可你给我的图里，一点拖尾都没有。”";
+        let quote = "沈砚把镊子搁下，“滚珠在转折处停了一下，墨就多拖五像素。你给我的图里，一点拖尾都没有。”";
+        let candidates = [json!({
+            "candidateNumber":0,"currentPassage":quote,
+            "currentSentenceRange":{"firstSentence":1,"lastSentence":2},
+            "earlierEvidence":{"chapter":6,"firstSentence":1,"lastSentence":3,"quote":prior_quote},
+        })];
+        let mut issue = json!({
+            "chapter":6,"sentence":1,"priorSentence":2,"kind":"REPEATED_EVENT",
+            "currentQuote":quote,"priorQuote":prior_quote,"reason":"同一结论被完整复述",
+            "hardEvidence":{"relation":"COMPLETED_OUTCOME_REPLAYED","replays":"DISCLOSURE",
+                "currentOutcome":"滚珠在转折处停了一下，墨就多拖五像素。",
+                "priorOutcome":"圆珠笔的滚珠在转折处停了一下，墨就多拖五像素宽。"},
+        });
+        let blockers = |issue: &Value| {
+            ground_continuity_confirmation(
+                &json!({"narrativeIssues":[issue]}),
+                &candidates,
+                &prior,
+                body,
+                Some(7),
+            )
+            .blockers
+        };
+        let held = blockers(&issue);
+        assert_eq!(held.len(), 1);
+        assert!(body.contains(held[0]["quote"].as_str().unwrap()));
+        assert!(held[0]["quote"].as_str().unwrap().contains(quote));
+        // Words that are not on the page still prove nothing.
+        issue["currentQuote"] =
+            json!("沈砚把镊子搁下，“滚珠停了两下。你给我的图里，一点拖尾都没有。”");
+        assert!(blockers(&issue).is_empty());
+    }
 
     #[test]
     fn a_state_described_again_never_holds_the_chapter() {

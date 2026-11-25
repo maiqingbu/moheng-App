@@ -748,6 +748,18 @@ fn ground_opening_replays(
     Ok(result)
 }
 
+/// Whether `quote` is part of the planned outcome or, quoting the whole step,
+/// the opening passage speaks of that outcome and not of its premise alone.
+fn quotes_planned_outcome(pair: &Value, quote: &str, opening: &str) -> bool {
+    let locate = crate::chapter_craft::exact_punctuation_matched_quote;
+    let pairs = crate::chapter_craft::telling_pairs;
+    let outcome = text(&pair["plannedOutcome"]);
+    locate(outcome, quote).is_some()
+        || (locate(text(&pair["plannedText"]), quote).is_some()
+            && locate(quote, outcome).is_some()
+            && pairs(outcome).intersection(&pairs(opening)).count() >= 2)
+}
+
 fn confirmed_opening_replay_problems(
     verdict: &Value,
     candidates: &[(Value, String)],
@@ -768,7 +780,7 @@ fn confirmed_opening_replay_problems(
         let planned_outcome = text(&claim["plannedOutcomeQuote"]);
         if opening_outcome.chars().count() >= 4
             && planned_outcome.chars().count() >= 4
-            && locate(text(&pair["plannedOutcome"]), planned_outcome).is_some()
+            && quotes_planned_outcome(pair, planned_outcome, opening_outcome)
             && locate(text(&pair["openingQuote"]), opening_outcome).is_some()
         {
             indices.insert(index);
@@ -1324,6 +1336,9 @@ pub fn chapter_direction(
             .collect::<Option<Vec<_>>>()?
             .into_iter()
             .max()
+            // A step the opening already showed is dated there; the stage
+            // itself never ends before the stages begin.
+            .map(|chapter| chapter.max(before_stages))
     };
     let current = (0..stages.len())
         .position(|index| ended(index).is_none())
@@ -1424,9 +1439,17 @@ pub fn for_chapter(
     let (Some(book_plan), Some(route)) = (book_plan, route) else {
         return Ok(None);
     };
-    let completed =
+    let mut passed =
         NarrativeRepository::satisfied_task_chapters(connection, project_id, chapter_no)
             .map_err(|error| error.to_string())?;
+    let waiting = crate::planning::steps_awaiting_evidence(
+        connection,
+        (project_id, &volume_id),
+        &route,
+        &passed.keys().map(String::as_str).collect(),
+        chapter_no,
+    )?;
+    passed.extend(waiting);
     // The first volume's stages begin after the opening chapters.
     let before_stages = match volume.volume_no {
         1 => crate::repositories::project_entry::OPENING_CHAPTER_COUNT,
@@ -1437,7 +1460,7 @@ pub fn for_chapter(
         &route,
         (&volume_id, volume.volume_no),
         before_stages,
-        &completed,
+        &passed,
         chapter_no,
     );
     if let Some(stage) = direction
@@ -1624,7 +1647,7 @@ mod tests {
         let target = "他用冷炊饼引开扫地犬，潜入西厢最东头库房，见柳青梧正伏案补描第七条修订稿缺角处松脂弯痕";
         let old = "西厢最东头库房的门半开着。";
         let candidate = (
-            json!({"plannedOutcome":planned_outcome(target),"openingQuote":old}),
+            json!({"plannedText":target,"plannedOutcome":planned_outcome(target),"openingQuote":old}),
             "重排开篇".into(),
         );
         let verdict = json!({"confirmedCandidates":[{
@@ -1677,6 +1700,30 @@ mod tests {
             "第七日峰值。分毫不差。"
         );
         assert_eq!(review_result.unbound, [review["issues"][0].clone()]);
+    }
+
+    #[test]
+    fn round75_a_replay_confirmed_with_the_whole_step_is_sent_back() {
+        // Real run round 6: four replayed steps were confirmed, each quoting
+        // its whole step instead of the clause asked for, and all four stayed
+        // in the route.
+        let step = "沈砚比对三片碎纸残渣与内网扫描件，发现圆珠笔压痕无法被矢量重描";
+        let opening = "末笔右下点有个明显的压痕——圆珠笔滚珠在纸面停了一瞬才提起。";
+        let pair = json!({"plannedText":step,"plannedOutcome":planned_outcome(step),"openingQuote":opening});
+        let candidates = [(pair, "阶段 1 的第 1 步重排了开篇".to_owned())];
+        let problems = |planned: &str, shown: &str| {
+            confirmed_opening_replay_problems(
+                &json!({"confirmedCandidates":[
+                    {"number":0,"openingOutcomeQuote":shown,"plannedOutcomeQuote":planned}]}),
+                &candidates,
+            )
+            .unwrap()
+        };
+        assert_eq!(problems(step, opening).len(), 1);
+        assert_eq!(problems("圆珠笔压痕无法被矢量重描", opening).len(), 1);
+        // The premise alone is not the step's result.
+        assert!(problems("沈砚比对三片碎纸残渣与内网扫描件", opening).is_empty());
+        assert!(problems(step, "压痕已经被系统抹平了。").is_empty());
     }
 
     #[test]
@@ -2090,6 +2137,18 @@ mod tests {
             direction["currentStage"]["goal"],
             route["tasks"][0]["objective"]
         );
+    }
+
+    #[test]
+    fn a_stage_the_opening_already_showed_ends_where_the_stages_begin() {
+        let (plan, _) = plan_and_route();
+        let completed = (1..=3)
+            .map(|n| (format!("task:required:goal:vol:1:step:1:1:{n}"), n))
+            .collect();
+        let direction =
+            chapter_direction(&plan, &stepped_route(), ("vol:1", 1), 3, &completed, 4).unwrap();
+        assert_eq!(direction["currentStage"]["chaptersSoFar"], 0);
+        assert_eq!(direction["previousStage"]["chaptersTaken"], 0);
     }
 
     #[test]

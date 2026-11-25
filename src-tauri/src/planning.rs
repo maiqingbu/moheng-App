@@ -1902,7 +1902,7 @@ fn validate_chapter_plan_change_semantics(
         &triggered_threads,
         horizon_capacity_after_chapter(connection, project_id, chapter_id)?,
     )?;
-    let states = route_task_states(connection, project_id, &route)?;
+    let states = route_task_states(connection, project_id, &volume_id, &route)?;
     let states = states
         .iter()
         .map(|state| {
@@ -2129,7 +2129,11 @@ pub fn task_ready(
         _ => {}
     }
     for dependency in task_prerequisite_ids(task_ref, route_plan)? {
-        if states.get(dependency).copied() != Some("SATISFIED") {
+        if !states
+            .get(dependency)
+            .copied()
+            .is_some_and(lets_the_next_go_on)
+        {
             return Err("TASK_DEPENDENCY_UNMET".into());
         }
     }
@@ -2169,9 +2173,111 @@ pub(crate) fn task_prerequisite_ids<'a>(
     Ok(visited)
 }
 
+fn lets_the_next_go_on(status: &str) -> bool {
+    matches!(status, "SATISFIED" | AWAITING_EVIDENCE)
+}
+
+/// Whether a task whose `route_task_states` value this is no longer holds the
+/// tasks that depend on it.
+pub(crate) fn dependency_met(state: &Value) -> bool {
+    state["status"].as_str().is_some_and(lets_the_next_go_on)
+}
+
+/// How a step in `steps_awaiting_evidence` reads among the states a chapter's
+/// tasks are checked against. Never stored: the step itself stays open.
+const AWAITING_EVIDENCE: &str = "AWAITING_EVIDENCE";
+
+/// Owner decision 2026-11-25: a step its estimated chapters worked on without
+/// proving it waits for its proof while the next one goes on; mapped to the
+/// last chapter that worked on it. It is not done, and once every other step
+/// is passed the volume comes back to it. `closed` steps wait for nothing.
+pub(crate) fn steps_awaiting_evidence(
+    connection: &libsql_rusqlite::Connection,
+    (project_id, volume_id): (&str, &str),
+    route: &Value,
+    closed: &BTreeSet<&str>,
+    before_chapter_no: i64,
+) -> Result<BTreeMap<String, i64>, String> {
+    let open = route["tasks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|task| {
+            task["taskId"].as_str().is_some_and(|id| {
+                crate::production::is_required_stage_step(id) && !closed.contains(id)
+            })
+        })
+        .collect::<Vec<_>>();
+    if open.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let attempts = crate::repositories::narrative::NarrativeRepository::unproved_stage_attempts(
+        connection,
+        project_id,
+        volume_id,
+        before_chapter_no,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(steps_left_waiting(&open, &attempts))
+}
+
+/// `steps_awaiting_evidence` from the `open` steps and, for each step and
+/// objective, how many chapters worked on it without proving it and the last
+/// of them.
+fn steps_left_waiting(
+    open: &[&Value],
+    attempts: &crate::repositories::narrative::UnprovedStageAttempts,
+) -> BTreeMap<String, i64> {
+    let waiting = open
+        .iter()
+        .filter_map(|task| {
+            let id = task["taskId"].as_str()?.to_owned();
+            let objective = task["objective"].as_str()?.to_owned();
+            let &(count, last) = attempts.get(&(id.clone(), objective))?;
+            let estimate = task
+                .pointer("/estimatedChapterCost/preferred")
+                .and_then(Value::as_i64)
+                .unwrap_or(1);
+            (count >= estimate).then_some((id, last))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if waiting.len() == open.len() {
+        BTreeMap::new()
+    } else {
+        waiting
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn a_step_waits_for_its_evidence_until_every_other_step_is_passed() {
+    let step = |n: i64, objective: &str| {
+        json!({"taskId":format!("step:{n}"),"objective":objective,
+            "estimatedChapterCost":{"preferred":2}})
+    };
+    let (first, second) = (step(1, "比对碎纸"), step(2, "取回年鉴"));
+    let attempts = |count| {
+        [(("step:1".to_owned(), "比对碎纸".to_owned()), (count, 5))]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>()
+    };
+    assert!(steps_left_waiting(&[&first, &second], &attempts(1)).is_empty());
+    assert_eq!(
+        steps_left_waiting(&[&first, &second], &attempts(2)),
+        [("step:1".to_owned(), 5)].into_iter().collect()
+    );
+    // Reworded, it is another step.
+    let reworded = step(1, "比对年鉴");
+    assert!(steps_left_waiting(&[&reworded, &second], &attempts(2)).is_empty());
+    // Step 2 is passed: the volume comes back to step 1.
+    assert!(steps_left_waiting(&[&first], &attempts(2)).is_empty());
+}
+
+/// The states of the route's tasks, for checking which a chapter may work on.
 pub(crate) fn route_task_states(
     connection: &libsql_rusqlite::Connection,
     project_id: &str,
+    volume_id: &str,
     route: &Value,
 ) -> Result<Vec<crate::repositories::narrative::TaskStateRecord>, String> {
     let ids = route["tasks"]
@@ -2180,10 +2286,41 @@ pub(crate) fn route_task_states(
         .flatten()
         .filter_map(|task| task["taskId"].as_str())
         .collect::<Vec<_>>();
-    crate::repositories::narrative::NarrativeRepository::task_states_by_ids_complete(
-        connection, project_id, &ids,
-    )
-    .map_err(|error| error.to_string())
+    let mut states =
+        crate::repositories::narrative::NarrativeRepository::task_states_by_ids_complete(
+            connection, project_id, &ids,
+        )
+        .map_err(|error| error.to_string())?;
+    let closed = states
+        .iter()
+        .filter(|state| {
+            matches!(
+                state.value["status"].as_str(),
+                Some("SATISFIED" | "INVALIDATED" | "BLOCKED")
+            )
+        })
+        .map(|state| state.state_id.as_str())
+        .collect();
+    let mut waiting = steps_awaiting_evidence(
+        connection,
+        (project_id, volume_id),
+        route,
+        &closed,
+        i64::MAX,
+    )?;
+    for state in &mut states {
+        if waiting.remove(&state.state_id).is_some() {
+            state.value["status"] = json!(AWAITING_EVIDENCE);
+        }
+    }
+    states.extend(waiting.into_keys().map(|state_id| {
+        crate::repositories::narrative::TaskStateRecord {
+            state_id,
+            value: json!({"status":AWAITING_EVIDENCE}),
+            chapter_id: None,
+        }
+    }));
+    Ok(states)
 }
 
 #[cfg(test)]
@@ -3243,7 +3380,7 @@ pub fn recompile_chapter_plan_owner_with_decisions(
         horizon_capacity_after_chapter(connection, project_id, chapter_id)?,
     )?;
     if let Some(route) = route_payload.as_ref() {
-        let states = route_task_states(connection, project_id, route)?;
+        let states = route_task_states(connection, project_id, &volume_id, route)?;
         let states = states
             .iter()
             .map(|state| {
