@@ -68,6 +68,7 @@ fn apply_canon(
     connection: &Connection,
     delta: &CanonDelta,
     now: &str,
+    preserve_entity_definition: bool,
 ) -> Result<i64, super::CommitError> {
     let project_id = delta_project(connection)?;
     let mut inserted = 0;
@@ -83,7 +84,14 @@ fn apply_canon(
             .map(|x| x as &BTreeMap<String, Value>);
         let name = payload_string(payload, "canonicalName").unwrap_or_else(|| entity_id.clone());
         let entity_type = payload_string(payload, "entityType").unwrap_or_else(|| "UNKNOWN".into());
-        connection.execute("INSERT INTO canon_entities(entity_id, project_id, canonical_name, entity_type, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5) ON CONFLICT(entity_id) DO UPDATE SET canonical_name=excluded.canonical_name, entity_type=excluded.entity_type, updated_at=excluded.updated_at", libsql_rusqlite::params![entity_id, project_id, name, entity_type, now])?;
+        // Chapter extraction can mention a character under a different title.
+        // Recording that chapter's fact does not redefine the registered identity.
+        connection.execute(
+            "INSERT INTO canon_entities(entity_id, project_id, canonical_name, entity_type, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5) \
+             ON CONFLICT(entity_id) DO UPDATE SET canonical_name=CASE WHEN ?6 THEN canon_entities.canonical_name ELSE excluded.canonical_name END, \
+             entity_type=CASE WHEN ?6 THEN canon_entities.entity_type ELSE excluded.entity_type END, updated_at=excluded.updated_at",
+            libsql_rusqlite::params![entity_id, project_id, name, entity_type, now, preserve_entity_definition],
+        )?;
         inserted += i64::from(!existed);
     }
     let subject_id = delta
@@ -147,6 +155,15 @@ fn apply_canon(
                     .map(ToOwned::to_owned)
             })
             .ok_or_else(|| invalid("relation canon delta requires payloadJson.objectId"))?;
+        if crate::repositories::narrative::NarrativeRepository::relation_identity_conflicts(
+            connection,
+            &project_id,
+            relation_id,
+            &subject_id,
+            &object_id,
+        )? {
+            return Err(invalid("RELATION_IDENTITY_CONFLICT"));
+        }
         let relation_existed = row_exists(
             connection,
             "SELECT EXISTS(SELECT 1 FROM canon_relations WHERE project_id = ?1 AND relation_id = ?2)",
@@ -266,6 +283,67 @@ fn apply_knowledge(
     )?;
     connection.execute("INSERT INTO canon_knowledge(knowledge_id, project_id, knower_id, fact_id, epistemic_state, visibility_scope, from_chapter_id, until_chapter_id, source_artifact_id, source_version, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11) ON CONFLICT(knowledge_id) DO UPDATE SET knower_id=excluded.knower_id, fact_id=excluded.fact_id, epistemic_state=excluded.epistemic_state, visibility_scope=excluded.visibility_scope, from_chapter_id=excluded.from_chapter_id, until_chapter_id=excluded.until_chapter_id, source_artifact_id=excluded.source_artifact_id, source_version=excluded.source_version, updated_at=excluded.updated_at", libsql_rusqlite::params![delta.knowledge_id, project_id, delta.knower_id, delta.fact_id, delta.epistemic_state, delta.visibility_scope, delta.from_chapter_id, delta.until_chapter_id, source_artifact_id, source_version, now])?;
     Ok(i64::from(!existed))
+}
+
+pub(super) fn reopen_stage_steps_with_replaced_proof(
+    connection: &Connection,
+    project_id: &str,
+    replaced: &[(String, i64)],
+    now: &str,
+) -> Result<(i64, std::collections::BTreeSet<String>), super::CommitError> {
+    if replaced.is_empty() {
+        return Ok((0, Default::default()));
+    }
+    let keys = serde_json::to_string(replaced)?;
+    let mut statement = connection.prepare(
+        "SELECT d.state_id,d.value_json,d.payload_json,c.volume_id
+         FROM state_deltas d LEFT JOIN chapters c ON c.project_id=d.project_id AND c.chapter_id=d.chapter_id
+         WHERE d.project_id=?1 AND d.state_type='volume.task.progress'
+         AND json_extract(d.value_json,'$.status') IN ('ACTIVE','SATISFIED')
+         AND EXISTS (SELECT 1 FROM json_each(d.payload_json,'$.stageStepProgress.evidenceParts') part
+                     JOIN json_each(?2) old
+                       ON json_extract(part.value,'$.source.finalRef.artifactId')=json_extract(old.value,'$[0]')
+                      AND json_extract(part.value,'$.source.finalRef.version')=json_extract(old.value,'$[1]'))",
+    )?;
+    let rows = statement
+        .query_map(libsql_rusqlite::params![project_id, keys], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut volumes = std::collections::BTreeSet::new();
+    let mut count = 0;
+    for (task_id, state, payload, volume_id) in rows {
+        let mut state: Value = serde_json::from_str(&state)?;
+        let mut payload: Value = serde_json::from_str(&payload)?;
+        if let Some(progress) = crate::production::refresh_replaced_stage_progress(
+            connection,
+            project_id,
+            payload["stageStepProgress"].clone(),
+            &mut state,
+        )
+        .map_err(invalid)?
+        {
+            payload["stageStepProgress"] = progress;
+            count += connection.execute(
+                "UPDATE state_deltas SET value_json=?1,payload_json=?2,updated_at=?3
+                 WHERE project_id=?4 AND state_id=?5",
+                libsql_rusqlite::params![
+                    state.to_string(),
+                    payload.to_string(),
+                    now,
+                    project_id,
+                    task_id
+                ],
+            )? as i64;
+            volumes.extend(volume_id);
+        }
+    }
+    Ok((count, volumes))
 }
 
 fn apply_state(
@@ -405,12 +483,13 @@ pub(crate) fn apply_all(
     reader_desires: Option<&Vec<ReaderDesireDelta>>,
     now: &str,
     fallback_artifact: Option<(&str, i64)>,
+    preserve_entity_definition: bool,
 ) -> Result<BTreeMap<String, i64>, super::CommitError> {
     let mut counts = BTreeMap::new();
     let mut canon_count = 0;
     if let Some(items) = canon {
         for item in items {
-            canon_count += apply_canon(connection, item, now)
+            canon_count += apply_canon(connection, item, now, preserve_entity_definition)
                 .map_err(|error| in_delta(error, || format!("canon {}", item.fact_id)))?;
         }
     }
@@ -504,4 +583,79 @@ pub(crate) fn certificate_source_digest(
         "subjectRef": certificate.subject_ref,
         "evidenceRefs": certificate.evidence_refs
     }))?)
+}
+
+#[cfg(test)]
+mod relation_identity_tests {
+    use super::*;
+
+    fn database() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE project_meta(project_id TEXT); INSERT INTO project_meta VALUES ('p');
+            CREATE TABLE canon_facts(fact_id TEXT PRIMARY KEY, project_id TEXT, subject_id TEXT, predicate TEXT, object_json TEXT, valid_from_chapter_id TEXT, valid_to_chapter_id TEXT, story_time_from TEXT, story_time_to TEXT, source_artifact_id TEXT, source_version INTEGER, source_chapter_id TEXT, evidence_range_json TEXT, authority_level TEXT, created_at TEXT, updated_at TEXT, superseded_by TEXT);
+            CREATE TABLE canon_relations(relation_id TEXT PRIMARY KEY, project_id TEXT, subject_id TEXT, predicate TEXT, object_id TEXT, valid_from_chapter_id TEXT, valid_to_chapter_id TEXT, authority_level TEXT, created_at TEXT, updated_at TEXT);
+            INSERT INTO canon_relations VALUES ('relation:one','p','陆照','relationship','柳明漪','chapter:3',NULL,'C','now','now');").unwrap();
+        conn
+    }
+
+    fn delta(subject: &str, object: &str) -> CanonDelta {
+        serde_json::from_value(json!({"factId":"fact:new","subjectId":subject,"predicate":"relationship",
+            "objectJson":{"objectId":object},"relationId":"relation:one","validFromChapterId":"chapter:5","authorityLevel":"C"})).unwrap()
+    }
+
+    #[test]
+    fn an_existing_relation_id_cannot_be_reused_for_the_reverse_direction() {
+        let conn = database();
+        let error = apply_canon(&conn, &delta("柳明漪", "陆照"), "now", true).unwrap_err();
+        assert!(error.to_string().contains("RELATION_IDENTITY_CONFLICT"));
+    }
+
+    #[test]
+    fn an_existing_relation_id_can_update_the_same_directed_pair() {
+        let conn = database();
+        assert!(apply_canon(&conn, &delta("陆照", "柳明漪"), "now", true).is_ok());
+    }
+
+    #[test]
+    fn a_chapter_fact_does_not_replace_an_existing_entitys_name_or_type() {
+        let conn = database();
+        conn.execute_batch("CREATE TABLE canon_entities(entity_id TEXT PRIMARY KEY,project_id TEXT,canonical_name TEXT,entity_type TEXT,created_at TEXT,updated_at TEXT);")
+            .unwrap();
+        let entity_fact = |id, name, kind| -> CanonDelta {
+            serde_json::from_value(json!({"factId":id,"subjectId":"陈伯","entityId":"陈伯",
+                "predicate":"alive","objectJson":{"value":true},"validFromChapterId":"chapter:7",
+                "payloadJson":{"canonicalName":name,"entityType":kind}}))
+            .unwrap()
+        };
+        apply_canon(
+            &conn,
+            &entity_fact("fact:first", "陈伯", "PERSON"),
+            "now",
+            true,
+        )
+        .unwrap();
+        apply_canon(
+            &conn,
+            &entity_fact("fact:later", "瘸腿老药童陈伯", "UNKNOWN"),
+            "later",
+            true,
+        )
+        .unwrap();
+        let (name, kind): (String, String) = conn
+            .query_row(
+                "SELECT canonical_name,entity_type FROM canon_entities WHERE entity_id='陈伯'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((name.as_str(), kind.as_str()), ("陈伯", "PERSON"));
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM canon_facts WHERE subject_id='陈伯'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+    }
 }

@@ -428,6 +428,18 @@ pub(crate) fn goals_overlap(earlier: &str, goal: &BTreeSet<(char, char)>) -> boo
     crate::chapter_craft::pairs_overlap(&crate::chapter_craft::telling_pairs(earlier), goal, 6)
 }
 
+/// A full goal can look different after the planner appends a second beat.
+fn shared_goal_passage(earlier: &str, current: &str) -> Option<String> {
+    let chars = earlier.chars().collect::<Vec<_>>();
+    chars
+        .windows(12)
+        .filter(|window| window.iter().copied().all(crate::chapter_craft::is_han))
+        .map(|window| window.iter().collect::<String>())
+        .find(|phrase| {
+            current.contains(phrase) && crate::chapter_craft::telling_pairs(phrase).len() >= 5
+        })
+}
+
 /// The deterministic checks of an r2 plan (CRAFT_V3_DESIGN §4.2). Returns
 /// every problem found, in Chinese, so the planner can fix them in one pass.
 pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) -> Vec<String> {
@@ -528,13 +540,20 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
         .as_array()
         .map(Vec::as_slice)
         .unwrap_or(&[]);
-    let goal = crate::chapter_craft::telling_pairs(text(&plan["chapterGoal"]));
+    let goal_text = text(&plan["chapterGoal"]);
+    let goal = crate::chapter_craft::telling_pairs(goal_text);
     for ending in &endings[endings.len().saturating_sub(RECENT_GOALS)..] {
-        if goals_overlap(text(&ending["goal"]), &goal) {
+        let earlier = text(&ending["goal"]);
+        if goals_overlap(earlier, &goal) {
             problems.push(format!(
                 "本章目标和第 {} 章的目标几乎一样（{}）：从最近一章的结尾往前推，写这一阶段还没做到的事，前几章已经做到阶段目标时写它的段末转折",
                 ending["chapter"],
-                text(&ending["goal"])
+                earlier
+            ));
+        } else if let Some(phrase) = shared_goal_passage(earlier, goal_text) {
+            problems.push(format!(
+                "本章目标可能重复第 {} 章的动作「{phrase}」。核对该章已提交的正文，承接已经发生的结果；若确有必要再次行动，写清状态怎样改变以及这次的不同后果",
+                ending["chapter"],
             ));
         }
     }
@@ -708,9 +727,13 @@ pub fn prompt_ledger(ledger: &Value) -> Value {
         devices.retain(|kept| kept["name"] != item["name"]);
         devices.push(item.clone());
     }
+    let endings = recent("endings");
     json!({
+        "sourceKind":"PRIOR_CHAPTER_PLANS",
         "devices":devices,
-        "endings":recent("endings"),
+        "endings":endings.as_array().into_iter().flatten().map(|item| {
+            json!({"chapter":item["chapter"],"plannedGoal":item["goal"]})
+        }).collect::<Vec<_>>(),
         "introducedPeople":ledger["introducedPeople"],
         "losses":recent("losses"),
         "lastChapterPlaces":ledger["lastChapterPlaces"],
@@ -735,8 +758,6 @@ struct CraftPlanning {
     bible: Value,
     ledger: Value,
     established_facts: Vec<Value>,
-    /// VD-1c: where this chapter stands in its volume's stages.
-    direction: Option<Value>,
     /// WM-2a: the owner's corrections.
     corrections: Vec<Value>,
 }
@@ -777,6 +798,8 @@ fn recall_for(
 /// bible, otherwise as r1. Both planning entry points use it the same way.
 pub struct ChapterPlanner {
     craft: Option<CraftPlanning>,
+    /// VD-1c: where this chapter stands in its volume's stages.
+    direction: Option<Value>,
     chapter: u32,
 }
 
@@ -927,9 +950,16 @@ impl ChapterPlanner {
         chapter_number: Option<u32>,
     ) -> Result<Self, String> {
         let chapter = chapter_number.unwrap_or(1);
+        let mut direction = crate::book_direction::for_chapter(
+            connection,
+            project_id,
+            chapter_id,
+            i64::from(chapter),
+        )?;
         let Some(bible) = confirmed_bible(connection, project_id)? else {
             return Ok(Self {
                 craft: None,
+                direction,
                 chapter,
             });
         };
@@ -937,20 +967,12 @@ impl ChapterPlanner {
             crate::repositories::craft::prior_plan_crafts(connection, project_id, chapter_id)
                 .map_err(|error| error.to_string())?;
         let ledger = creation_ledger(&prior, &bible);
-        let direction = crate::book_direction::for_chapter(
-            connection,
-            project_id,
-            chapter_id,
-            i64::from(chapter),
-        )?
-        .map(|mut direction| {
+        if let Some(direction) = direction.as_mut() {
             direction["lastAppearances"] = last_appearances(&prior, &bible);
-            direction
-        });
+        }
         Ok(Self {
             craft: Some(CraftPlanning {
                 corrections: owner_corrections(connection, project_id)?,
-                direction,
                 bible,
                 ledger,
                 // The planner decides who appears, so everyone's traits may
@@ -963,6 +985,7 @@ impl ChapterPlanner {
                     &[],
                 ),
             }),
+            direction,
             chapter,
         })
     }
@@ -978,14 +1001,14 @@ impl ChapterPlanner {
     /// Adds the story bible, the planner's view of the ledger and the chapter
     /// number to an r2 planning request.
     pub fn extend_input(&self, input: &mut Value) {
+        if let Some(direction) = &self.direction {
+            input["volumeDirection"] = direction.clone();
+        }
         if let Some(craft) = &self.craft {
             input["storyBible"] = craft.bible.clone();
             input["creationLedger"] = prompt_ledger(&craft.ledger);
             input["establishedFacts"] = json!(craft.established_facts);
             input["chapterNumber"] = json!(self.chapter);
-            if let Some(direction) = &craft.direction {
-                input["volumeDirection"] = direction.clone();
-            }
             if !craft.corrections.is_empty() {
                 input["ownerCorrections"] = json!(craft.corrections);
             }
@@ -1010,10 +1033,20 @@ impl ChapterPlanner {
                 "{PLAN_CRAFT_ERROR}:计划缺少 craft 写作决定，请按 chapter-plan.r2 返回"
             ));
         }
+        let prior = craft.ledger["endings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .rev()
+            .take(RECENT_GOALS)
+            .filter_map(|chapter| chapter["goal"].as_str());
+        if crate::chapter_craft::goal_repeats(text(&plan["chapterGoal"]), prior) {
+            return Err("B08_PLAN_GOAL_REPEATED".into());
+        }
         let mut problems =
             plan_problems(plan, i64::from(self.chapter), &craft.bible, &craft.ledger);
         // VD-1g: a young stage is not finished in one chapter.
-        problems.extend(craft.direction.as_ref().and_then(|direction| {
+        problems.extend(self.direction.as_ref().and_then(|direction| {
             crate::book_direction::stage_goal_problem(direction, text(&plan["chapterGoal"]))
         }));
         problems.extend(sizing_problems(&plan["craft"], length_range));
@@ -1039,7 +1072,7 @@ impl ChapterPlanner {
             .collect::<BTreeSet<_>>();
         shape_reminder(plan, &craft.ledger)
             .into_iter()
-            .chain(craft.direction.iter().flat_map(|direction| {
+            .chain(self.direction.iter().flat_map(|direction| {
                 crate::book_direction::reminders(direction, &on_stage, i64::from(self.chapter))
             }))
             .map(|reminder| format!("{PLAN_CRAFT_ERROR}:{reminder}"))

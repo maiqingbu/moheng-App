@@ -22,6 +22,8 @@ use crate::provider::{
     OpenAiCompatibleProvider, ProviderAdapter, ProviderAttemptDiagnostic, ProviderConfig,
     ProviderError, ProviderErrorKind, ProviderRequest, ProviderResponse,
 };
+use crate::repositories::narrative::NarrativeRepository;
+use crate::repositories::production::{ProductionRepository, NARRATIVE_REVIEW_REQUIRED};
 use crate::repositories::runtime::{
     DurableJobService, DurableModelRunner, JobSpec, ModelRunOutcome, ModelRunSpec, ModelTransport,
     ModelTransportDiagnostic, OsKeychainSecretStore, RuntimeError, SecretStore, TransportFailure,
@@ -42,6 +44,40 @@ const STAGES: &[&str] = &[
     "RECONCILE",
     "COMPLETED",
 ];
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct ChapterProseCheckpoint {
+    input_digest: String,
+    body: String,
+    body_digest: String,
+    renderer: Value,
+    prose_run_ids: Vec<String>,
+    craft_skills: Value,
+}
+
+fn reusable_continuity_sources(
+    checkpoint: &ChapterProseCheckpoint,
+    craft_chapter: bool,
+) -> Option<&Value> {
+    let review = &checkpoint.craft_skills["continuity"];
+    if review["errors"]
+        .as_array()
+        .is_some_and(|errors| !errors.is_empty())
+        || (craft_chapter
+            && (review["reviewVersion"].as_u64() != Some(CONTINUITY_REVIEW_VERSION)
+                || review
+                    .pointer("/finalCheck/bodyDigest")
+                    .and_then(Value::as_str)
+                    != Some(&checkpoint.body_digest)
+                || review
+                    .pointer("/finalCheck/modelRunId")
+                    .and_then(Value::as_str)
+                    .is_none()))
+    {
+        return None;
+    }
+    review.get("recalledSources")
+}
 
 #[derive(Debug, Clone)]
 pub struct ProductionModelResponse {
@@ -128,6 +164,15 @@ pub trait ProductionModelGateway: Send + Sync {
     /// deterministic gateways keep the template goals.
     fn plans_book_direction(&self) -> bool {
         self.enforces_chapter_length()
+    }
+
+    fn checks_book_continuation(&self) -> bool {
+        false
+    }
+
+    /// Whether this gateway supports the optional evidenced event selection.
+    fn selects_main_event(&self) -> bool {
+        false
     }
 
     /// FX-21: configured providers classify project assistant questions;
@@ -252,8 +297,14 @@ pub fn model_step(capability: &str) -> &'static str {
         | "REWRITE_PASSAGES" => "render",
         // Owner decision (2026-10-24): r2 plans use the audit model.
         "AUDIT_EXTRACT"
+        | "SELECT_MAIN_EVENT"
+        | "VERIFY_STAGE_STEP"
         | "REVIEW_CHAPTER"
         | "CHECK_CONTINUITY"
+        | "CONFIRM_NARRATIVE_CONTINUITY"
+        | crate::book_direction::CHECK_BOOK_CONTINUATION
+        | crate::book_direction::CONFIRM_BOOK_CONTINUATION
+        | crate::book_direction::REPAIR_BOOK_PRESSURE
         | crate::craft_plan::PLAN_CHAPTER_CRAFT
         | crate::book_direction::PLAN_BOOK_DIRECTION
         | crate::book_direction::PLAN_VOLUME_DIRECTION => "audit",
@@ -463,6 +514,13 @@ impl ConfiguredProductionGateway {
 }
 
 impl ProductionModelGateway for ConfiguredProductionGateway {
+    fn checks_book_continuation(&self) -> bool {
+        true
+    }
+
+    fn selects_main_event(&self) -> bool {
+        true
+    }
     fn provider(&self) -> &str {
         &self.config.provider_id
     }
@@ -960,6 +1018,21 @@ pub fn execute_production_model_with_profile(
     input: Value,
     now: &str,
 ) -> Result<ModelRunOutcome, String> {
+    execute_production_model_with_profile_recorded(
+        connection, gateway, profile, spec, capability, input, now,
+    )
+    .map(|(_, outcome)| outcome)
+}
+
+pub(crate) fn execute_production_model_with_profile_recorded(
+    connection: &libsql_rusqlite::Connection,
+    gateway: &dyn ProductionModelGateway,
+    profile: &ResolvedProviderProfile,
+    spec: &ModelRunSpec,
+    capability: &str,
+    input: Value,
+    now: &str,
+) -> Result<(String, ModelRunOutcome), String> {
     resend_once_on_invalid_json(spec, |spec, off_spec| {
         let mut input = input.clone();
         if let Some(error) = off_spec {
@@ -968,19 +1041,20 @@ pub fn execute_production_model_with_profile(
                 "instruction":"上一次回复不符合输出规范：按 rejectedFor 列出的问题修正，返回完整回复。"
             });
         }
-        execute_production_model_with_profile_once(
+        let outcome = execute_production_model_with_profile_once(
             connection, gateway, profile, spec, capability, input, now,
-        )
+        )?;
+        Ok((spec.model_run_id.clone(), outcome))
     })
 }
 
 /// Runs `run` with `spec`; a reply that is not valid JSON (FX-19) or not on
 /// its step's output spec (LD-1) is resent once as a new model run, the
 /// latter with what was off the spec; the bad run stays recorded as failed.
-pub fn resend_once_on_invalid_json(
+pub fn resend_once_on_invalid_json<T>(
     spec: &ModelRunSpec,
-    run: impl Fn(&ModelRunSpec, Option<&str>) -> Result<ModelRunOutcome, String>,
-) -> Result<ModelRunOutcome, String> {
+    mut run: impl FnMut(&ModelRunSpec, Option<&str>) -> Result<T, String>,
+) -> Result<T, String> {
     match run(spec, None) {
         Err(error) if error.contains("P01_MODEL_JSON_INVALID:") => {
             run(&follow_up_spec(spec, ":truncated-resend", 1)?, None)
@@ -1013,6 +1087,18 @@ pub(crate) fn follow_up_spec(
 /// How many times a rejected plan is planned again within one job.
 const PLAN_FEEDBACK_ROUNDS: i64 = 2;
 
+// A strict-output step may consume one resend before returning useful work.
+const RUNS_PER_REVIEW_STEP: i64 = 2;
+const CONTINUITY_REVIEW_VERSION: u64 = 5;
+const EXPANSION_PASSAGES: usize = 3;
+const EXPANSION_PASSAGE_MAX_CHARS: usize = 600;
+const PRIOR_CHAPTER_COPY_ERROR: &str = "B08_RENDER_PRIOR_CHAPTER_COPY";
+const RENDER_SIGNING_REPETITION_ERROR: &str = "B08_RENDER_SIGNING_REPETITION";
+
+fn fits_before_final_evidence(used: i64, limit: i64, reserved: i64, proposed: i64) -> bool {
+    limit.saturating_sub(used) >= reserved + proposed * RUNS_PER_REVIEW_STEP
+}
+
 /// Craft rule (2026-10-17): a plan rejected for a reason the planner can fix
 /// (see `chapter_craft::plan_feedback`) is planned again with the reason, up
 /// to `PLAN_FEEDBACK_ROUNDS` times (owner decision 2026-10-25); the rejected
@@ -1043,8 +1129,11 @@ pub fn plan_chapter_with_feedback(
     let mut run_id = spec.model_run_id.clone();
     let mut last = plan(spec, input.clone())?;
     let mut result = accept(last.clone(), false);
+    let craft_chapter = spec.capability == crate::craft_plan::PLAN_CHAPTER_CRAFT;
+    let mut earlier_craft_plans = Vec::new();
+    let mut rejected_goals = Vec::new();
     for round in 1..=PLAN_FEEDBACK_ROUNDS {
-        let Some(feedback) = result
+        let Some(mut feedback) = result
             .as_ref()
             .err()
             .and_then(|error| crate::chapter_craft::plan_feedback(error))
@@ -1057,6 +1146,30 @@ pub fn plan_chapter_with_feedback(
             round => format!(":plan-feedback-{round}"),
         };
         let replan = follow_up_spec(spec, &suffix, round)?;
+        if matches!(
+            spec.capability.as_str(),
+            crate::book_direction::PLAN_BOOK_DIRECTION
+                | crate::book_direction::PLAN_VOLUME_DIRECTION
+        ) {
+            let mut previous = last.clone();
+            crate::book_direction::tidy(&mut previous, &input);
+            feedback["previousDirection"] = previous;
+        }
+        if craft_chapter {
+            if result
+                .as_ref()
+                .is_err_and(|error| error == "B08_PLAN_GOAL_REPEATED")
+                && !rejected_goals.contains(&last["chapterGoal"])
+            {
+                rejected_goals.push(last["chapterGoal"].clone());
+            }
+            feedback["rejectedRepeatedGoals"] = json!(rejected_goals);
+            feedback["previousPlan"] = json!({
+                "chapterGoal":last["chapterGoal"],"chapterRole":last["chapterRole"],
+                "craft":last["craft"],"horizonPreview":last["horizonPreview"],
+            });
+            earlier_craft_plans.push((run_id.clone(), last.clone()));
+        }
         input["planFeedback"] = feedback;
         last = plan(&replan, input.clone())?;
         result = accept(last.clone(), false);
@@ -1064,6 +1177,19 @@ pub fn plan_chapter_with_feedback(
     }
     // LD-1 step 2: problems the planner was told about and could not fix go
     // on with the last plan as a reminder; anything else still fails.
+    if craft_chapter
+        && result
+            .as_ref()
+            .is_err_and(|error| error == "B08_PLAN_GOAL_REPEATED")
+    {
+        // A retry can regress to a duplicate after an earlier draft found a
+        // new goal. Reapply the normal acceptance rules to each earlier draft.
+        for (candidate_run_id, candidate) in earlier_craft_plans.into_iter().rev() {
+            if let Ok((plan, problems)) = accept(candidate, true) {
+                return Ok((plan, candidate_run_id, problems));
+            }
+        }
+    }
     let (plan, problems) = match result {
         Ok(accepted) => accepted,
         Err(error) if crate::chapter_craft::plan_feedback(&error).is_some() => accept(last, true)?,
@@ -1080,7 +1206,11 @@ pub(crate) fn note_if_lenient(
     result: Result<(), String>,
 ) -> Result<(), String> {
     match result {
-        Err(error) if lenient && crate::chapter_craft::plan_feedback(&error).is_some() => {
+        Err(error)
+            if lenient
+                && error != "B08_PLAN_GOAL_REPEATED"
+                && crate::chapter_craft::plan_feedback(&error).is_some() =>
+        {
             problems.push(error);
             Ok(())
         }
@@ -1631,6 +1761,52 @@ fn validate_plan_is_current(
     ) {
         return Err("PLAN_STALE:RECOMPILE_REQUIRED".into());
     }
+    if let Some(expected) = plan["stageStepRulesDigest"].as_str() {
+        let chapter_no = NarrativeRepository::chapter_number(connection, project_id, chapter_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("B08_CHAPTER_NOT_FOUND")?;
+        let current =
+            crate::book_direction::for_chapter(connection, project_id, chapter_id, chapter_no)?;
+        if current.as_ref().and_then(|direction| {
+            direction
+                .pointer("/currentStage/ruleDigest")
+                .and_then(Value::as_str)
+        }) != Some(expected)
+        {
+            return Err("PLAN_STALE:STAGE_STEP_RULES_CHANGED".into());
+        }
+    }
+    let stage_tasks = plan["activeTaskRefs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|id| is_required_stage_step(id))
+        .collect::<Vec<_>>();
+    if execution_mode == "LONG_FORM" && !stage_tasks.is_empty() {
+        if let Some(route) = crate::repositories::narrative::NarrativeRepository::artifact_payload(
+            connection,
+            project_id,
+            "VolumePlan",
+            volume_id,
+        )
+        .map_err(|error| error.to_string())?
+        {
+            let states = crate::planning::route_task_states(connection, project_id, &route)?;
+            let statuses = states
+                .iter()
+                .filter_map(|state| {
+                    Some((state.state_id.as_str(), state.value["status"].as_str()?))
+                })
+                .collect::<Vec<_>>();
+            crate::planning::validate_task_reality(
+                &json!({"activeTaskRefs":stage_tasks}),
+                &route,
+                &statuses,
+            )
+            .map_err(|_| "PLAN_STALE:TASK_DEPENDENCY_CHANGED".to_string())?;
+        }
+    }
     Ok(())
 }
 
@@ -1674,22 +1850,6 @@ fn reusable_opening_plan_for_retry(
     now: &str,
     current_revision: &mut i64,
 ) -> Result<Option<(ArtifactRef, Value, ArtifactRef, Value)>, String> {
-    let mut completed_plan = None;
-    for capability in [crate::craft_plan::PLAN_CHAPTER_CRAFT, "PLAN_STRATEGY"] {
-        completed_plan = DurableModelRunner::completed_result_for_job(
-            connection,
-            project_id,
-            previous_job_id,
-            capability,
-        )
-        .map_err(|error| error.to_string())?;
-        if completed_plan.is_some() {
-            break;
-        }
-    }
-    let Some((planning_model_run_id, _)) = completed_plan else {
-        return Ok(None);
-    };
     let Some(plan_ref) = crate::repositories::narrative::NarrativeRepository::canonical_head_ref(
         connection,
         project_id,
@@ -1703,11 +1863,25 @@ fn reusable_opening_plan_for_retry(
     // A completed planner run proves nothing about the head: its plan may
     // have been rejected, leaving an earlier plan (such as the opening
     // placeholder) in place. Only a plan that run produced is reused.
-    let produced_by = crate::repositories::narrative::NarrativeRepository::artifact_model_run_id(
-        connection, project_id, &plan_ref,
+    let Some(planning_model_run_id) =
+        crate::repositories::narrative::NarrativeRepository::artifact_model_run_id(
+            connection, project_id, &plan_ref,
+        )
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    // A retry that reused a plan has no planner run of its own. The
+    // canonical plan must have been accepted on this chapter's retry chain.
+    let plan_is_from_retry_chain = ProductionRepository::plan_run_is_on_retry_chain(
+        connection,
+        project_id,
+        previous_job_id,
+        chapter_id,
+        &planning_model_run_id,
     )
     .map_err(|error| error.to_string())?;
-    if produced_by.as_deref() != Some(planning_model_run_id.as_str()) {
+    if !plan_is_from_retry_chain {
         return Ok(None);
     }
     let mut plan_payload = load_artifact_payload(connection, project_id, &plan_ref)?;
@@ -1722,6 +1896,25 @@ fn reusable_opening_plan_for_retry(
         return Ok(None);
     };
     let previous_context_payload = load_artifact_payload(connection, project_id, &context_ref)?;
+    if validate_plan_is_current(
+        connection,
+        request,
+        project_id,
+        chapter_id,
+        volume_id,
+        "OPENING_BOOTSTRAP",
+        &plan_ref,
+        &plan_payload,
+    )
+    .is_ok()
+    {
+        return Ok(Some((
+            context_ref,
+            previous_context_payload,
+            plan_ref,
+            plan_payload,
+        )));
+    }
     let compiler_input = crate::commands::context_input_from_authority(
         connection,
         &authority_request(
@@ -1846,9 +2039,43 @@ fn commit_chapter_after_revision_recheck(
         )?;
         if attempt > 0 || original_expected_project_revision != Some(revision) {
             gateway.on_chapter_gate_revalidation(attempt);
+            if execution_mode == "LONG_FORM"
+                && crate::signing::approved_book_plan_ref(connection, project_id)?.is_some()
+            {
+                crate::signing::require_current_signing_for_long_form_if_present(
+                    connection, project_id,
+                )?;
+            }
             revalidate_chapter_gate_on_current_snapshot(
                 connection, project_id, chapter_id, plan, bundle, now,
             )?;
+        }
+        if execution_mode == "OPENING_BOOTSTRAP" && gateway.enforces_chapter_length() {
+            let final_body = bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.artifact_type == ArtifactType::FinalChapter)
+                .and_then(|artifact| artifact.payload["body"].as_str())
+                .ok_or("B08_CANDIDATE_BODY_REQUIRED")?;
+            let history = crate::repositories::ops::chapter_history(
+                connection,
+                project_id,
+                chapter_id,
+                crate::repositories::project_entry::OPENING_CHAPTER_COUNT,
+            )
+            .map_err(|error| error.to_string())?;
+            if let Some(phrase) = crate::chapter_craft::signing_repeated_phrase_windows(
+                history
+                    .bodies
+                    .iter()
+                    .map(String::as_str)
+                    .chain([final_body]),
+            )
+            .into_iter()
+            .next()
+            {
+                return Err(format!("{RENDER_SIGNING_REPETITION_ERROR}:{phrase}"));
+            }
         }
         bundle.expected_project_revision = Some(revision);
         gateway.before_commit_attempt(connection, attempt)?;
@@ -1906,6 +2133,28 @@ fn revalidate_chapter_gate_on_current_snapshot(
         .get("audit")
         .cloned()
         .ok_or_else(|| "B08_AUDIT_OUTPUT_INVALID".to_string())?;
+    if let Some(parts) = audit_payload
+        .pointer("/normalization/stageStepVerification/evidenceParts")
+        .and_then(Value::as_array)
+    {
+        for part in parts.iter().filter(|part| part.get("source").is_some()) {
+            let proof: StageStepEvidence = serde_json::from_value(part.clone())
+                .map_err(|error| format!("B08_STAGE_STEP_PROGRESS_INVALID:{error}"))?;
+            if !stage_step_source_is_current(connection, project_id, &proof)? {
+                return Err("PLAN_STALE:STAGE_STEP_SOURCE_CHANGED".into());
+            }
+        }
+    }
+    let continuity_sources = artifacts
+        .iter()
+        .find(|item| item.artifact_type == ArtifactType::ProductionReceipt)
+        .and_then(|item| {
+            item.payload
+                .pointer("/craftSkills/continuity/recalledSources")
+        });
+    if !continuity_sources_current(connection, project_id, continuity_sources)? {
+        return Err("PLAN_STALE:CONTINUITY_SOURCE_CHANGED".into());
+    }
     let mut extraction: AuditExtraction = serde_json::from_value(audit_payload.clone())
         .map_err(|error| format!("B08_AUDIT_INCOMPLETE:{error}"))?;
     validate_audit_completeness(&audit_payload, &extraction)?;
@@ -1968,6 +2217,28 @@ fn make_certificate(
     value["certificateDigest"] = Value::String(String::new());
     certificate.certificate_digest = sha256_canonical(&value).map_err(|e| e.to_string())?;
     Ok(certificate)
+}
+
+fn continuity_sources_current(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    sources: Option<&Value>,
+) -> Result<bool, String> {
+    use crate::repositories::narrative::NarrativeRepository;
+    for source in sources.and_then(Value::as_array).into_iter().flatten() {
+        let chapter_id = source["chapterId"]
+            .as_str()
+            .ok_or("QC1_HISTORY_REFERENCE_INVALID")?;
+        let reference: ArtifactRef = serde_json::from_value(source["finalRef"].clone())
+            .map_err(|error| format!("QC1_HISTORY_REFERENCE_INVALID:{error}"))?;
+        let current =
+            NarrativeRepository::committed_final_chapter_head(connection, project_id, chapter_id)
+                .map_err(|error| error.to_string())?;
+        if current.as_ref() != Some(&reference) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Error used to unwind at a step boundary after observing a control signal.
@@ -2355,34 +2626,19 @@ fn run_chapter_production_inner(
         return Err("B08_EXECUTION_MODE_MISMATCH".into());
     }
     if execution_mode == "LONG_FORM" {
-        let book_plan_ref =
-            crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
-                connection,
-                &project_id,
-                "BookPlan",
-            )
-            .map_err(|error| error.to_string())?;
-        let approved_book_plan = if let Some(reference) = book_plan_ref {
-            crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
-                connection,
-                &project_id,
-                &reference,
-            )
-            .map_err(|error| error.to_string())?
-            .and_then(|payload| {
-                (payload.get("planningMaturity").and_then(Value::as_str) == Some("APPROVED"))
-                    .then_some(())
-            })
-            .is_some()
-        } else {
-            false
-        };
-        if approved_book_plan {
+        if crate::signing::approved_book_plan_ref(connection, &project_id)?.is_some() {
             crate::signing::require_current_signing_for_long_form_if_present(
                 connection,
                 &project_id,
             )?;
         }
+        crate::book_direction::require_first_volume_direction(
+            connection,
+            gateway,
+            &project_id,
+            volume_id,
+            true,
+        )?;
         crate::gate_policy::require_long_form_policy_supported(connection, &project_id)?;
     }
     if execution_mode == "LONG_FORM"
@@ -2425,6 +2681,13 @@ fn run_chapter_production_inner(
     let gate_policy_payload = load_artifact_payload(connection, &project_id, &policy_ref)?;
     // A missing or invalid provider fails the attempt before anything runs.
     gateway.resolve_profile()?;
+    let continuity_hold = ProductionRepository::active_continuity_hold(connection, &project_id)
+        .map_err(|error| error.to_string())?;
+    if let Some((held_job, held_chapter)) = &continuity_hold {
+        if held_chapter != &chapter_id || retry_of_job_id.as_ref() != Some(held_job) {
+            return Err(NARRATIVE_REVIEW_REQUIRED.into());
+        }
+    }
     if let Some(previous_job_id) = &retry_of_job_id {
         DurableJobService::validate_retry_source(
             connection,
@@ -2581,6 +2844,32 @@ fn run_chapter_production_inner(
     let chapter_history =
         crate::repositories::ops::chapter_history(connection, &project_id, &chapter_id, 3)
             .map_err(|error| error.to_string())?;
+    let enforce_opening_repetition =
+        execution_mode == "OPENING_BOOTSTRAP" && gateway.enforces_chapter_length();
+    if enforce_opening_repetition {
+        if let Some(phrase) = crate::chapter_craft::signing_repeated_phrase_windows(
+            chapter_history.bodies.iter().map(String::as_str),
+        )
+        .into_iter()
+        .next()
+        {
+            return Err(format!("B08_OPENING_HISTORY_SIGNING_REPETITION:{phrase}"));
+        }
+    }
+    let signing_repetition = |body: &str| {
+        if !enforce_opening_repetition {
+            return None;
+        }
+        crate::chapter_craft::signing_repeated_phrase_windows(
+            chapter_history
+                .bodies
+                .iter()
+                .map(String::as_str)
+                .chain([body]),
+        )
+        .into_iter()
+        .next()
+    };
     let chapter_number = chapter_history.number();
     let (context_ref, context_payload, plan_ref, plan_payload, authority_context, audit_contract) =
         if let Some((context_ref, context_payload, plan_ref, plan_payload)) = reusable_opening_plan
@@ -2706,6 +2995,9 @@ fn run_chapter_production_inner(
                 length_range,
             )?;
             planner.extend_input(&mut planning_input);
+            if planner.capability() == crate::craft_plan::PLAN_CHAPTER_CRAFT {
+                chapter_history.extend_continuation_input(&mut planning_input);
+            }
             let triggered_threads = compiler_input
                 .continuity_threads
                 .iter()
@@ -2890,6 +3182,12 @@ fn run_chapter_production_inner(
         &plan_payload,
         current_revision,
     )?;
+    let stage_step = match chapter_number {
+        Some(number) if execution_mode == "LONG_FORM" && gateway.selects_main_event() => {
+            planned_stage_step(connection, &project_id, &chapter_id, number, &plan_payload)?
+        }
+        _ => None,
+    };
     // Owner decision (2026-10-24): the v1.2 enrichment, its quality report
     // and S40 candidate repair are retired from chapter production; the v2
     // craft skills and the rule checks guide the writing instead.
@@ -2909,6 +3207,9 @@ fn run_chapter_production_inner(
         scene.remove("estimatedCharacters");
     }
     let mut render_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":writer_plan,"contextManifestRef":context_ref,"contextManifest":context_payload,"authorityContext":authority_context.clone(),"chapterLengthRange":length_range.to_json()});
+    if let Some(stage) = &stage_step {
+        render_input["stageStep"] = stage.input();
+    }
     let avoid_phrases = crate::chapter_craft::repeated_phrases(&chapter_history.bodies);
     if !avoid_phrases.is_empty() {
         render_input["avoidPhrases"] = json!(avoid_phrases);
@@ -2966,6 +3267,7 @@ fn run_chapter_production_inner(
         .transpose()?;
     if let Some(writing) = &craft_writing {
         writing.extend_render_input(&mut render_input, &chapter_history.recent);
+        chapter_history.extend_continuation_input(&mut render_input);
     }
     // QC-1.5: what earlier chapters fixed, for the continuity check.
     let established_facts = render_input
@@ -2974,12 +3276,87 @@ fn run_chapter_production_inner(
         .unwrap_or_else(|| json!([]));
     // QC-1.4/1.5: what the rewrite left for the chapter's reminder.
     let mut continuity_held = Vec::new();
+    let mut confirmed_continuity_blockers = Vec::new();
     let render_capability = if craft_writing.is_some() {
         "RENDER_CHAPTER_CRAFT"
     } else {
         "RENDER_CHAPTER"
     };
     let render_profile = gateway.resolve_step_profile("RENDER_CHAPTER")?;
+    // The project revision in authorityContext can change when a job is
+    // retried. The plan, evidence context and authority digest still bind it.
+    let prose_input_digest = if gateway.enforces_chapter_length() {
+        let mut prose_input = render_input.clone();
+        prose_input["authorityContext"] = Value::Null;
+        Some(sha256_canonical(&json!({
+            "renderInput":prose_input,"stateDigest":state_digest,"gatePolicyRef":policy_ref,
+            "previousBodies":chapter_history.bodies,"reviewsProse":gateway.reviews_chapter_prose()
+        })).map_err(|error| error.to_string())?)
+    } else {
+        None
+    };
+    let copies_prior_chapter = |text: &str| {
+        if !gateway.enforces_chapter_length() || chapter_history.bodies.is_empty() {
+            return false;
+        }
+        let normalized = crate::chapter_craft::normalize_typography(text.trim());
+        !normalized.is_empty() && chapter_history.bodies.contains(&normalized)
+    };
+    let prior_copy_feedback = json!({
+        "rejectedFor":PRIOR_CHAPTER_COPY_ERROR,
+        "instruction":"上一次输出整篇复用了已提交的前文。前文是历史依据，只写本章章纲要求的新行动及结果，接着前章结尾推进。"
+    });
+    let mut copied_checkpoint = false;
+    let mut reuse_checkpoint =
+        |stage| match (prose_input_digest.as_ref(), retry_of_job_id.as_deref()) {
+            (Some(digest), Some(previous_job_id)) if continuity_hold.is_none() => Ok::<_, String>(
+                DurableJobService::checkpoint_boundary(
+                    connection,
+                    &project_id,
+                    previous_job_id,
+                    stage,
+                )
+                .map_err(|error| error.to_string())?
+                .map(serde_json::from_value::<ChapterProseCheckpoint>)
+                .transpose()
+                .map_err(|error| format!("B08_PROSE_CHECKPOINT_INVALID:{error}"))?
+                .filter(|checkpoint| &checkpoint.input_digest == digest)
+                .filter(|checkpoint| {
+                    let copied = copies_prior_chapter(&checkpoint.body);
+                    copied_checkpoint |= copied;
+                    !copied
+                }),
+            ),
+            _ => Ok(None),
+        };
+    let audit_checkpoint = reuse_checkpoint("AUDIT")?;
+    // Older releases could save a body that fails F1-5 at the audit
+    // boundary. Keep that text as a draft and give the prose review a chance.
+    let (resumed_prose, audit_draft) = match audit_checkpoint {
+        Some(checkpoint) if signing_repetition(&checkpoint.body).is_some() => {
+            (None, Some(checkpoint))
+        }
+        checkpoint => (checkpoint, None),
+    };
+    let prose_resumed = resumed_prose.is_some();
+    let resumed_draft = if prose_resumed || audit_draft.is_some() {
+        audit_draft
+    } else {
+        reuse_checkpoint("RENDER")?
+    };
+    let review_sources = resumed_prose
+        .as_ref()
+        .and_then(|checkpoint| reusable_continuity_sources(checkpoint, craft_writing.is_some()));
+    let review_resumed = if let Some(sources) = review_sources {
+        continuity_sources_current(connection, &project_id, Some(sources))?
+    } else {
+        false
+    };
+    let original_renderer = resumed_prose
+        .as_ref()
+        .or(resumed_draft.as_ref())
+        .map(|checkpoint| checkpoint.renderer.clone());
+    let mut prose_run_ids = Vec::new();
     // One model call of a craft step; `suffix` names the call within this
     // job. Returns the run id and its outcome.
     let craft_call = |suffix: &str,
@@ -3008,10 +3385,39 @@ fn run_chapter_production_inner(
             attempt_no,
             repair_round: 0,
         };
-        let outcome = execute_production_model_with_profile(
+        execute_production_model_with_profile_recorded(
             connection, gateway, profile, &spec, capability, input, &now,
-        )?;
-        Ok((model_run_id, outcome))
+        )
+    };
+    // Main event selection has at most two attempts. Keep its allowance
+    // and the active step's first validated reply ahead of optional work.
+    let event_runs = RUNS_PER_REVIEW_STEP;
+    let outcome_runs = event_runs + RUNS_PER_REVIEW_STEP * i64::from(stage_step.is_some());
+    let submission_runs = outcome_runs
+        + RUNS_PER_REVIEW_STEP
+        + RUNS_PER_REVIEW_STEP * i64::from(execution_mode == "OPENING_BOOTSTRAP");
+    let final_runs = submission_runs + RUNS_PER_REVIEW_STEP;
+    let has_review_room = |reserved, proposed| {
+        if !gateway.selects_main_event() {
+            return Ok(true);
+        }
+        let quota = ProductionRepository::chapter_quota(connection, &project_id, &chapter_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("B08_PRODUCTION_BUDGET_REQUIRED")?;
+        Ok::<_, String>(fits_before_final_evidence(
+            quota["used"].as_i64().unwrap_or(0),
+            quota["limit"].as_i64().unwrap_or(0),
+            reserved,
+            proposed,
+        ))
+    };
+    let rechecking_saved_prose = prose_resumed && !review_resumed;
+    let room_for_polish = |proposed| {
+        if rechecking_saved_prose {
+            Ok(false)
+        } else {
+            has_review_room(final_runs, proposed)
+        }
     };
     use crate::chapter_length::character_count;
     let length_error = |body: &str| {
@@ -3022,13 +3428,11 @@ fn run_chapter_production_inner(
             length_range.max
         )
     };
-    // CRAFT v3 (owner decision 2026-10-23): a chapter is written in one
-    // call. A retry reuses the earlier prose only where it is committed as
-    // written; where the prose is sized and rewritten afterwards, a retry
-    // writes it again so the audit always reads what is committed.
+    // Gateways without sizing can resume from their initial renderer output.
+    // Sized prose uses the verified body saved at the relevant boundary.
     let reusable_render = retry_of_job_id
         .as_deref()
-        .filter(|_| !gateway.enforces_chapter_length())
+        .filter(|_| !gateway.enforces_chapter_length() && continuity_hold.is_none())
         .map(|previous_job_id| {
             DurableModelRunner::completed_result_for_job(
                 connection,
@@ -3042,7 +3446,30 @@ fn run_chapter_production_inner(
         .flatten();
     // An earlier audit only fits a retry that reuses that attempt's prose.
     let render_reused = reusable_render.is_some();
-    let (render_run_id, mut body) = if let Some((model_run_id, parsed)) = reusable_render {
+    let (render_run_id, mut body) = if let Some(checkpoint) = resumed_prose.or(resumed_draft) {
+        let body_hash =
+            sha256_canonical(&json!(checkpoint.body)).map_err(|error| error.to_string())?;
+        if body_hash != checkpoint.body_digest {
+            return Err("B08_PROSE_CHECKPOINT_INVALID".into());
+        }
+        let model_run_id = checkpoint.renderer["modelRunId"]
+            .as_str()
+            .ok_or("B08_PROSE_CHECKPOINT_INVALID")?
+            .to_owned();
+        prose_run_ids = checkpoint.prose_run_ids;
+        craft_skills = checkpoint.craft_skills;
+        continuity_held = craft_skills["continuity"]["unresolved"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let resumed_field = if prose_resumed {
+            "proseResumedFromJob"
+        } else {
+            "draftResumedFromJob"
+        };
+        craft_skills[resumed_field] = json!(retry_of_job_id);
+        (model_run_id, checkpoint.body)
+    } else if let Some((model_run_id, parsed)) = reusable_render {
         let payload = parse_provider_model_payload_for_capability(parsed, render_capability)?;
         let body = payload
             .get("body")
@@ -3060,6 +3487,9 @@ fn run_chapter_production_inner(
                 .map(ToOwned::to_owned)
                 .ok_or_else(|| "B08_RENDER_OUTPUT_INVALID".to_string())
         };
+        if copied_checkpoint {
+            render_input["outputFeedback"] = prior_copy_feedback.clone();
+        }
         let (model_run_id, result) = craft_call(
             "render",
             render_capability,
@@ -3068,41 +3498,108 @@ fn run_chapter_production_inner(
             render_input.clone(),
         )?;
         let body = rendered_body(&result)?;
+        let signing_repeat = |text: &str| {
+            if !enforce_opening_repetition || craft_writing.is_none() {
+                return None;
+            }
+            let normalized = crate::chapter_craft::normalize_typography(text.trim());
+            signing_repetition(&normalized)
+        };
         // LD-2 (real runs rounds 22 and 26): a chapter barely broken into
         // paragraphs is written again once, told to break it up.
-        if gateway.enforces_chapter_length() && crate::chapter_craft::is_unbroken(&body) {
-            let mut input = render_input;
-            input["outputFeedback"] = json!({
-                "rejectedFor":"正文分段太少：有超过 300 字的段落",
-                "instruction":"上一次的正文段落太长，几百字连成一段。重写这一章，按场景、动作和对话分段，每段一般不超过 150 字，段与段之间用换行（\\n）隔开。"
-            });
-            let (model_run_id, result) = craft_call(
+        let render_recovery = if copies_prior_chapter(&body) {
+            Some(("render-prior-copy", prior_copy_feedback.clone()))
+        } else if let Some(phrase) = signing_repeat(&body) {
+            Some((
+                "render-signing-repeat",
+                json!({
+                    "rejectedFor":RENDER_SIGNING_REPETITION_ERROR,
+                    "repeatedPhrase":phrase,
+                    "instruction":"该短语在本章和已提交的开篇中累计出现三次或更多。保留本章章纲和新情节，重写这些句子，只把已发生的结果作为前提。"
+                }),
+            ))
+        } else if gateway.enforces_chapter_length()
+            && character_count(&body) >= length_range.min
+            && crate::chapter_craft::is_unbroken(&body)
+        {
+            Some((
                 "render-paragraphs",
-                render_capability,
-                &render_profile,
-                2,
-                input,
-            )?;
-            (model_run_id, rendered_body(&result)?)
+                json!({
+                    "rejectedFor":"正文分段太少：有超过 300 字的段落",
+                    "instruction":"上一次的正文段落太长，几百字连成一段。重写这一章，按场景、动作和对话分段，每段一般不超过 150 字，段与段之间用换行（\\n）隔开。"
+                }),
+            ))
+        } else {
+            None
+        };
+        if let Some((suffix, feedback)) = render_recovery {
+            let mut input = render_input;
+            input["outputFeedback"] = feedback;
+            let (model_run_id, result) =
+                craft_call(suffix, render_capability, &render_profile, 2, input)?;
+            let body = rendered_body(&result)?;
+            if copies_prior_chapter(&body) {
+                return Err(PRIOR_CHAPTER_COPY_ERROR.into());
+            }
+            if signing_repeat(&body).is_some() {
+                return Err(RENDER_SIGNING_REPETITION_ERROR.into());
+            }
+            (model_run_id, body)
         } else {
             (model_run_id, body)
         }
     };
+    let renderer = original_renderer.unwrap_or_else(|| {
+        json!({
+            "modelRunId":render_run_id,"capability":render_capability,
+            "provider":render_profile.provider,"model":render_profile.model
+        })
+    });
+    let save_prose =
+        |stage: &str, text: &str, run_ids: &[String], skills: &Value| -> Result<(), String> {
+            if let Some(input_digest) = prose_input_digest.as_ref() {
+                let checkpoint = ChapterProseCheckpoint {
+                    input_digest: input_digest.clone(),
+                    body: text.to_owned(),
+                    body_digest: sha256_canonical(&json!(text))
+                        .map_err(|error| error.to_string())?,
+                    renderer: renderer.clone(),
+                    prose_run_ids: run_ids.to_vec(),
+                    craft_skills: skills.clone(),
+                };
+                let stored = serde_json::to_value(checkpoint).map_err(|error| error.to_string())?;
+                DurableJobService::save_checkpoint(
+                    connection,
+                    &project_id,
+                    &job_id,
+                    stage,
+                    0,
+                    &stored,
+                    &now,
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            Ok(())
+        };
     // Craft v2 (owner decision 2026-10-19): the written chapter is read once
     // with the review skills, and passages it flags are rewritten in place
     // with the rewrite skills. Only edits whose passage occurs once apply,
     // and a rewrite that leaves the length range is dropped whole.
-    let mut prose_run_ids = Vec::new();
     // A chapter outside the length range is expanded or cut, in at most two
     // rounds; it is never committed outside the range.
-    if gateway.enforces_chapter_length() {
+    use crate::chapter_craft::duplicate_in_chapter;
+    if gateway.enforces_chapter_length() && !prose_resumed {
         let in_range = |text: &str| length_range.accepts(character_count(text));
         body = crate::chapter_craft::normalize_typography(body.trim());
+        if duplicate_in_chapter(&body).is_none() {
+            save_prose("RENDER", &body, &prose_run_ids, &craft_skills)?;
+        }
         let length = character_count(&body);
         if length < length_range.min {
             // LD-7 (real run 2026-11-01, round 11): one expansion added
             // 100-300 characters to chapters 300-600 short, so one still
             // too short gets a second round.
+            let mut adjustment_feedback = craft_skills["lengthAdjustmentFeedback"].clone();
             for round in 0..2 {
                 let length = character_count(&body);
                 if length >= length_range.min {
@@ -3113,45 +3610,158 @@ fn run_chapter_production_inner(
                     0 => "adjust-length".to_string(),
                     round => format!("adjust-length-{round}"),
                 };
+                let mut adjustment = json!({
+                    "chapterId":chapter_id,"chapterPlan":writer_plan,
+                    "currentChars":length,
+                    "targetChars":length_range.target(),
+                    "chapterLengthRange":length_range.to_json()
+                });
+                let anchors = chapter_expansion_anchors(&body);
+                let patch_only = duplicate_in_chapter(&body).is_none() && !anchors.is_empty();
+                if patch_only {
+                    adjustment["patchOnly"] = json!(true);
+                    adjustment["bodySentences"] =
+                        json!(crate::chapter_craft::numbered_body_sentences(&body));
+                    adjustment["insertionAnchors"] = json!(anchors.keys().collect::<Vec<_>>());
+                    adjustment["avoidPhrases"] = json!(crate::chapter_craft::repeated_phrases(
+                        &chapter_history
+                            .bodies
+                            .iter()
+                            .cloned()
+                            .chain([body.clone()])
+                            .collect::<Vec<_>>(),
+                    ));
+                    let target = (length_range.min + 24).min(length_range.max).min(
+                        length
+                            + (anchors.len().min(EXPANSION_PASSAGES) * EXPANSION_PASSAGE_MAX_CHARS)
+                                as i64,
+                    );
+                    adjustment["targetChars"] = json!(target);
+                } else {
+                    adjustment["body"] = json!(body);
+                }
+                if !adjustment_feedback.is_null() {
+                    adjustment["outputFeedback"] = adjustment_feedback.clone();
+                }
                 let (run_id, outcome) = craft_call(
                     &suffix,
                     "ADJUST_CHAPTER_LENGTH",
                     &render_profile,
                     2 + round,
-                    json!({
-                        "chapterId":chapter_id,"chapterPlan":writer_plan,"body":body,
-                        "currentChars":length,
-                        "targetChars":length_range.target(),
-                        "chapterLengthRange":length_range.to_json()
-                    }),
+                    adjustment,
                 )?;
                 prose_run_ids.push(run_id);
-                body = outcome
+                let payload = outcome
                     .parsed
                     .as_ref()
-                    .and_then(|payload| payload.get("body"))
-                    .and_then(Value::as_str)
-                    .map(|text| crate::chapter_craft::normalize_typography(text.trim()))
-                    .ok_or_else(|| "B08_ADJUST_CHAPTER_LENGTH_OUTPUT_INVALID".to_string())?;
-                if character_count(&body) <= length {
+                    .ok_or("B08_ADJUST_CHAPTER_LENGTH_OUTPUT_INVALID")?;
+                let mut expanded = if patch_only {
+                    let Some(patched) =
+                        insert_chapter_passages(&body, &payload["insertions"], &anchors)
+                            .filter(|text| character_count(text) <= length_range.ceiling())
+                    else {
+                        adjustment_feedback = json!({
+                            "code":"B08_ADJUST_CHAPTER_LENGTH_OUTPUT_INVALID",
+                            "instruction":"只返回补写内容。afterSentence 只能选 insertionAnchors 中的编号，每个位置只补一次。补写后总字数不能超过上限。"
+                        });
+                        continue;
+                    };
+                    patched
+                } else {
+                    payload["body"]
+                        .as_str()
+                        .map(|text| crate::chapter_craft::normalize_typography(text.trim()))
+                        .ok_or("B08_ADJUST_CHAPTER_LENGTH_OUTPUT_INVALID")?
+                };
+                let mut retained_feedback = Value::Null;
+                if let Some(span) = duplicate_in_chapter(&expanded) {
+                    let feedback = json!({
+                        "code":"B08_RENDER_DUPLICATE_SPAN","repeatedSpan":span,
+                        "instruction":"上次扩写重复了一整段。以本次提供的正文为底稿，只补新的动作、反应或结果。同一段不要出现两次。"
+                    });
+                    let retained = if patch_only {
+                        retain_nonduplicating_insertions(&body, &payload["insertions"], &anchors)
+                    } else {
+                        None
+                    };
+                    if let Some(retained) = retained {
+                        expanded = retained;
+                        retained_feedback = feedback;
+                    } else {
+                        adjustment_feedback = feedback;
+                        if duplicate_in_chapter(&body).is_none() {
+                            craft_skills["lengthAdjustmentFeedback"] = adjustment_feedback.clone();
+                            save_prose("RENDER", &body, &prose_run_ids, &craft_skills)?;
+                        }
+                        continue;
+                    }
+                }
+                if enforce_opening_repetition {
+                    let repeated = crate::chapter_craft::added_overused_phrase(
+                        &chapter_history.bodies,
+                        &body,
+                        &expanded,
+                    )
+                    .or_else(|| {
+                        if patch_only {
+                            crate::chapter_craft::added_copied_sentence(&body, &expanded)
+                                .map(ToOwned::to_owned)
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(phrase) = repeated {
+                        adjustment_feedback = json!({
+                            "code":"B08_RENDER_REPEATED_PHRASES","repeatedPhrase":phrase,
+                            "instruction":"补写重复了原有整句，或增加了超限短语。保留底稿，仅补新的行动、证据或结果，补写中不要复用所列原文。"
+                        });
+                        craft_skills["lengthAdjustmentFeedback"] = adjustment_feedback.clone();
+                        save_prose("RENDER", &body, &prose_run_ids, &craft_skills)?;
+                        continue;
+                    }
+                }
+                adjustment_feedback = if in_range(&expanded) {
+                    Value::Null
+                } else {
+                    retained_feedback
+                };
+                if character_count(&expanded) <= length {
                     break;
                 }
+                if adjustment_feedback.is_null() {
+                    if let Some(skills) = craft_skills.as_object_mut() {
+                        skills.remove("lengthAdjustmentFeedback");
+                    }
+                } else {
+                    craft_skills["lengthAdjustmentFeedback"] = adjustment_feedback.clone();
+                }
+                body = expanded;
+                save_prose("RENDER", &body, &prose_run_ids, &craft_skills)?;
+            }
+            if adjustment_feedback["code"] == "B08_RENDER_DUPLICATE_SPAN" && !in_range(&body) {
+                return Err("B08_RENDER_DUPLICATE_SPAN".into());
+            }
+            if adjustment_feedback["code"] == "B08_RENDER_REPEATED_PHRASES" && !in_range(&body) {
+                return Err("B08_RENDER_REPEATED_PHRASES".into());
             }
         } else {
             // LD-4 (real run 2026-11-01): asked to compress, the writer cut
             // 0-10% of chapters a third too long; it now only chooses the
-            // sentences, and they are cut here to the target. It chose too
-            // few once in a while, so a cut that still leaves the chapter
+            // sentences, and they are cut here until the length is accepted.
+            // It chose too few once in a while, so a cut that still leaves the chapter
             // too long gets a second round.
             for round in 0..2 {
                 let length = character_count(&body);
                 if length_range.accepts(length) {
                     break;
                 }
-                let sentences = body_sentences(&body)
-                    .into_iter()
+                let spans = crate::chapter_craft::sentence_spans(&body);
+                let sentences = spans.iter()
                     .enumerate()
-                    .map(|(number, (from, to, text))| json!({"n":number,"chars":to - from,"text":text}))
+                    .map(|(number, &(from, to))| json!({
+                        "n":number,"chars":body[from..to].chars().count(),"text":&body[from..to],
+                        "canCut":crate::chapter_length::can_cut_sentence(&body, &spans, number)
+                    }))
                     .collect::<Vec<_>>();
                 let (run_id, outcome) = craft_call(
                     &format!("cut-length-{round}"),
@@ -3161,8 +3771,8 @@ fn run_chapter_production_inner(
                     json!({
                         "chapterId":chapter_id,"chapterPlan":writer_plan,"sentences":sentences,
                         "currentChars":length,
-                        "targetChars":length_range.target(),
-                        "cutChars":length - length_range.target()
+                        "targetChars":length_range.ceiling(),
+                        "cutChars":length - length_range.ceiling()
                     }),
                 )?;
                 prose_run_ids.push(run_id);
@@ -3177,6 +3787,9 @@ fn run_chapter_production_inner(
                     .map(|number| number as usize)
                     .collect::<Vec<_>>();
                 body = crate::chapter_length::cut_sentences(&body, &cut, length_range);
+                if duplicate_in_chapter(&body).is_none() {
+                    save_prose("RENDER", &body, &prose_run_ids, &craft_skills)?;
+                }
                 if character_count(&body) == length {
                     break;
                 }
@@ -3186,22 +3799,37 @@ fn run_chapter_production_inner(
             return Err(length_error(&body));
         }
     }
-    if gateway.reviews_chapter_prose() {
+    // A saved body can survive a budget pause with unfinished review. Reserve
+    // the final check and up to two confirmations before reopening that work.
+    let review_due = gateway.reviews_chapter_prose() && !review_resumed;
+    let review_has_room =
+        !rechecking_saved_prose || (review_due && has_review_room(submission_runs, 3)?);
+    if review_due && review_has_room {
+        let mut checked_bodies = BTreeMap::new();
         let mut craft_step = |suffix: &str,
                               capability: &str,
                               profile: &ResolvedProviderProfile,
-                              input: Value|
-         -> Result<Value, String> {
-            let (run_id, outcome) = craft_call(suffix, capability, profile, 1, input)?;
+                              input: Value,
+                              reviewed_body: Option<&str>|
+         -> Result<Result<Value, String>, String> {
+            let (run_id, outcome) = match craft_call(suffix, capability, profile, 1, input) {
+                Ok(result) => result,
+                Err(error) if error.contains("UNKNOWN_REMOTE_OUTCOME") => return Err(error),
+                Err(error) => return Ok(Err(error)),
+            };
+            if let Some(text) = reviewed_body.filter(|_| outcome.parsed.is_some()) {
+                let digest = sha256_canonical(&json!(text)).map_err(|error| error.to_string())?;
+                checked_bodies.insert(digest, run_id.clone());
+            }
             prose_run_ids.push(run_id);
-            outcome
+            Ok(outcome
                 .parsed
-                .ok_or_else(|| format!("B08_{capability}_OUTPUT_INVALID"))
+                .ok_or_else(|| format!("B08_{capability}_OUTPUT_INVALID")))
         };
         let codes = crate::skills_v2::finding_vocabulary()?;
         // CRAFT v3 chapters are checked by rule only (CRAFT_V3_DESIGN §4.4);
         // model editing belongs to the prose optimizer.
-        let review = if craft_writing.is_some() {
+        let review = if craft_writing.is_some() || !room_for_polish(2)? {
             json!({})
         } else {
             let review_guidance = crate::chapter_craft::guidance("review", &craft_signals)?;
@@ -3213,7 +3841,8 @@ fn run_chapter_production_inner(
                 "REVIEW_CHAPTER",
                 &gateway.resolve_step_profile("REVIEW_CHAPTER")?,
                 json!({"chapterId":chapter_id,"chapterGoal":plan_payload.get("chapterGoal"),"sceneExecution":plan_payload.get("sceneExecution"),"body":body,"findingCodes":codes,"craftGuidance":review_guidance}),
-            )
+                None,
+            )?
             .unwrap_or_else(|error| json!({"reviewError":error}))
         };
         let findings = review
@@ -3262,6 +3891,73 @@ fn run_chapter_production_inner(
         let mut motif_candidates = Vec::new();
         let mut earlier_facts = Vec::new();
         let mut continuity_input = None;
+        let mut continuity_errors = Vec::new();
+        let prior_chapters =
+            chapter_history
+                .recent
+                .iter()
+                .zip(&chapter_history.bodies)
+                .filter(|(_, body)| !body.is_empty())
+                .map(|(chapter, body)| {
+                    let excerpt_end = body
+                        .char_indices()
+                        .nth(4_000)
+                        .map_or(body.len(), |(index, _)| index);
+                    let sentences = crate::chapter_craft::sentence_spans(body).into_iter()
+                    .take_while(|&(_, end)| end <= excerpt_end).enumerate()
+                    .map(|(number, (start, end))| json!({"number":number,"text":&body[start..end]}))
+                    .collect::<Vec<_>>();
+                    json!({"chapterNo":chapter["chapterNo"],"chapterId":chapter["chapterId"],
+                       "excerpts":excerpt_end < body.len(),"sentences":sentences})
+                })
+                .collect::<Vec<_>>();
+        let covered = prior_chapters
+            .iter()
+            .filter(|entry| entry["excerpts"] == false)
+            .filter_map(|entry| entry["chapterId"].as_str())
+            .collect::<Vec<_>>();
+        let outcome_chapters = chapter_number
+            .filter(|_| craft_writing.is_some())
+            .map_or_else(Vec::new, |number| {
+                crate::repositories::ops::continuity_chapters_with_outcomes(
+                    connection,
+                    &project_id,
+                    i64::from(number),
+                    &covered,
+                )
+                .unwrap_or_else(|error| {
+                    continuity_errors.push(format!("QC1_HISTORY_LOOKUP_FAILED:{error}"));
+                    Vec::new()
+                })
+            });
+        let recall_history = |text: &str| -> Result<Vec<Value>, String> {
+            let mut history = prior_chapters.clone();
+            if let Some(number) = chapter_number.filter(|_| craft_writing.is_some()) {
+                let anchors = crate::chapter_craft::continuity_anchors(text);
+                let matching_chapters = crate::repositories::ops::continuity_chapters_for_anchors(
+                    connection,
+                    &project_id,
+                    i64::from(number),
+                    &anchors,
+                    &covered,
+                )
+                .map_err(|error| format!("QC1_HISTORY_LOOKUP_FAILED:{error}"))?;
+                let chapters = outcome_chapters
+                    .iter()
+                    .chain(matching_chapters.iter().filter(|chapter| {
+                        !outcome_chapters
+                            .iter()
+                            .any(|prior| prior.chapter_id == chapter.chapter_id)
+                    }))
+                    .collect::<Vec<_>>();
+                crate::chapter_craft::add_recalled_continuity_prose(&mut history, &chapters, text);
+            }
+            Ok(history)
+        };
+        let mut evidence_history = recall_history(&body).unwrap_or_else(|error| {
+            continuity_errors.push(error);
+            prior_chapters.clone()
+        });
         if let Some(writing) = &craft_writing {
             let (present, names) = writing.chapter_people(&plan_payload);
             let names = names.iter().map(String::as_str).collect::<Vec<_>>();
@@ -3285,25 +3981,30 @@ fn run_chapter_production_inner(
             );
             motif_candidates =
                 crate::chapter_craft::motif_candidates(&chapter_history.bodies, &body, &names);
-            if !candidates.is_empty() || !earlier_facts.is_empty() || !motif_candidates.is_empty() {
-                continuity_input = Some(json!({
-                    "chapterNumber":chapter_number,
-                    "earlierFacts":earlier_facts,
-                    "motifCandidates":motif_candidates
-                }));
-            }
+            continuity_input = Some(json!({
+                "chapterNumber":chapter_number,
+                "earlierFacts":earlier_facts,
+                "motifCandidates":motif_candidates
+            }));
         }
         let continuity_profile = gateway.resolve_step_profile("CHECK_CONTINUITY")?;
-        let mut continuity_errors = Vec::new();
         // The check's request for `text` (with the phrase candidates when
         // given) and the body's sentences it cites by number.
-        let continuity_request = |text: &str, candidates: &[Value]| {
+        let continuity_request = |text: &str, candidates: &[Value], history: &[Value]| {
             continuity_input.clone().map(|mut input| {
                 let sentences = body_sentences(text)
                     .into_iter()
                     .map(|(_, _, sentence)| sentence)
                     .collect::<Vec<_>>();
-                input["bodySentences"] = json!(sentences);
+                let numbered = crate::chapter_craft::numbered_body_sentences(text);
+                input["priorChapters"] = json!(history);
+                input["possibleRepeatedTransitions"] = json!(
+                    crate::chapter_craft::recurring_transition_candidates(history, &numbered)
+                );
+                input["possibleReusedPassages"] = json!(
+                    crate::chapter_craft::recurring_outcome_candidates(history, &numbered, 8)
+                );
+                input["bodySentences"] = json!(numbered);
                 input["phraseCandidates"] = json!(candidates);
                 (input, sentences)
             })
@@ -3314,13 +4015,12 @@ fn run_chapter_production_inner(
         let judge = |checked: Result<Value, String>,
                      sentences: &[String],
                      candidates: &[Value],
-                     errors: &mut Vec<String>|
-         -> (Vec<Value>, Vec<String>, Vec<String>) {
+                     errors: &mut Vec<String>| {
             let checked = match checked {
                 Ok(checked) => checked,
                 Err(error) => {
                     errors.push(error);
-                    return (Vec::new(), Vec::new(), Vec::new());
+                    return (Vec::new(), Vec::new(), Vec::new(), Vec::new());
                 }
             };
             let contradictions = crate::chapter_craft::credible_contradictions(
@@ -3359,17 +4059,59 @@ fn run_chapter_production_inner(
                 })
                 .map(ToOwned::to_owned)
                 .collect();
-            (contradictions, catchphrases, motifs)
+            let narrative_issues = checked["narrativeIssues"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            (contradictions, catchphrases, motifs, narrative_issues)
         };
-        let (contradictions, catchphrases, motifs) = match continuity_request(&body, &candidates) {
-            Some((input, sentences)) => judge(
-                craft_step("continuity", "CHECK_CONTINUITY", &continuity_profile, input),
-                &sentences,
-                &candidates,
-                &mut continuity_errors,
-            ),
-            None => (Vec::new(), Vec::new(), Vec::new()),
+        let (contradictions, catchphrases, motifs, narrative_issues) =
+            match continuity_request(&body, &candidates, &evidence_history) {
+                Some((input, sentences)) => judge(
+                    craft_step(
+                        "continuity",
+                        "CHECK_CONTINUITY",
+                        &continuity_profile,
+                        input,
+                        Some(&body),
+                    )?,
+                    &sentences,
+                    &candidates,
+                    &mut continuity_errors,
+                ),
+                None => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            };
+        let narrative_findings = |reported: &[Value], text: &str, history: &[Value]| {
+            let mut findings =
+                crate::chapter_craft::replayed_passage_findings(&prior_chapters, text);
+            let other = crate::chapter_craft::replayed_transition_findings(&prior_chapters, text)
+                .into_iter()
+                .chain(crate::chapter_craft::replayed_dialogue_findings(
+                    &chapter_history.recent,
+                    &chapter_history.bodies,
+                    text,
+                ))
+                .chain(crate::chapter_craft::narrative_continuity_findings(
+                    reported, history, text,
+                ));
+            for finding in other {
+                let covered = finding["code"] == "repeated_event"
+                    && findings.iter().any(|prior| {
+                        prior["code"] == finding["code"]
+                            && finding["quote"].as_str().is_some_and(|quote| {
+                                prior["quote"]
+                                    .as_str()
+                                    .is_some_and(|passage| passage.contains(quote))
+                            })
+                    });
+                if !covered {
+                    findings.push(finding);
+                }
+            }
+            findings
         };
+        let narrative_findings_before =
+            narrative_findings(&narrative_issues, &body, &evidence_history);
         // A sentence the check flagged is fixed for that reason first; a
         // repeat already flagged by a rule keeps the rule's finding.
         // QC-1.2: chapter 1's missing threat leads them all.
@@ -3390,6 +4132,7 @@ fn run_chapter_production_inner(
             &contradictions,
             &body,
         ));
+        leading_findings.extend(narrative_findings_before.iter().cloned());
         leading_findings.extend(crate::chapter_craft::catchphrase_findings(
             &catchphrases,
             &body,
@@ -3468,11 +4211,12 @@ fn run_chapter_production_inner(
                 })
             }))
             .collect::<Vec<_>>();
+        let checked_body = body.clone();
         let mut applied = 0;
         let mut in_range = true;
         let mut repeats_grew = false;
         let mut rewrite_error = None;
-        if !to_fix.is_empty() || !repeated.is_empty() {
+        if (!to_fix.is_empty() || !repeated.is_empty()) && room_for_polish(2)? {
             craft_signals.findings = to_fix
                 .iter()
                 .filter_map(|finding| finding["code"].as_str().map(ToOwned::to_owned))
@@ -3492,7 +4236,8 @@ fn run_chapter_production_inner(
                 "REWRITE_PASSAGES",
                 &rewrite_profile,
                 json!({"chapterId":chapter_id,"body":body,"findings":to_fix,"repeatedPhrases":repeated,"chapterLengthRange":length_range.to_json(),"craftGuidance":rewrite_guidance}),
-            )
+                None,
+            )?
             .unwrap_or_else(|error| {
                 rewrite_error = Some(error);
                 json!({"edits":[]})
@@ -3501,14 +4246,11 @@ fn run_chapter_production_inner(
             let revised = crate::chapter_craft::normalize_typography(revised.trim());
             let length = character_count(&revised);
             in_range = (length_range.min..=length_range.ceiling()).contains(&length);
-            // How much text the repeats cover: removing one sentence of a
-            // run can split it into two, so the count of phrases can grow.
-            let repeated_chars =
-                |phrases: &[String]| phrases.iter().map(|p| p.chars().count()).sum::<usize>();
-            repeats_grew = repeated_chars(&crate::chapter_craft::overused_phrases(
-                &chapter_history.bodies,
-                &revised,
-            )) > repeated_chars(&repeated);
+            let repeated_chars = |text: &str| {
+                crate::chapter_craft::repeated_character_count(&chapter_history.bodies, text)
+            };
+            repeats_grew = repeated_chars(&revised) > repeated_chars(&body)
+                || (count > 0 && duplicate_in_chapter(&revised).is_some());
             applied = count;
             if applied > 0 && in_range && !repeats_grew {
                 body = revised;
@@ -3516,13 +4258,14 @@ fn run_chapter_production_inner(
             // RP-1: repeats signing F1-5 counts that the rewrite left (its
             // edit refused, say) are rewritten once more, alone.
             let left = crate::chapter_craft::overused_phrases(&chapter_history.bodies, &body);
-            if !left.is_empty() {
+            if !left.is_empty() && room_for_polish(2)? {
                 let retry = craft_step(
                     "rewrite-repeats",
                     "REWRITE_PASSAGES",
                     &rewrite_profile,
                     json!({"chapterId":chapter_id,"body":body,"findings":crate::chapter_craft::repetition_findings(&left, &body),"repeatedPhrases":left,"chapterLengthRange":length_range.to_json(),"craftGuidance":rewrite_guidance}),
-                )
+                    None,
+                )?
                 .unwrap_or_else(|error| {
                     rewrite_error.get_or_insert(error);
                     json!({"edits":[]})
@@ -3532,10 +4275,8 @@ fn run_chapter_production_inner(
                 if count > 0
                     && (length_range.min..=length_range.ceiling())
                         .contains(&character_count(&revised))
-                    && repeated_chars(&crate::chapter_craft::overused_phrases(
-                        &chapter_history.bodies,
-                        &revised,
-                    )) < repeated_chars(&left)
+                    && duplicate_in_chapter(&revised).is_none()
+                    && repeated_chars(&revised) < repeated_chars(&body)
                 {
                     body = revised;
                     applied += count;
@@ -3546,7 +4287,7 @@ fn run_chapter_production_inner(
                 }
             }
         }
-        let discarded = if applied == 0 {
+        let mut discarded = if applied == 0 {
             Value::Null
         } else if !in_range {
             json!("LENGTH_OUT_OF_RANGE")
@@ -3555,38 +4296,303 @@ fn run_chapter_production_inner(
         } else {
             Value::Null
         };
-        // What the rewrite left: contradictions the check still finds, and
-        // catchphrases used more than once, wait in the chapter's reminder.
+        // A rewritten chapter is checked again; one the rewrite left as it
+        // was still has what the first check found.
+        let mut rewritten = body != checked_body;
+        let errors_before = continuity_errors.len();
+        let edited_history = if rewritten {
+            recall_history(&body).unwrap_or_else(|error| {
+                continuity_errors.push(error);
+                evidence_history.clone()
+            })
+        } else {
+            Vec::new()
+        };
+        let (mut left, mut narrative_left) = match continuity_request(&body, &[], &edited_history) {
+            Some((input, sentences)) if rewritten => {
+                let checked = craft_step(
+                    "continuity-recheck",
+                    "CHECK_CONTINUITY",
+                    &continuity_profile,
+                    input,
+                    Some(&body),
+                )?;
+                let (left, _, _, narrative) =
+                    judge(checked, &sentences, &[], &mut continuity_errors);
+                if continuity_errors.len() != errors_before {
+                    body = checked_body;
+                    rewritten = false;
+                    discarded = json!("CONTINUITY_RECHECK_FAILED");
+                    (contradictions.clone(), narrative_findings_before.clone())
+                } else {
+                    let findings = narrative_findings(&narrative, &body, &edited_history);
+                    evidence_history = edited_history;
+                    (left, findings)
+                }
+            }
+            _ if rewritten => (Vec::new(), Vec::new()),
+            _ => (contradictions.clone(), narrative_findings_before.clone()),
+        };
+        // A recheck can miss an issue it reported before. Keep the earlier
+        // finding if the exact flagged passage is still in the candidate.
+        for finding in &narrative_findings_before {
+            let unchanged = finding["quote"]
+                .as_str()
+                .is_some_and(|quote| body.contains(quote));
+            if unchanged
+                && !narrative_left
+                    .iter()
+                    .any(|other| other["quote"] == finding["quote"])
+            {
+                narrative_left.push(finding.clone());
+            }
+        }
+        // A second scan may omit a saved suspicion. When its sources are
+        // still current, submit it to confirmation alongside fresh findings.
+        if rechecking_saved_prose
+            && continuity_sources_current(
+                connection,
+                &project_id,
+                craft_skills.pointer("/continuity/recalledSources"),
+            )?
+        {
+            for entry in &continuity_held {
+                let item = &entry["item"];
+                match entry["reason"].as_str() {
+                    Some("QC1_NARRATIVE_CONTINUITY")
+                        if item["quote"]
+                            .as_str()
+                            .is_some_and(|quote| body.contains(quote))
+                            && !narrative_left.iter().any(|finding| {
+                                finding["quote"] == item["quote"]
+                                    && finding["evidence"] == item["evidence"]
+                            }) =>
+                    {
+                        narrative_left.push(item.clone());
+                    }
+                    Some("QC1_CONTRADICTION")
+                        if item["sentence"].as_u64().is_some()
+                            && !left.iter().any(|finding| {
+                                finding["sentence"] == item["sentence"]
+                                    && finding["established"] == item["established"]
+                            }) =>
+                    {
+                        left.push(item.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if rewritten && (!left.is_empty() || !narrative_left.is_empty()) && room_for_polish(2)? {
+            let remaining = left.len() + narrative_left.len();
+            let mut repair_findings = narrative_left.clone();
+            repair_findings.extend(crate::chapter_craft::contradiction_findings(&left, &body));
+            let profile = gateway.resolve_step_profile("REWRITE_PASSAGES")?;
+            match craft_step(
+                "rewrite-continuity-leftovers",
+                "REWRITE_PASSAGES",
+                &profile,
+                json!({"chapterId":chapter_id,"body":body,"findings":repair_findings,
+                       "chapterLengthRange":length_range.to_json(),"continuityRepair":true}),
+                None,
+            )? {
+                Ok(rewrite) => {
+                    let (revised, count) = apply_unique_edits(&body, &rewrite, &[]);
+                    let revised = crate::chapter_craft::normalize_typography(revised.trim());
+                    if count > 0
+                        && length_range.accepts(character_count(&revised))
+                        && duplicate_in_chapter(&revised).is_none()
+                        && crate::chapter_craft::repeated_character_count(
+                            &chapter_history.bodies,
+                            &revised,
+                        ) <= crate::chapter_craft::repeated_character_count(
+                            &chapter_history.bodies,
+                            &body,
+                        )
+                    {
+                        let errors_before = continuity_errors.len();
+                        let revised_history = recall_history(&revised).unwrap_or_else(|error| {
+                            continuity_errors.push(error);
+                            evidence_history.clone()
+                        });
+                        if let Some((input, sentences)) =
+                            continuity_request(&revised, &[], &revised_history)
+                        {
+                            let (checked, _, _, reported) = judge(
+                                craft_step(
+                                    "continuity-repair-check",
+                                    "CHECK_CONTINUITY",
+                                    &continuity_profile,
+                                    input,
+                                    Some(&revised),
+                                )?,
+                                &sentences,
+                                &[],
+                                &mut continuity_errors,
+                            );
+                            let mut still_present =
+                                narrative_findings(&reported, &revised, &revised_history);
+                            for finding in &narrative_left {
+                                let unchanged = finding["quote"]
+                                    .as_str()
+                                    .is_some_and(|quote| revised.contains(quote));
+                                if unchanged
+                                    && !still_present
+                                        .iter()
+                                        .any(|other| other["quote"] == finding["quote"])
+                                {
+                                    still_present.push(finding.clone());
+                                }
+                            }
+                            if continuity_errors.len() == errors_before
+                                && checked.len() + still_present.len() < remaining
+                            {
+                                left = checked;
+                                narrative_left = still_present;
+                                body = revised;
+                                evidence_history = revised_history;
+                                applied += count;
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    rewrite_error.get_or_insert(error);
+                }
+            }
+        }
+        let mut dismissed = Vec::new();
+        if !narrative_left.is_empty() || !left.is_empty() {
+            if let Some((mut input, sentences)) = continuity_request(&body, &[], &evidence_history)
+            {
+                let narrative_count = narrative_left.len();
+                let candidates = narrative_left.iter().map(|finding| json!({
+                    "currentPassage":finding["quote"],
+                    "earlierEvidence":finding.get("comparison").unwrap_or(&finding["evidence"]),
+                })).chain(left.iter().map(|item| {
+                    let quote = item["sentence"].as_u64()
+                        .and_then(|index| sentences.get(index as usize)).map(String::as_str);
+                    json!({
+                        "currentPassage":quote,
+                        "earlierEvidence":{"chapter":item["chapter"],"fact":item["established"]},
+                    })
+                })).enumerate().map(|(index, mut candidate)| {
+                    candidate["candidateNumber"] = json!(index);
+                    if let Some((first, last)) = candidate["currentPassage"].as_str()
+                        .and_then(|passage| crate::chapter_craft::numbered_passage_range(&body, passage))
+                    {
+                        candidate["currentSentenceRange"] = json!({"firstSentence":first,"lastSentence":last});
+                    }
+                    candidate
+                }).collect::<Vec<_>>();
+                input["confirmNarrativeIssues"] = json!(candidates);
+                if let Some(stage) = &stage_step {
+                    input["stageStep"] = stage.input();
+                }
+                let profile = gateway.resolve_step_profile("CONFIRM_NARRATIVE_CONTINUITY")?;
+                match craft_step(
+                    "continuity-confirm",
+                    "CONFIRM_NARRATIVE_CONTINUITY",
+                    &profile,
+                    input.clone(),
+                    None,
+                )? {
+                    Ok(review) => {
+                        let mut confirmation = crate::chapter_craft::ground_continuity_confirmation(
+                            &review,
+                            &candidates,
+                            &evidence_history,
+                            &body,
+                            chapter_number,
+                        );
+                        if confirmation.blockers.is_empty()
+                            && !confirmation.needs_evidence.is_empty()
+                        {
+                            if has_review_room(submission_runs, 1)? {
+                                let retry_candidates = candidates
+                                    .iter()
+                                    .filter(|candidate| {
+                                        candidate["candidateNumber"].as_u64().is_some_and(|id| {
+                                            confirmation.needs_evidence.contains(&id)
+                                        })
+                                    })
+                                    .cloned()
+                                    .collect::<Vec<_>>();
+                                input["confirmNarrativeIssues"] = json!(retry_candidates);
+                                input["evidenceFeedback"] = json!({
+                                    "instruction":"只复查所列候选。当前和前文各引用一句原文，结果引文须是该句中连续出现的原字，不得省略或拼接。状态变化若可与前文同时成立，不得判为倒退。前文已写过的动作若产生了新结果，只核对是否又将旧结果当成首次发生。",
+                                });
+                                match craft_step(
+                                    "continuity-confirm-evidence",
+                                    "CONFIRM_NARRATIVE_CONTINUITY",
+                                    &profile,
+                                    input,
+                                    None,
+                                )? {
+                                    Ok(rechecked) => {
+                                        let corrected =
+                                            crate::chapter_craft::ground_continuity_confirmation(
+                                                &rechecked,
+                                                &retry_candidates,
+                                                &evidence_history,
+                                                &body,
+                                                chapter_number,
+                                            );
+                                        confirmation.blockers = corrected.blockers;
+                                        confirmation.dismissals.extend(corrected.dismissals);
+                                    }
+                                    Err(error) if error.contains("BUDGET_EXCEEDED") => {
+                                        return Err(error)
+                                    }
+                                    Err(error) => continuity_errors.push(error),
+                                }
+                            } else {
+                                continuity_errors
+                                    .push("QC1_CONFIRMATION_EVIDENCE_DEFERRED_FOR_BUDGET".into());
+                            }
+                        }
+                        confirmed_continuity_blockers = confirmation.blockers;
+                        if confirmed_continuity_blockers.is_empty()
+                            && !confirmation.dismissals.is_empty()
+                        {
+                            let cleared = confirmation.dismissals.iter().filter_map(|verdict| {
+                                let index = usize::try_from(verdict["number"].as_u64()?).ok()?;
+                                dismissed.push(json!({"candidate":candidates.get(index)?,"verdict":verdict}));
+                                Some(index)
+                            }).collect::<BTreeSet<_>>();
+                            narrative_left = narrative_left
+                                .into_iter()
+                                .enumerate()
+                                .filter_map(|(index, item)| {
+                                    (!cleared.contains(&index)).then_some(item)
+                                })
+                                .collect();
+                            left = left
+                                .into_iter()
+                                .enumerate()
+                                .filter_map(|(index, item)| {
+                                    (!cleared.contains(&(narrative_count + index))).then_some(item)
+                                })
+                                .collect();
+                        }
+                    }
+                    Err(error) if error.contains("BUDGET_EXCEEDED") => return Err(error),
+                    Err(error) => continuity_errors.push(error),
+                }
+            }
+        }
         let mut unresolved = catchphrases
             .iter()
             .filter(|phrase| body.matches(phrase.as_str()).count() > 1)
             .map(|phrase| json!({"field":"continuity","item":phrase,"reason":"QC1_CATCHPHRASE"}))
             .collect::<Vec<_>>();
-        // A rewritten chapter is checked again; one the rewrite left as it
-        // was still has what the first check found.
-        let rewritten = applied > 0 && in_range && !repeats_grew;
-        let left = match continuity_request(&body, &[]) {
-            Some((input, sentences)) if rewritten && !contradictions.is_empty() => {
-                judge(
-                    craft_step(
-                        "continuity-recheck",
-                        "CHECK_CONTINUITY",
-                        &continuity_profile,
-                        input,
-                    ),
-                    &sentences,
-                    &[],
-                    &mut continuity_errors,
-                )
-                .0
-            }
-            _ if rewritten => Vec::new(),
-            _ => contradictions.clone(),
-        };
         unresolved
             .extend(left.into_iter().map(
                 |item| json!({"field":"continuity","item":item,"reason":"QC1_CONTRADICTION"}),
             ));
+        unresolved.extend(narrative_left.into_iter().map(
+            |item| json!({"field":"continuity","item":item,"reason":"QC1_NARRATIVE_CONTINUITY"}),
+        ));
         // QC-1.2: chapter 1's threat belongs near its start.
         if chapter_number == Some(1)
             && !crate::chapter_craft::opening_threat_on_page(&plan_payload, &body)
@@ -3597,32 +4603,51 @@ fn run_chapter_production_inner(
                 "reason":"QC1_OPENING_THREAT_LATE"
             }));
         }
+        let final_digest = sha256_canonical(&json!(body)).map_err(|error| error.to_string())?;
+        let final_check = checked_bodies
+            .get(&final_digest)
+            .map(|run_id| json!({"bodyDigest":final_digest,"modelRunId":run_id}));
         craft_skills["continuity"] = json!({
+            "reviewVersion":CONTINUITY_REVIEW_VERSION,
+            "finalCheck":final_check,
             "contradictions":contradictions,
+            "narrativeFindings":narrative_findings_before,
             "catchphrases":catchphrases,
+            "dismissed":dismissed,
             "unresolved":unresolved,
-            "errors":continuity_errors
+            "errors":continuity_errors,
+            "recalledSources":evidence_history.iter().filter_map(|entry| entry.get("source")).collect::<Vec<_>>()
         });
         continuity_held = unresolved;
-        craft_skills["proseReview"] = json!({
-            "findings":findings.len(),
-            "codes":findings.iter().map(|finding| finding["code"].clone()).collect::<Vec<_>>(),
-            "repeatedPhrases":repeated.len(),
-            "ruleCodes":rules.iter().map(|rule| rule["code"].clone()).collect::<Vec<_>>(),
-            "editsApplied":if discarded.is_null() { applied } else { 0 },
-            "discarded":discarded,
-            "rewriteError":rewrite_error,
-            "detailFindings":detail_count,
-            "overusedDetails":running_details,
-            "reviewError":review.get("reviewError")
-        });
-        if let Some(writing) = &craft_writing {
-            craft_skills["proseReview"]["rhythmNotes"] = json!(writing
-                .style_card
-                .as_ref()
-                .map(|card| crate::chapter_craft::rhythm_notes(&body, card))
-                .unwrap_or_default());
+        if !rechecking_saved_prose {
+            craft_skills["proseReview"] = json!({
+                "findings":findings.len(),
+                "codes":findings.iter().map(|finding| finding["code"].clone()).collect::<Vec<_>>(),
+                "repeatedPhrases":repeated.len(),
+                "ruleCodes":rules.iter().map(|rule| rule["code"].clone()).collect::<Vec<_>>(),
+                "editsApplied":if discarded.is_null() { applied } else { 0 },
+                "discarded":discarded,
+                "rewriteError":rewrite_error,
+                "detailFindings":detail_count,
+                "overusedDetails":running_details,
+                "reviewError":review.get("reviewError")
+            });
+            if let Some(writing) = &craft_writing {
+                craft_skills["proseReview"]["rhythmNotes"] = json!(writing
+                    .style_card
+                    .as_ref()
+                    .map(|card| crate::chapter_craft::rhythm_notes(&body, card))
+                    .unwrap_or_default());
+            }
         }
+    } else if review_due {
+        let review = &mut craft_skills["continuity"];
+        let mut errors = review["errors"].as_array().cloned().unwrap_or_default();
+        let deferred = json!("QC1_CONFIRMATION_EVIDENCE_DEFERRED_FOR_BUDGET");
+        if !errors.contains(&deferred) {
+            errors.push(deferred);
+        }
+        review["errors"] = json!(errors);
     }
     let body_digest = sha256_canonical(&json!(body)).map_err(|e| e.to_string())?;
     validate_candidate_evidence_range(&body, 0, body.chars().count())?;
@@ -3631,7 +4656,7 @@ fn run_chapter_production_inner(
         "payloadSchema":"chapter-candidate.r1","chapterId":chapter_id,
         "chapterPlanRef":plan_ref.clone(),"contextManifestRef":context_ref.clone(),
         "body":body.clone(),"bodyDigest":body_digest,"evidenceRanges":[],
-        "renderer":{"modelRunId":render_run_id,"capability":render_capability,"provider":render_profile.provider.clone(),"model":render_profile.model.clone()},
+        "renderer":renderer,
         "creativeEnrichment":Value::Null
     });
     let mut candidate = artifact(
@@ -3648,9 +4673,43 @@ fn run_chapter_production_inner(
     )?;
     candidate.provenance.context_manifest_ref = Some(context_ref.artifact_id.clone());
 
+    if !confirmed_continuity_blockers.is_empty() {
+        if !continuity_sources_current(
+            connection,
+            &project_id,
+            craft_skills.pointer("/continuity/recalledSources"),
+        )? {
+            block_for_recompile(connection, &project_id, &job_id, &now)?;
+            return Err("PLAN_STALE:CONTINUITY_SOURCE_CHANGED".into());
+        }
+        candidate.payload["continuityReview"] = json!({
+            "jobId":job_id,"findings":confirmed_continuity_blockers,"modelRunId":prose_run_ids.last(),
+        });
+        candidate.payload_hash =
+            sha256_canonical(&candidate.payload).map_err(|error| error.to_string())?;
+        ProductionRepository::hold_continuity_candidate(connection, &candidate, &job_id, &now)
+            .map_err(|error| error.to_string())?;
+        return Err(NARRATIVE_REVIEW_REQUIRED.into());
+    }
+    if execution_mode == "OPENING_BOOTSTRAP"
+        && gateway.enforces_chapter_length()
+        && duplicate_in_chapter(&body).is_some()
+    {
+        return Err("B08_RENDER_DUPLICATE_SPAN".into());
+    }
+    if copies_prior_chapter(&body) {
+        return Err(PRIOR_CHAPTER_COPY_ERROR.into());
+    }
+    if let Some(phrase) = signing_repetition(&body) {
+        return Err(format!("{RENDER_SIGNING_REPETITION_ERROR}:{phrase}"));
+    }
     let candidate_ref = reference(&candidate);
     update_stage(manager, connection, &project_id, &job_id, "AUDIT", &now)?;
+    save_prose("AUDIT", &body, &prose_run_ids, &craft_skills)?;
     let mut audit_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":audit_plan_view(&plan_payload),"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"auditPolicyContract":audit_contract.clone(),"candidateRef":candidate_ref.clone(),"body":body,"qualityReportRef":Value::Null});
+    if let Some(stage) = &stage_step {
+        audit_input["stageStep"] = stage.input();
+    }
     // QC-1.1: evidence is cited by the number of its sentence.
     audit_input["bodySentences"] = json!(body_sentences(&body)
         .into_iter()
@@ -3711,7 +4770,7 @@ fn run_chapter_production_inner(
             attempt_no: 1,
             repair_round: 0,
         };
-        let result = execute_production_model_with_profile(
+        let (run_id, result) = execute_production_model_with_profile_recorded(
             connection,
             gateway,
             &audit_profile,
@@ -3721,7 +4780,7 @@ fn run_chapter_production_inner(
             &now,
         )?;
         (
-            new_audit_run_id,
+            run_id,
             result
                 .parsed
                 .ok_or_else(|| "B08_AUDIT_OUTPUT_INVALID".to_string())?,
@@ -3750,9 +4809,20 @@ fn run_chapter_production_inner(
     let prepare_audit = |mut raw: Value| -> Result<Value, String> {
         let assigned = assign_audit_ids(&mut raw, &chapter_id, &known_threads);
         let mut audit_payload = normalize_audit_model_output(raw, &body);
+        hold_back(
+            &mut audit_payload,
+            assigned["unboundThreadUpdates"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .cloned(),
+        );
         audit_payload["normalization"]["assignedIds"] = assigned;
         cap_new_threads(&mut audit_payload, &known_threads);
         cap_new_facts(&mut audit_payload, &chapter_people);
+        if gateway.selects_main_event() {
+            discard_unsupported_audit_event_labels(&mut audit_payload, &body);
+        }
         let unplanned_task_ids = unplanned_task_candidate_ids(&audit_payload, &plan_payload);
         let known_task_ids = crate::repositories::narrative::NarrativeRepository::known_task_ids(
             connection,
@@ -3838,18 +4908,21 @@ fn run_chapter_production_inner(
     // decision (2026-10-19): so is an audit using an unregistered predicate,
     // with the registered ones; the policy itself stays fail-closed.
     let mut last_raw = raw_audit.clone();
-    let checked = match check_audit(last_raw.clone()) {
-        Err(error)
-            if !audit_reused
-                && (matches!(
-                    error.as_str(),
-                    "B08_AUDIT_INCOMPLETE_EVIDENCE_REBOUND"
-                        | "B08_AUDIT_INCOMPLETE_NORMALIZATION_DROPPED_CONTENT"
-                        | "B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME"
-                        | "B08_AUDIT_OPENING_CANON_REQUIRED"
-                ) || error
-                    .starts_with("B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS")) =>
-        {
+    let checked = check_audit(last_raw.clone());
+    let audit_feedback_requested = !audit_reused
+        && checked.as_ref().is_err_and(|error| {
+            matches!(
+                error.as_str(),
+                "B08_AUDIT_INCOMPLETE_EVIDENCE_REBOUND"
+                    | "B08_AUDIT_INCOMPLETE_NORMALIZATION_DROPPED_CONTENT"
+                    | "B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME"
+                    | "B08_AUDIT_OPENING_CANON_REQUIRED"
+                    | "B08_RELATION_IDENTITY_CONFLICT"
+            ) || error.starts_with("B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS")
+        });
+    let audit_feedback_deferred = audit_feedback_requested && !has_review_room(outcome_runs, 1)?;
+    let checked = match checked {
+        Err(error) if audit_feedback_requested && !audit_feedback_deferred => {
             let rerun_id = StableIdentityFactory::from_command(
                 StableIdKind::ModelRun,
                 &format!("{command_id}:audit-feedback"),
@@ -3875,6 +4948,9 @@ fn run_chapter_production_inner(
             if error == "B08_AUDIT_OPENING_CANON_REQUIRED" {
                 input["auditFeedback"]["instruction"] = json!("这是开篇三章之一，签约评估要读取本章已记下的事实，上次却一条也没有。请重新完整提取：把正文里写到的事件、人物的处境、所在、持有物和关系的变化写成 canonCandidates，每条的 evidence.sentence 指向 bodySentences 里写到它的那一句，不要返回 COMPLETE_NO_CHANGE。");
             }
+            if error == "B08_RELATION_IDENTITY_CONFLICT" {
+                input["auditFeedback"]["instruction"] = json!("上次提取复用了另一对人物或相反方向的关系编号。请保留有正文证据的事实，关系编号只能用于同一方向的同一对人物；不确定时省略 relationId，由系统分配。不要把该关系标为已有关系任务已完成。");
+            }
             let rerun_spec = ModelRunSpec {
                 model_run_id: rerun_id.clone(),
                 job_id: Some(job_id.clone()),
@@ -3891,7 +4967,7 @@ fn run_chapter_production_inner(
                 attempt_no: 2,
                 repair_round: 0,
             };
-            let result = execute_production_model_with_profile(
+            let (run_id, result) = execute_production_model_with_profile_recorded(
                 connection,
                 gateway,
                 &audit_profile,
@@ -3900,7 +4976,6 @@ fn run_chapter_production_inner(
                 input,
                 &now,
             )?;
-            audit_run_id = rerun_id;
             let rerun_raw = result
                 .parsed
                 .ok_or_else(|| "B08_AUDIT_OUTPUT_INVALID".to_string())?;
@@ -3916,6 +4991,7 @@ fn run_chapter_production_inner(
             last_raw = if lost_every_fact {
                 raw_audit.clone()
             } else {
+                audit_run_id = run_id;
                 rerun_raw.clone()
             };
             // Real run round 28: in a long-form chapter, too, an empty
@@ -3930,7 +5006,7 @@ fn run_chapter_production_inner(
                 Err(error) if error == "B08_AUDIT_INCOMPLETE_EVIDENCE_REBOUND" => {
                     // Ids first, so what is kept still names the facts it named.
                     let mut assigned = rerun_raw.clone();
-                    assign_audit_ids(&mut assigned, &chapter_id, &known_threads);
+                    let assigned_ids = assign_audit_ids(&mut assigned, &chapter_id, &known_threads);
                     let (kept, dropped) = drop_unlocatable_audit_candidates(&assigned, &body);
                     // Real run 2026-10-24: every fact was dropped and the
                     // chapter committed with no canon. A chapter is not
@@ -3940,6 +5016,14 @@ fn run_chapter_production_inner(
                     } else {
                         check_audit(kept).map(|(mut payload, extraction)| {
                             payload["normalization"]["droppedUnlocatable"] = dropped;
+                            hold_back(
+                                &mut payload,
+                                assigned_ids["unboundThreadUpdates"]
+                                    .as_array()
+                                    .into_iter()
+                                    .flatten()
+                                    .cloned(),
+                            );
                             (payload, extraction)
                         })
                     }
@@ -3951,13 +5035,391 @@ fn run_chapter_production_inner(
     };
     // LD-1 step 2: what the ledger cannot take is held back and reported; the
     // chapter commits with the rest.
-    let (mut audit_payload, extraction) = match checked {
+    let (mut audit_payload, mut extraction) = match checked {
         Ok(checked) => checked,
         Err(error) if error.starts_with("B08_") => {
             hold_back_audit_items(prepare_audit(last_raw)?, &validate_audit)?
         }
         Err(other) => return Err(other),
     };
+    if audit_feedback_deferred {
+        audit_payload["normalization"]["feedbackDeferredForBudget"] = json!(true);
+    }
+    let mut outcome_run_ids = Vec::new();
+    let mut main_event = None;
+    let needs_main_event = gateway.selects_main_event();
+    let mut verified_step = None;
+    if let Some(stage) = &stage_step {
+        let task_id = &stage.task_id;
+        let historical_sources = stage_step_history(connection, &project_id, stage)?;
+        let profile = gateway.resolve_step_profile("VERIFY_STAGE_STEP")?;
+        let mut input = json!({
+            "chapterId":chapter_id,"stageStep":stage.input(),
+            "bodySentences":crate::chapter_craft::numbered_body_sentences(&body),
+        });
+        chapter_history.extend_continuation_input(&mut input);
+        if !historical_sources.is_empty() {
+            input["priorStageSources"] = json!(historical_sources
+                .iter()
+                .map(|source| json!({
+                    "chapterNo":source.chapter_no,
+                    "sentences":crate::chapter_craft::numbered_body_sentences(&source.body),
+                }))
+                .collect::<Vec<_>>());
+            if let Some(recent) = input["recentCommittedProse"].as_array_mut() {
+                recent.retain(|entry| {
+                    !historical_sources
+                        .iter()
+                        .any(|source| entry["chapterNo"].as_i64() == Some(source.chapter_no))
+                });
+            }
+        }
+        let previous_prose = chapter_history
+            .recent
+            .iter()
+            .zip(&chapter_history.bodies)
+            .filter_map(|(chapter, body)| Some((chapter["chapterNo"].as_i64()?, body.as_str())))
+            .collect::<Vec<_>>();
+        let spec = ModelRunSpec {
+            model_run_id: StableIdentityFactory::from_command(
+                StableIdKind::ModelRun,
+                &format!("{command_id}:verify-stage-step"),
+            )?,
+            job_id: Some(job_id.clone()),
+            step_id: None,
+            provider: profile.provider.clone(),
+            model: profile.model.clone(),
+            idempotency_key: format!("{idempotency_key}:verify-stage-step"),
+            capability: "VERIFY_STAGE_STEP".into(),
+            prompt_ref: None,
+            context_manifest_ref: Some(context_ref.artifact_id.clone()),
+            budget_id: Some(production_budget_id.clone()),
+            predicted_cost_cents: 0,
+            cost_snapshot: None,
+            attempt_no: 1,
+            repair_round: 0,
+        };
+        for (index, spec) in [
+            spec.clone(),
+            follow_up_spec(&spec, ":evidence-feedback", 1)?,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if index > 0 && !has_review_room(if needs_main_event { event_runs } else { 0 }, 1)? {
+                hold_back(
+                    &mut audit_payload,
+                    [json!({
+                        "field":"taskProgressCandidates","taskId":task_id,"objective":stage.objective,
+                        "reason":"B08_STAGE_STEP_OUTCOME_UNVERIFIED","feedbackDeferredForBudget":true
+                    })],
+                );
+                break;
+            }
+            let result = execute_production_model_with_profile_once(
+                connection,
+                gateway,
+                &profile,
+                &spec,
+                "VERIFY_STAGE_STEP",
+                input.clone(),
+                &now,
+            );
+            let run_id = spec.model_run_id;
+            if DurableModelRunner::is_recorded(connection, &project_id, &run_id)
+                .map_err(|error| error.to_string())?
+            {
+                outcome_run_ids.push(run_id.clone());
+            }
+            let malformed = match result {
+                Ok(outcome) => {
+                    let Some(payload) = outcome.parsed.as_ref() else {
+                        break;
+                    };
+                    let completion = &payload["stageStepCompletion"];
+                    let claims_completion = !completion.is_null();
+                    let selection = if claims_completion {
+                        completion
+                    } else {
+                        &payload["stageStepProgress"]
+                    };
+                    if selection.is_null() {
+                        hold_back(
+                            &mut audit_payload,
+                            [json!({
+                                "field":"taskProgressCandidates","taskId":task_id,"objective":stage.objective,
+                                "reason":"B08_STAGE_STEP_OUTCOME_UNVERIFIED",
+                            })],
+                        );
+                        break;
+                    }
+                    if let Some(result) = evaluate_stage_step(
+                        stage,
+                        &body,
+                        &previous_prose,
+                        &historical_sources,
+                        selection,
+                        &chapter_id,
+                        &run_id,
+                    ) {
+                        if result.status() == "SATISFIED" {
+                            let source = result.historical_origin(connection, &project_id)?;
+                            let origin =
+                                source.map_or(chapter_id.as_str(), |source| &source.chapter_id);
+                            match validate_task_completion_claim(
+                                connection,
+                                &project_id,
+                                origin,
+                                &result.claim(),
+                                &extraction,
+                            ) {
+                                Ok(()) => {}
+                                Err(error)
+                                    if error == "B08_TASK_COMPLETION_PREDICATE_UNSATISFIED" =>
+                                {
+                                    hold_back(
+                                        &mut audit_payload,
+                                        [json!({
+                                            "field":"taskProgressCandidates","taskId":task_id,"objective":stage.objective,"reason":error
+                                        })],
+                                    );
+                                    break;
+                                }
+                                Err(error) => return Err(error),
+                            }
+                        }
+                        verified_step = Some(result);
+                        break;
+                    }
+                    input["evidenceFeedback"] = json!({
+                        "instruction":"核对 condition 编号及引文的来源章节。复核旧成果时须填写 priorStageSources 里的 sourceChapter，动作和结果都引同一章。只证明一部分时用 stageStepProgress。找不到可核实的结果时只返回 stageStepCompletion 为 null。",
+                        "previousCitations":stage_step_citations(selection).iter().map(|part| json!({
+                            "firstSentence":part["firstSentence"],"outcomeSentence":part["outcomeSentence"],
+                            "outcomeQuoteCharacters":part["outcomeQuote"].as_str().map(|text| text.chars().count()),
+                        })).collect::<Vec<_>>()
+                    });
+                    false
+                }
+                Err(error)
+                    if error.contains(crate::model_output::OFF_SPEC)
+                        || error.contains("P01_MODEL_JSON_INVALID:") =>
+                {
+                    input["outputFeedback"] = json!({
+                        "instruction":"上一份回复格式不合格。只返回 JSON。用 stageStepCompletion 或 stageStepProgress 提交一至三条简短的逐字原文；无可核实的新结果时只返回 stageStepCompletion 为 null。"
+                    });
+                    true
+                }
+                Err(error) => return Err(error),
+            };
+            if index == 1 {
+                hold_back(
+                    &mut audit_payload,
+                    [json!({
+                        "field":"taskProgressCandidates","taskId":task_id,"objective":stage.objective,
+                        "reason":"B08_STAGE_STEP_OUTCOME_UNVERIFIED","malformedReply":malformed,
+                    })],
+                );
+            }
+        }
+    }
+    let mut main_event_fact = None;
+    if needs_main_event {
+        let run_id = StableIdentityFactory::from_command(
+            StableIdKind::ModelRun,
+            &format!("{command_id}:main-event"),
+        )?;
+        let profile = audit_profile.clone();
+        let spec = ModelRunSpec {
+            model_run_id: run_id.clone(),
+            job_id: Some(job_id.clone()),
+            step_id: None,
+            provider: profile.provider.clone(),
+            model: profile.model.clone(),
+            idempotency_key: format!("{idempotency_key}:main-event"),
+            capability: "SELECT_MAIN_EVENT".into(),
+            prompt_ref: None,
+            context_manifest_ref: Some(context_ref.artifact_id.clone()),
+            budget_id: Some(production_budget_id.clone()),
+            predicted_cost_cents: 0,
+            cost_snapshot: None,
+            attempt_no: 1,
+            repair_round: 0,
+        };
+        let sentences = crate::chapter_craft::numbered_body_sentences(&body);
+        let chapter_goal = plan_payload["chapterGoal"].as_str().unwrap_or_default();
+        let mut input = json!({"chapterId":chapter_id,"bodySentences":sentences,
+            "chapterGoal":chapter_goal,
+            "plannedChange":plan_payload.pointer("/craft/situationChange/after")});
+        chapter_history.extend_continuation_input(&mut input);
+        let mut goal_reviews = Vec::new();
+        for selection_spec in [
+            spec.clone(),
+            follow_up_spec(&spec, ":evidence-feedback", 1)?,
+        ] {
+            let selected_run = execute_production_model_with_profile_once(
+                connection,
+                gateway,
+                &profile,
+                &selection_spec,
+                "SELECT_MAIN_EVENT",
+                input.clone(),
+                &now,
+            );
+            let run_id = selection_spec.model_run_id;
+            if DurableModelRunner::is_recorded(connection, &project_id, &run_id)
+                .map_err(|error| error.to_string())?
+            {
+                outcome_run_ids.push(run_id.clone());
+            }
+            let mut returned_selection = None;
+            let selected = match selected_run {
+                Ok(outcome) => {
+                    returned_selection = outcome.parsed;
+                    returned_selection.as_ref().map(|value| {
+                        if let Some(mut review) =
+                            bind_chapter_goal_review(chapter_goal, &body, &value["goalReview"])
+                        {
+                            review["modelRunId"] = json!(run_id);
+                            goal_reviews.push(review);
+                        }
+                        if value["eventType"] == "GAIN" && input.get("allowedEventTypes").is_some()
+                        {
+                            return Err("EVENT_GAIN_WITHOUT_ACQUISITION".into());
+                        }
+                        if let Some(excluded) =
+                            input.pointer("/selectionFeedback/excludedOutcomeSentence")
+                        {
+                            if value["firstSentence"].is_number()
+                                && &value["outcomeSentence"] == excluded
+                            {
+                                return Err("EVENT_REUSED_REJECTED_OUTCOME".into());
+                            }
+                        }
+                        select_main_event_evidence(&body, value)
+                    })
+                }
+                Err(error)
+                    if error.contains("UNKNOWN_REMOTE_OUTCOME")
+                        || error.contains("BUDGET_EXCEEDED") =>
+                {
+                    return Err(error)
+                }
+                Err(_) => None,
+            };
+            match selected {
+                Some(Ok(Some(event))) => {
+                    main_event_fact = extraction
+                        .canon_candidates
+                        .iter()
+                        .find(|item| {
+                            item.event_type.as_deref() == Some(event.event_type.as_str())
+                                && item.evidence.start == event.evidence.start
+                                && item.evidence.end == event.evidence.end
+                                && item.evidence.quote == event.evidence.quote
+                        })
+                        .map(|item| item.fact_id.clone());
+                    let event_id = main_event_fact.as_ref().map_or_else(
+                        || format!("event:{final_id}:main"),
+                        |fact_id| format!("event:{fact_id}"),
+                    );
+                    audit_payload["normalization"]["mainEventSelection"] = json!({
+                        "modelRunId":run_id,"eventId":event_id,
+                        "eventType":event.event_type,"outcomeQuote":event.outcome_quote,
+                        "evidence":event.evidence.to_json()
+                    });
+                    if let Some(fact_id) = &main_event_fact {
+                        audit_payload["normalization"]["mainEventSelection"]["factId"] =
+                            json!(fact_id);
+                    }
+                    main_event = Some((event_id, event, run_id));
+                    break;
+                }
+                Some(Ok(None)) if selection_spec.attempt_no == 1 => break,
+                Some(Err(reason)) if selection_spec.attempt_no == 1 => {
+                    let instruction = match reason.as_str() {
+                        "EVENT_QUOTE_NOT_FOUND" => "上次的引文与原文对不上。查看原句编号，复制同一句或相邻两句的原文，不要翻译或添字。",
+                        "EVENT_ACTION_ORDER_INVALID" => "上次的句子编号顺序或间距不合法。请选择一至三句连续原文，从第一句到结果句。",
+                        "EVENT_GAIN_WITHOUT_ACQUISITION" => "上次标为 GAIN，但原文没有显示获得或转交。此次只在 allowedEventTypes 中选。揭示新信息用 DISCOVERY 或 REVEAL，物体或人的状态确实改变用 SITUATION_CHANGE。",
+                        "EVENT_RESULT_IS_REACTION" => "上次引用的只有人物反应。选正文里实际发生的决定、获得的情报或改变的状态。",
+                        "EVENT_RESULT_IS_FORECAST" => "上次引用的是预期将发生的事。选择正文已经出现的结果，并引用写到该结果的原句。",
+                        _ => "选择有明确结果的事件，核对原文和句子编号后作答。",
+                    };
+                    let mut feedback = json!({
+                        "reason":reason,"instruction":instruction,"previousSelection":returned_selection
+                    });
+                    if let Some(number) =
+                        rejected_numbered_event_outcome(&feedback["previousSelection"], &reason)
+                    {
+                        feedback["excludedOutcomeSentence"] = json!(number);
+                    }
+                    input["selectionFeedback"] = feedback;
+                    if reason == "EVENT_GAIN_WITHOUT_ACQUISITION" {
+                        input["allowedEventTypes"] = json!(MAIN_EVENT_TYPES
+                            .iter()
+                            .copied()
+                            .filter(|event_type| *event_type != "GAIN")
+                            .collect::<Vec<_>>());
+                    }
+                }
+                _ => {
+                    hold_back(
+                        &mut audit_payload,
+                        [json!({"field":"events","reason":"QC1_MAIN_EVENT_SELECTION_FAILED"})],
+                    );
+                    break;
+                }
+            }
+        }
+        let mut assessment = match goal_reviews.first() {
+            Some(first)
+                if goal_reviews.iter().all(|review| {
+                    review["status"] == first["status"] && review["missing"] == first["missing"]
+                }) =>
+            {
+                first.clone()
+            }
+            Some(_) => json!({"status":"UNVERIFIED","reason":"B08_CHAPTER_GOAL_REVIEW_DISAGREES"}),
+            None => {
+                json!({"status":"UNVERIFIED","reason":"B08_CHAPTER_GOAL_REVIEW_MISSING_OR_UNBOUND"})
+            }
+        };
+        assessment["ruleVersion"] = json!("chapter-goal.r1");
+        assessment["chapterGoal"] = json!(chapter_goal);
+        assessment["chapterPlanRef"] = json!(plan_ref);
+        assessment["bodyDigest"] = candidate.payload["bodyDigest"].clone();
+        if assessment["status"] != "SUPPORTED" {
+            hold_back(
+                &mut audit_payload,
+                [json!({
+                    "field":"chapterGoalReview","status":assessment["status"],
+                    "missing":assessment["missing"],"reason":"B08_CHAPTER_GOAL_NOT_VERIFIED"
+                })],
+            );
+        }
+        audit_payload["normalization"]["chapterGoalReview"] = assessment;
+    }
+    if gateway.selects_main_event() {
+        apply_stage_step_verification(&mut extraction, stage_step.as_ref(), verified_step.as_ref());
+        audit_payload["taskProgressCandidates"] = json!(extraction.task_progress_candidates);
+        relabel_audit_completeness(&mut audit_payload);
+        if let Some(stage) = &stage_step {
+            let status = verified_step
+                .as_ref()
+                .map_or("UNVERIFIED", VerifiedStageStep::status);
+            audit_payload["normalization"]["stageStepVerification"] = json!({
+                "taskId":stage.task_id,"objective":stage.objective,"status":status,
+                "outcomeRules":stage_step_rules(&stage.objective),
+                "rulesDigest":plan_payload["stageStepRulesDigest"],
+                "modelRunId":verified_step.as_ref().map(|result| &result.model_run_id),
+                "currentChapterEvidence":verified_step.as_ref().is_some_and(VerifiedStageStep::has_current_evidence),
+                "evidenceParts":verified_step.as_ref().map(|result| &result.progress.evidence_parts),
+                "remainingObjectives":verified_step.as_ref().map(|result| result.progress.remaining_objectives.clone())
+                    .unwrap_or_else(|| stage.progress.as_ref()
+                        .map(|progress| progress.remaining_objectives.clone())
+                        .unwrap_or_else(|| stage_step_objectives(&stage.objective))),
+            });
+        }
+    }
     if !extraction.dropped_unbound_knowledge.is_empty() {
         audit_payload["normalization"]["droppedUnboundKnowledge"] =
             json!(extraction.dropped_unbound_knowledge);
@@ -4048,7 +5510,7 @@ fn run_chapter_production_inner(
     let mut obligation_delta = Vec::new();
     let mut foreshadow_delta = Vec::new();
     let mut decision_updates = Vec::new();
-    let held = audit_payload
+    let mut held = audit_payload
         .pointer("/normalization/heldBack")
         .and_then(Value::as_array)
         .into_iter()
@@ -4056,14 +5518,6 @@ fn run_chapter_production_inner(
         .cloned()
         .chain(continuity_held)
         .collect::<Vec<_>>();
-    if !held.is_empty() {
-        decision_updates.push(audit_reminder(
-            &final_id,
-            &chapter_id,
-            chapter_number,
-            &held,
-        )?);
-    }
     let mut change_request_artifacts = Vec::new();
     let mut change_request_heads = Vec::new();
     let mut obligation_evidence_records = Vec::new();
@@ -4099,7 +5553,7 @@ fn run_chapter_production_inner(
             if obligation.obligation_type == "MYSTERY"
                 && matches!(item.disposition.as_str(), "RESOLVE" | "RESOLVED")
             {
-                resolved_mysteries.push(authority_id.to_owned());
+                resolved_mysteries.push((authority_id.to_owned(), item.evidence.clone()));
             }
             let lifecycle = match item.disposition.as_str() {
                 "RESOLVE" | "RESOLVED" => "RESOLVED",
@@ -4306,7 +5760,57 @@ fn run_chapter_production_inner(
             effective_continuity_refs.insert(item.thread_ref.clone());
         }
     }
-    let evidence_records = extraction
+    // A mystery event may use only a fact citing the same passage as the
+    // mystery resolution; never relabel an unrelated fact as an event.
+    let (event_marks, missing_mysteries) =
+        resolved_mystery_event_marks(&extraction.canon_candidates, &resolved_mysteries);
+    for mystery in missing_mysteries {
+        held.push(json!({"field":"events","item":{"mysteryId":mystery},"reason":"QC1_MYSTERY_EVENT_MISSING"}));
+    }
+    if (needs_main_event
+        || (!extraction.canon_candidates.is_empty()
+            && !extraction
+                .canon_candidates
+                .iter()
+                .any(|item| item.event_type.is_some())
+            && event_marks.is_empty()))
+        && main_event.is_none()
+    {
+        held.push(json!({"field":"events","item":{"chapterId":chapter_id},"reason":"QC1_MAIN_EVENT_MISSING"}));
+    }
+    if !held.is_empty() {
+        decision_updates.push(audit_reminder(
+            &final_id,
+            &chapter_id,
+            chapter_number,
+            &held,
+        )?);
+    }
+    // Only a relation whose object is a known entity can be committed and
+    // bound to chapter evidence. The audit identity check has already run.
+    let audit_entities = extraction
+        .canon_candidates
+        .iter()
+        .filter_map(|item| item.entity_id.as_deref())
+        .collect::<BTreeSet<_>>();
+    let mut relation_ids = BTreeMap::new();
+    for item in &extraction.canon_candidates {
+        let Some(relation_id) = candidate_relation_id(item) else {
+            continue;
+        };
+        let object = item.object_json["objectId"].as_str().unwrap_or_default();
+        if audit_entities.contains(object)
+            || crate::repositories::narrative::NarrativeRepository::canon_entity_exists(
+                connection,
+                &project_id,
+                object,
+            )
+            .map_err(|error| error.to_string())?
+        {
+            relation_ids.insert(item.fact_id.clone(), relation_id);
+        }
+    }
+    let mut evidence_records = extraction
         .canon_candidates
         .iter()
         .enumerate()
@@ -4314,7 +5818,8 @@ fn run_chapter_production_inner(
             json!({
                 "evidenceId":format!("evidence:{}:{}", final_id, index + 1),
                 "factId":item.fact_id,
-                "eventId":item.event_type.as_ref().map(|_| format!("event:{}", item.fact_id)),
+                "relationId":relation_ids.get(&item.fact_id),
+                "eventId":(item.event_type.is_some() || event_marks.contains_key(&item.fact_id)).then(|| format!("event:{}", item.fact_id)),
                 "quote":item.evidence.quote,
                 "rangeStart":item.evidence.start,
                 "rangeEnd":item.evidence.end,
@@ -4322,7 +5827,42 @@ fn run_chapter_production_inner(
             })
         })
         .collect::<Vec<_>>();
+    if let Some((event_id, event, model_run_id)) = &main_event {
+        if let Some(fact_id) = &main_event_fact {
+            let record = evidence_records
+                .iter_mut()
+                .find(|record| record["factId"] == *fact_id)
+                .ok_or("B08_MAIN_EVENT_FACT_EVIDENCE_MISSING")?;
+            record["eventType"] = json!(event.event_type);
+            record["modelRunId"] = json!(model_run_id);
+            record["outcomeQuote"] = json!(event.outcome_quote);
+        } else {
+            evidence_records.push(json!({
+                "evidenceId":format!("evidence:{final_id}:main-event"),
+                "eventId":event_id,"eventType":event.event_type,"modelRunId":model_run_id,
+                "outcomeQuote":event.outcome_quote,"quote":event.evidence.quote,
+                "rangeStart":event.evidence.start,"rangeEnd":event.evidence.end,
+                "evidenceType":"ACTUAL_NARRATIVE"
+            }));
+        }
+    }
     let final_payload = json!({"payloadSchema":"final-chapter.r1","chapterId":chapter_id,"body":candidate.payload["body"],"bodyDigest":candidate.payload["bodyDigest"],"candidateRef":candidate_ref.clone(),"chapterPlanRef":plan_ref.clone(),"contextManifestRef":context_ref.clone(),"auditRef":reference(&audit),"qualityReportRef":Value::Null,"tasteProfileRef":Value::Null,"wordCount":candidate.payload["body"].as_str().map(|s| s.chars().count()).unwrap_or(0),"stateDigest":state_digest,"validatedEvidence":evidence_records,"validatedObligationEvidence":obligation_evidence_records,"newResponsibilityEvidence":new_responsibility_evidence});
+    let mut proof_sources = BTreeMap::new();
+    if let Some(result) = &verified_step {
+        for source in result
+            .progress
+            .evidence_parts
+            .iter()
+            .filter_map(|part| part.source.as_ref())
+        {
+            proof_sources.insert(
+                source.final_ref.artifact_id.clone(),
+                source.final_ref.clone(),
+            );
+        }
+    }
+    let mut final_dependencies = vec![candidate_ref.clone(), reference(&audit)];
+    final_dependencies.extend(proof_sources.values().cloned());
     let mut final_artifact = artifact(
         &project_id,
         final_id,
@@ -4333,21 +5873,38 @@ fn run_chapter_production_inner(
         &job_id,
         Some(&render_run_id),
         &now,
-        vec![candidate_ref.clone(), reference(&audit)],
+        final_dependencies,
     )?;
     final_artifact.provenance.context_manifest_ref = Some(context_ref.artifact_id.clone());
-    let task_states = extraction.task_progress_candidates.iter().map(|item| json!({
-        "taskId":item.task_id,
-        "status":item.status,
-        "evidenceRefs":[{"artifactId":final_artifact.artifact_id,"version":1,"rangeStart":item.evidence.start,"rangeEnd":item.evidence.end,"quote":item.evidence.quote}],
-        "remainingConditions":[]
-    })).collect::<Vec<_>>();
-    let canon_event_refs = extraction
+    let stored_progress = verified_step
+        .as_ref()
+        .map(|result| result.recorded_progress(&chapter_id, &reference(&final_artifact)));
+    let mut task_states = extraction.task_progress_candidates.iter()
+        .filter(|item| verified_step.as_ref().is_none_or(|result| result.task_id != item.task_id))
+        .map(|item| {
+            json!({"taskId":item.task_id,"status":item.status,
+                "evidenceRefs":[task_evidence_ref(&item.evidence, &final_artifact.artifact_id, final_artifact.version)],
+                "remainingConditions":[]})
+        }).collect::<Vec<_>>();
+    let stage_origin = if let (Some(result), Some(progress)) = (&verified_step, &stored_progress) {
+        let (references, remaining) = stage_step_proof_fields(progress);
+        task_states.push(json!({"taskId":result.task_id,"status":result.status(),
+            "evidenceRefs":references,"remainingConditions":remaining}));
+        result.historical_origin(connection, &project_id)?
+    } else {
+        None
+    };
+    let mut canon_event_refs = extraction
         .canon_candidates
         .iter()
-        .filter(|item| item.event_type.is_some())
+        .filter(|item| item.event_type.is_some() || event_marks.contains_key(&item.fact_id))
         .map(|item| format!("event:{}", item.fact_id))
         .collect::<Vec<_>>();
+    if let Some((event_id, _, _)) = &main_event {
+        if !canon_event_refs.contains(event_id) {
+            canon_event_refs.push(event_id.clone());
+        }
+    }
     let exit_payload = json!({"payloadSchema":"chapter-exit-state.r1","chapterId":chapter_id,"closedAt":now,"stateDigest":state_digest,"activeThreadRefs":extraction.continuity_candidates.iter().filter(|item| item.disposition != "RESOLVED" && effective_continuity_refs.contains(&item.thread_ref)).map(|item| item.thread_ref.clone()).collect::<Vec<_>>(),"taskStates":task_states,"canonEventRefs":canon_event_refs,"evidenceRefs":[]});
     let exit_artifact = artifact(
         &project_id,
@@ -4412,10 +5969,9 @@ fn run_chapter_production_inner(
                 (state.state_id, status)
             })
             .collect::<BTreeMap<_, _>>();
-        let audit_status_by_id = extraction
-            .task_progress_candidates
+        let audit_status_by_id = task_states
             .iter()
-            .map(|candidate| (candidate.task_id.as_str(), candidate.status.as_str()))
+            .filter_map(|task| Some((task["taskId"].as_str()?, task["status"].as_str()?)))
             .collect::<BTreeMap<_, _>>();
         route_tasks
             .iter()
@@ -4554,6 +6110,7 @@ fn run_chapter_production_inner(
             }),
     );
     let mut model_run_refs = vec![render_run_id.clone(), audit_run_id.clone()];
+    model_run_refs.extend(outcome_run_ids);
     model_run_refs.extend(prose_run_ids.iter().cloned());
     let mut receipt_payload = json!({"payloadSchema":"production-receipt.r1","executionMode":execution_mode,"projectId":project_id,"chapterId":chapter_id,"jobId":job_id,"contextManifestRef":context_ref,"chapterPlanRef":plan_ref.clone(),"gatePolicyRef":policy_ref.clone(),"canonSemanticPolicyVersion":gate_policy_payload.pointer("/canonSemantics/policyVersion").and_then(Value::as_str),"threadPromotionRuleVersion":crate::narrative::THREAD_PROMOTION_RULE_VERSION,"candidateRef":candidate_ref.clone(),"finalChapterRef":reference(&final_artifact),"auditRef":reference(&audit),"qualityReportRef":Value::Null,"tasteProfileRef":Value::Null,"creativeEnrichment":Value::Null,"modelRunRefs":model_run_refs,"reconciliation":reconciliation,"reality":reality,"threadPromotionDecisions":thread_promotion_decisions,"craftSkills":craft_skills});
     if craft_writing.is_some() {
@@ -4590,63 +6147,6 @@ fn run_chapter_production_inner(
     heads.extend(change_request_heads);
     let mut bundle_artifacts = Vec::new();
     let final_ref = reference(&final_artifact);
-    // P1 (real run round 23): a relation's object must be an entity, one
-    // this chapter records or one already recorded; a fact about someone
-    // named only by a title stays a fact.
-    let audit_entities = extraction
-        .canon_candidates
-        .iter()
-        .filter_map(|item| item.entity_id.as_deref())
-        .collect::<BTreeSet<_>>();
-    let mut relation_ids = BTreeMap::new();
-    for item in &extraction.canon_candidates {
-        let Some(relation_id) = candidate_relation_id(item) else {
-            continue;
-        };
-        let object = item.object_json["objectId"].as_str().unwrap_or_default();
-        if audit_entities.contains(object)
-            || crate::repositories::narrative::NarrativeRepository::canon_entity_exists(
-                connection,
-                &project_id,
-                object,
-            )
-            .map_err(|error| error.to_string())?
-        {
-            relation_ids.insert(item.fact_id.clone(), relation_id);
-        }
-    }
-    // P1 (real runs rounds 26-27: 455 facts, not one marked as an event):
-    // Without an event from the audit, the first fact supplies a provisional
-    // situation-change marker. Its description must be sourced from the
-    // cited passage, not the plan. A resolved mystery marks the next fact.
-    let has_event = extraction
-        .canon_candidates
-        .iter()
-        .any(|item| item.event_type.is_some());
-    let marks = (!has_event)
-        .then_some(("SITUATION_CHANGE", Value::Null))
-        .into_iter()
-        .chain(
-            resolved_mysteries
-                .iter()
-                .map(|mystery| ("MYSTERY_RESOLVED", json!({"mysteryId":mystery}))),
-        );
-    let event_marks = extraction
-        .canon_candidates
-        .iter()
-        .filter(|item| item.event_type.is_none())
-        .zip(marks)
-        .map(|(item, (kind, payload))| {
-            let payload = if kind == "SITUATION_CHANGE" {
-                json!({"description":item.evidence.quote.chars().take(160).collect::<String>(),
-                    "descriptionSource":"evidence_quote", "descriptionTruncated":item.evidence.quote.chars().count() > 160,
-                    "eventTypeSource":"fallback_fact"})
-            } else {
-                payload
-            };
-            (item.fact_id.clone(), (kind, payload))
-        })
-        .collect::<BTreeMap<_, _>>();
     // Relations last, after the facts that record their entities.
     let mut canon_candidates = extraction.canon_candidates.iter().collect::<Vec<_>>();
     canon_candidates.sort_by_key(|item| relation_ids.contains_key(&item.fact_id));
@@ -4657,7 +6157,9 @@ fn run_chapter_production_inner(
         "predicate":item.predicate,
         "objectJson":item.object_json,
         "authorityLevel":item.authority_level,
-        "eventType":item.event_type.as_deref().or_else(|| event_marks.get(&item.fact_id).map(|mark| mark.0)),
+        "eventType":if main_event_fact.as_ref() == Some(&item.fact_id) {None} else {
+            item.event_type.as_deref().or_else(|| event_marks.get(&item.fact_id).map(|mark| mark.0))
+        },
         "relationId":relation_ids.get(&item.fact_id),
         "validFromChapterId":chapter_id,
         "payloadJson":{
@@ -4683,18 +6185,23 @@ fn run_chapter_production_inner(
         "fromChapterId":chapter_id,
         "payloadJson":{"sourceArtifactId":final_ref.artifact_id,"sourceVersion":final_ref.version}
     })).collect::<Vec<_>>();
-    let state_delta = extraction.task_progress_candidates.iter().map(|item| json!({
-        "stateId":item.task_id,
-        "stateType":"volume.task.progress",
-        "chapterId":chapter_id,
-        "valueJson":{
-            "taskId":item.task_id,
-            "status":item.status,
-            "evidenceRefs":[{"artifactId":final_ref.artifact_id,"version":final_ref.version,"rangeStart":item.evidence.start,"rangeEnd":item.evidence.end,"quote":item.evidence.quote}],
-            "remainingConditions":[]
-        },
-        "payloadJson":{"actualNarrative":true,"sourceArtifactId":final_ref.artifact_id,"sourceVersion":final_ref.version}
-    })).collect::<Vec<_>>();
+    let state_delta = task_states.iter().map(|task| {
+        let mut payload = json!({"actualNarrative":true,"sourceArtifactId":final_ref.artifact_id,"sourceVersion":final_ref.version});
+        let mut occurrence_chapter = chapter_id.as_str();
+        if let Some(progress) = stored_progress.as_ref().filter(|_| {
+            verified_step.as_ref().is_some_and(|result| task["taskId"] == result.task_id)
+        }) {
+            payload["stageStepProgress"] = json!(progress);
+            if let Some(source) = stage_origin {
+                occurrence_chapter = &source.chapter_id;
+                payload["sourceArtifactId"] = json!(source.final_ref.artifact_id);
+                payload["sourceVersion"] = json!(source.final_ref.version);
+                payload["verificationChapterId"] = json!(chapter_id);
+            }
+        }
+        json!({"stateId":task["taskId"],"stateType":"volume.task.progress",
+            "chapterId":occurrence_chapter,"valueJson":task,"payloadJson":payload})
+    }).collect::<Vec<_>>();
     bundle_artifacts.push(candidate);
     bundle_artifacts.extend([audit, final_artifact, exit_artifact, receipt_artifact]);
     bundle_artifacts.extend(change_request_artifacts);
@@ -4703,6 +6210,18 @@ fn run_chapter_production_inner(
     } else {
         plan_ref.payload_hash.clone()
     };
+    let mut dependency_edges = vec![json!({
+        "edgeId":format!("edge:{}:plan",final_ref.artifact_id),"sourceRef":plan_ref.artifact_id,
+        "targetRef":final_ref.artifact_id,"dependencyType":"PLAN_INPUT","scope":"CHAPTER",
+        "impactClass":"HARD","sourceHash":dependency_source_hash,
+        "payloadJson":{"createdBy":"B08::ChapterProductionRuntime"}
+    })];
+    dependency_edges.extend(proof_sources.values().map(|source| json!({
+        "edgeId":format!("edge:{}:stage-step:{}",final_ref.artifact_id,source.artifact_id),
+        "sourceRef":source.artifact_id,"targetRef":final_ref.artifact_id,"dependencyType":"STATE_INPUT",
+        "scope":"CHAPTER","impactClass":"HARD","sourceHash":source.payload_hash,
+        "payloadJson":{"createdBy":"B08::ChapterProductionRuntime","sourceVersion":source.version}
+    })));
     let mut bundle: CommitBundle = serde_json::from_value(json!({
         "commitId":format!("commit:{command_id}"),"projectId":project_id,"commandId":command_id,"idempotencyKey":idempotency_key,
         "expectedProjectRevision":current_revision,"contractVersion":"m0a.v1","createdAt":now,
@@ -4713,7 +6232,7 @@ fn run_chapter_production_inner(
         "foreshadowDelta":foreshadow_delta,
         "decisionUpdates":decision_updates,
         "stateDelta":state_delta,
-        "dependencyEdges":[{"edgeId":format!("edge:{}:plan",final_ref.artifact_id),"sourceRef":plan_ref.artifact_id,"targetRef":final_ref.artifact_id,"dependencyType":"PLAN_INPUT","scope":"CHAPTER","impactClass":"HARD","sourceHash":dependency_source_hash,"payloadJson":{"createdBy":"B08::ChapterProductionRuntime"}}],
+        "dependencyEdges":dependency_edges,
         "jobUpdates":[{"jobId":job_id,"status":"COMPLETED","currentStage":"COMPLETED","attemptNo":1}],
         "gateCertificates":[certificate],"receiptDraft":{"domain":"B08_CHAPTER_PRODUCTION","artifactRefs":[],"payload":{"executionMode":execution_mode,"chapterId":chapter_id,"reconciliation":reconciliation,"droppedUnboundKnowledge":extraction.dropped_unbound_knowledge}}
     })).map_err(|error| format!("B08_BUNDLE_INVALID:{error}"))?;
@@ -4803,6 +6322,90 @@ fn run_chapter_production_inner(
     Ok(
         json!({"commandId":command_id,"projectId":project_id,"finalStatus":"committed","message":if planning_projection_status=="UPDATED" {"B08 章节已完成原子提交"} else {"B08 章节已提交，B09 投影待维护重试"},"stage":"COMPLETED","executionMode":execution_mode,"jobId":job_id,"candidateRef":candidate_ref,"finalChapterRef":final_ref,"planningProjectionStatus":planning_projection_status,"healthProjectionStatus":if health_projection_ready {"READY"} else {"DIRTY_OR_UNAVAILABLE"},"planningProjectionError":planning_projection_error,"reconciliationExecution":reconciliation_execution,"receipt":receipt}),
     )
+}
+
+/// Use the same sentence numbers as the writer input. A span boundary inside
+/// a quotation or at the chapter ending is unavailable for inserting prose.
+fn chapter_expansion_anchors(body: &str) -> BTreeMap<usize, usize> {
+    let spans = crate::chapter_craft::sentence_spans(body);
+    let mut anchors = BTreeMap::new();
+    let mut quote_ends = Vec::new();
+    let mut scanned = 0;
+    for (number, &(_, end)) in spans.iter().take(spans.len().saturating_sub(1)).enumerate() {
+        for character in body[scanned..end].chars() {
+            if quote_ends.last() == Some(&character) {
+                quote_ends.pop();
+            } else if let Some(closing) = match character {
+                '“' => Some('”'),
+                '‘' => Some('’'),
+                '「' => Some('」'),
+                '『' => Some('』'),
+                '"' => Some('"'),
+                _ => None,
+            } {
+                quote_ends.push(closing);
+            }
+        }
+        scanned = end;
+        if quote_ends.is_empty() {
+            anchors.insert(number, end);
+        }
+    }
+    anchors
+}
+
+/// Salvage inserts from an otherwise valid patch, keeping each edit anchored
+/// to the original draft. The merged result still goes through prose review.
+fn retain_nonduplicating_insertions(
+    body: &str,
+    insertions: &Value,
+    anchors: &BTreeMap<usize, usize>,
+) -> Option<String> {
+    let mut selected = Vec::new();
+    let mut result = None;
+    for insertion in insertions.as_array()? {
+        selected.push(insertion.clone());
+        let trial = insert_chapter_passages(body, &json!(&selected), anchors)?;
+        if crate::chapter_craft::duplicate_in_chapter(&trial).is_some() {
+            selected.pop();
+        } else {
+            result = Some(trial);
+        }
+    }
+    result
+}
+
+fn insert_chapter_passages(
+    body: &str,
+    insertions: &Value,
+    anchors: &BTreeMap<usize, usize>,
+) -> Option<String> {
+    let insertions = insertions.as_array()?;
+    if !(1..=EXPANSION_PASSAGES).contains(&insertions.len()) {
+        return None;
+    }
+    let mut edits = BTreeMap::new();
+    for insertion in insertions {
+        let number = usize::try_from(insertion["afterSentence"].as_u64()?).ok()?;
+        let position = *anchors.get(&number)?;
+        let text = crate::chapter_craft::normalize_typography(insertion["text"].as_str()?.trim());
+        if text.trim().is_empty()
+            || text.chars().count() > EXPANSION_PASSAGE_MAX_CHARS
+            || edits.insert(position, text).is_some()
+        {
+            return None;
+        }
+    }
+    let mut result = body.to_owned();
+    for (position, text) in edits.into_iter().rev() {
+        let separator = if body[position..].starts_with(['\n', '\r']) {
+            ""
+        } else {
+            "\n\n"
+        };
+        result.insert_str(position, &format!("\n\n{text}{separator}"));
+    }
+    Some(result)
 }
 
 pub fn validate_candidate_evidence_range(
@@ -4900,6 +6503,1039 @@ struct EvidenceSpan {
     quote: String,
     #[serde(default)]
     rebound: bool,
+}
+
+struct SelectedNarrativeEvent {
+    event_type: String,
+    evidence: EvidenceSpan,
+    outcome_quote: String,
+}
+
+const MAIN_EVENT_TYPES: &[&str] = &[
+    "DISCOVERY",
+    "CONFRONTATION",
+    "LOSS",
+    "GAIN",
+    "REVEAL",
+    "BETRAYAL",
+    "ALLIANCE",
+    "DEATH",
+    "SITUATION_CHANGE",
+];
+
+fn rejected_numbered_event_outcome(selection: &Value, reason: &str) -> Option<u64> {
+    if selection["firstSentence"].is_number()
+        && matches!(
+            reason,
+            "EVENT_SELECTION_INVALID" | "EVENT_RESULT_IS_REACTION" | "EVENT_RESULT_IS_FORECAST"
+        )
+    {
+        selection["outcomeSentence"].as_u64()
+    } else {
+        None
+    }
+}
+
+pub(crate) fn is_main_event_type(value: &str) -> bool {
+    MAIN_EVENT_TYPES.contains(&value)
+}
+
+fn discard_unsupported_audit_event_labels(audit: &mut Value, body: &str) {
+    let mut deferred = Vec::new();
+    for item in audit["canonCandidates"]
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+    {
+        let Some(event_type) = item["eventType"]
+            .as_str()
+            .filter(|value| is_main_event_type(value))
+        else {
+            continue;
+        };
+        let supported = item.pointer("/evidence/quote").and_then(Value::as_str).is_some_and(|quote| {
+            let Some((first, last)) = crate::chapter_craft::numbered_passage_range(body, quote) else {
+                return false;
+            };
+            select_main_event_evidence(body, &json!({
+                "actionSentence":first,"outcomeSentence":last,"outcomeQuote":quote,"eventType":event_type
+            })).is_ok_and(|event| event.is_some())
+        });
+        if !supported {
+            deferred.push(json!({"factId":item["factId"],"eventType":event_type,
+                "reason":"QC1_AUDIT_EVENT_OUTCOME_UNSUPPORTED"}));
+            item.as_object_mut()
+                .expect("event annotation is an object")
+                .remove("eventType");
+        }
+    }
+    if !deferred.is_empty() {
+        audit["normalization"]["unsupportedAuditEvents"] = json!(deferred);
+    }
+}
+
+fn bind_chapter_goal_review(goal: &str, body: &str, review: &Value) -> Option<Value> {
+    let status = review["status"].as_str()?;
+    let missing = match review.get("missing") {
+        Some(Value::Null) | None => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .filter(|gap| (2..=160).contains(&gap.chars().count()) && goal.contains(gap))?,
+        ),
+    };
+    let citations = review["citations"].as_array()?;
+    let legal_shape = match status {
+        "SUPPORTED" => missing.is_none() && (1..=3).contains(&citations.len()),
+        "PARTIAL" => missing.is_some() && (1..=3).contains(&citations.len()),
+        "NOT_SHOWN" => missing.is_some() && citations.is_empty(),
+        _ => false,
+    };
+    if !legal_shape {
+        return None;
+    }
+    let sentences = crate::chapter_craft::sentence_spans(body);
+    let evidence = citations
+        .iter()
+        .map(|citation| {
+            let number = usize::try_from(citation["sentence"].as_u64()?).ok()?;
+            let (start, end) = *sentences.get(number)?;
+            let quote = citation["quote"].as_str()?;
+            if !(4..=160).contains(&quote.chars().count()) {
+                return None;
+            }
+            let sentence = &body[start..end];
+            let mut matches = sentence.match_indices(quote);
+            let (offset, _) = matches.next()?;
+            if matches.next().is_some() {
+                return None;
+            }
+            let range_start = body[..start + offset].chars().count();
+            Some(json!({"sentence":number,"start":range_start,
+            "end":range_start + quote.chars().count(),"quote":quote}))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(json!({"status":status,"missing":missing,"evidence":evidence}))
+}
+
+fn select_main_event_evidence(
+    body: &str,
+    selection: &Value,
+) -> Result<Option<SelectedNarrativeEvent>, String> {
+    const INVALID: &str = "EVENT_SELECTION_INVALID";
+    let numbered;
+    let mut numbered_range = None;
+    let selection = if let Some(first) = selection.get("firstSentence") {
+        let outcome = selection.get("outcomeSentence").ok_or(INVALID)?;
+        let event_type = selection.get("eventType").ok_or(INVALID)?;
+        if first.is_null() && outcome.is_null() && event_type.is_null() {
+            return Ok(None);
+        }
+        let index = |value: &Value| {
+            value
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or(INVALID)
+        };
+        let (first, outcome) = (index(first)?, index(outcome)?);
+        if first > outcome {
+            return Err("EVENT_ACTION_ORDER_INVALID".into());
+        }
+        let sentences = crate::chapter_craft::sentence_spans(body);
+        let end = sentences.get(outcome).ok_or(INVALID)?.1;
+        // The outcome can be proven by a short ending passage. A far-off
+        // starting sentence is context, not evidence of its cause.
+        let first = (first.max(outcome.saturating_sub(2))..=outcome)
+            .find(|&index| body[sentences[index].0..end].chars().count() <= 160)
+            .ok_or(INVALID)?;
+        let start = sentences[first].0;
+        numbered_range = Some((start, end));
+        numbered = json!({"actionSentence":first,"outcomeSentence":outcome,
+                          "eventType":event_type,"outcomeQuote":&body[start..end]});
+        &numbered
+    } else {
+        selection
+    };
+    let event_type = selection.get("eventType").ok_or(INVALID)?;
+    let outcome_quote = selection.get("outcomeQuote").ok_or(INVALID)?;
+    let action = selection.get("actionSentence").ok_or(INVALID)?;
+    let outcome = selection.get("outcomeSentence").ok_or(INVALID)?;
+    if [event_type, outcome_quote, action, outcome]
+        .iter()
+        .all(|value| value.is_null())
+    {
+        return Ok(None);
+    }
+    let event_type = event_type
+        .as_str()
+        .filter(|value| is_main_event_type(value))
+        .ok_or(INVALID)?;
+    let index = |field: &Value| {
+        field
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or(INVALID)
+    };
+    let (action, outcome) = (index(action)?, index(outcome)?);
+    if outcome.checked_sub(action).is_none_or(|length| length > 8) {
+        return Err("EVENT_ACTION_ORDER_INVALID".into());
+    }
+    let spans = crate::chapter_craft::sentence_spans(body);
+    let &(result_start, end) = spans.get(outcome).ok_or(INVALID)?;
+    let reported = outcome_quote.as_str().ok_or(INVALID)?;
+    let quote = |sentence: &str| {
+        crate::chapter_craft::exact_punctuation_matched_quote(sentence, reported).map(str::to_owned)
+    };
+    let adjacent_quote = |first: usize, second: usize| {
+        let &(from, split_before) = spans.get(first)?;
+        let &(split_after, to) = spans.get(second)?;
+        if quote(&body[from..split_before]).is_some() || quote(&body[split_after..to]).is_some() {
+            return None;
+        }
+        quote(&body[from..to]).map(|exact| (spans[action].0.min(from), to, exact))
+    };
+    let local = quote(&body[result_start..end])
+        .map(|exact| (spans[action].0, end, exact))
+        .or_else(|| {
+            outcome
+                .checked_sub(1)
+                .and_then(|previous| adjacent_quote(previous, outcome))
+        })
+        .or_else(|| adjacent_quote(outcome, outcome + 1));
+    let (start, end, outcome_quote) = if let Some((start, end)) = numbered_range {
+        (start, end, body[start..end].to_string())
+    } else if let Some(exact) = local {
+        exact
+    } else {
+        // If the numbering drifted, keep just the uniquely located outcome.
+        // Guessing which earlier action caused it would invent evidence.
+        let exact = quote(body).ok_or("EVENT_QUOTE_NOT_FOUND")?;
+        let from = body.find(&exact).ok_or("EVENT_QUOTE_NOT_FOUND")?;
+        (from, from + exact.len(), exact)
+    };
+    if outcome_quote.chars().count() > 160
+        || outcome_quote
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .count()
+            < 4
+        || body[start..end].chars().count() > 400
+    {
+        return Err(INVALID.into());
+    }
+    if event_type == "GAIN" && !explicit_acquisition(&outcome_quote) {
+        return Err("EVENT_GAIN_WITHOUT_ACQUISITION".into());
+    }
+    let outcome_words = outcome_quote.trim_end_matches(['。', '！', '？', '”']);
+    if outcome_words.chars().count() <= 36
+        && outcome_quote.trim_end_matches('”').ends_with(['？', '?'])
+    {
+        return Err("EVENT_RESULT_IS_REACTION".into());
+    }
+    if outcome_words.chars().count() <= 12
+        && ["脸色变了", "脸色一变"]
+            .iter()
+            .any(|ending| outcome_words.ends_with(ending))
+    {
+        return Err("EVENT_RESULT_IS_REACTION".into());
+    }
+    let last_sentence = crate::chapter_craft::sentence_spans(&outcome_quote)
+        .last()
+        .map_or(outcome_quote.as_str(), |&(start, end)| {
+            &outcome_quote[start..end]
+        })
+        .trim()
+        .trim_start_matches(['“', '‘', '"']);
+    let words = last_sentence.trim_end_matches(['。', '！', '？', '”', '’', '"']);
+    if (words.chars().count() <= 36
+        && last_sentence
+            .trim_end_matches(['”', '’', '"'])
+            .ends_with(['？', '?']))
+        || [
+            "嗯",
+            "哦",
+            "是",
+            "对",
+            "我知道",
+            "小的知道",
+            "我明白",
+            "没错",
+        ]
+        .contains(&words)
+        || (words.chars().count() <= 24
+            && ["不敢猜", "说不准", "不好说", "不确定"]
+                .iter()
+                .any(|ending| words.ends_with(ending)))
+    {
+        return Err("EVENT_RESULT_IS_REACTION".into());
+    }
+    if matches!(event_type, "DISCOVERY" | "REVEAL" | "SITUATION_CHANGE")
+        && last_sentence.chars().count() <= 36
+        && !last_sentence.contains(['，', '；', '：', ',', ';', ':'])
+        && ["明天", "明日", "今晚", "今夜", "下次"]
+            .iter()
+            .any(|time| last_sentence.starts_with(time))
+        && ["还会", "将会", "就会", "一定会", "即将"]
+            .iter()
+            .any(|modal| last_sentence.contains(modal))
+    {
+        return Err("EVENT_RESULT_IS_FORECAST".into());
+    }
+    Ok(Some(SelectedNarrativeEvent {
+        event_type: event_type.to_string(),
+        evidence: EvidenceSpan {
+            start: body[..start].chars().count(),
+            end: body[..end].chars().count(),
+            quote: body[start..end].to_string(),
+            rebound: false,
+        },
+        outcome_quote,
+    }))
+}
+
+fn is_required_stage_step(task_id: &str) -> bool {
+    task_id.starts_with("task:required:goal:") && task_id.contains(":step:")
+}
+
+const STAGE_STEP_RULE_VERSION: &str = "stage-step.r3";
+
+pub(crate) fn stage_step_rules(objective: &str) -> Value {
+    let conditions = stage_step_objectives(objective)
+        .into_iter()
+        .enumerate()
+        .map(|(index, outcome)| json!({"id":index + 1,"requiredOutcome":outcome}))
+        .collect::<Vec<_>>();
+    json!({"version":STAGE_STEP_RULE_VERSION,"conditions":conditions})
+}
+
+struct PlannedStageStep {
+    task_id: String,
+    objective: String,
+    progress: Option<StageStepProgress>,
+    recent_unverified_attempts: Vec<Value>,
+}
+
+impl PlannedStageStep {
+    fn input(&self) -> Value {
+        let mut value = json!({
+            "taskId":self.task_id,"objective":self.objective,
+            "outcomeRules":stage_step_rules(&self.objective),
+        });
+        if let Some(progress) = &self.progress {
+            value["progress"] = json!(progress);
+        }
+        if !self.recent_unverified_attempts.is_empty() {
+            value["recentUnverifiedAttempts"] = json!(self.recent_unverified_attempts);
+        }
+        value
+    }
+}
+
+fn planned_stage_step(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    chapter_id: &str,
+    chapter_number: u32,
+    plan: &Value,
+) -> Result<Option<PlannedStageStep>, String> {
+    let direction = crate::book_direction::for_chapter(
+        connection,
+        project_id,
+        chapter_id,
+        i64::from(chapter_number),
+    )?;
+    let Some(stage) = direction
+        .as_ref()
+        .and_then(|value| value.get("currentStage"))
+    else {
+        return Ok(None);
+    };
+    let Some(task_id) = stage["taskId"]
+        .as_str()
+        .filter(|id| is_required_stage_step(id))
+    else {
+        return Ok(None);
+    };
+    if !plan["activeTaskRefs"]
+        .as_array()
+        .is_some_and(|refs| refs.iter().any(|item| item == task_id))
+    {
+        return Ok(None);
+    }
+    let objective = stage["goal"]
+        .as_str()
+        .filter(|objective| !objective.trim().is_empty())
+        .ok_or("B08_STAGE_STEP_OBJECTIVE_REQUIRED")?;
+    let progress = stage
+        .get("progress")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| format!("B08_STAGE_STEP_PROGRESS_INVALID:{error}"))?;
+    Ok(Some(PlannedStageStep {
+        task_id: task_id.to_owned(),
+        objective: objective.to_owned(),
+        progress,
+        recent_unverified_attempts: stage["recentUnverifiedAttempts"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default(),
+    }))
+}
+
+fn select_stage_step_evidence(body: &str, selection: &Value) -> Option<EvidenceSpan> {
+    let first = selection["firstSentence"].as_u64()?;
+    let outcome = selection["outcomeSentence"].as_u64()?;
+    if outcome.checked_sub(first)? > 2 {
+        return None;
+    }
+    select_main_event_evidence(
+        body,
+        &json!({
+            "firstSentence":first,"outcomeSentence":outcome,"eventType":"SITUATION_CHANGE"
+        }),
+    )
+    .ok()
+    .flatten()
+    .map(|event| event.evidence)
+}
+
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StageStepSource {
+    chapter_id: String,
+    final_ref: ArtifactRef,
+    model_run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verification_chapter_id: Option<String>,
+}
+
+struct StageStepHistory {
+    chapter_no: i64,
+    chapter_id: String,
+    final_ref: ArtifactRef,
+    body: String,
+}
+
+fn stage_step_history(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    stage: &PlannedStageStep,
+) -> Result<Vec<StageStepHistory>, String> {
+    let mut history = Vec::new();
+    for attempt in &stage.recent_unverified_attempts {
+        let chapter_id = require(attempt, "/chapterId")?;
+        let chapter_no = attempt["chapterNo"]
+            .as_i64()
+            .ok_or("B08_STAGE_SOURCE_CHAPTER_REQUIRED")?;
+        let final_ref: ArtifactRef = serde_json::from_value(attempt["finalRef"].clone())
+            .map_err(|error| format!("B08_STAGE_SOURCE_REF_INVALID:{error}"))?;
+        if NarrativeRepository::committed_final_chapter_head(connection, project_id, &chapter_id)
+            .map_err(|error| error.to_string())?
+            .as_ref()
+            != Some(&final_ref)
+        {
+            return Err("PLAN_STALE:STAGE_STEP_SOURCE_CHANGED".into());
+        }
+        let payload = load_artifact_payload(connection, project_id, &final_ref)?;
+        let body = require(&payload, "/body")?;
+        history.push(StageStepHistory {
+            chapter_no,
+            chapter_id,
+            final_ref,
+            body,
+        });
+    }
+    Ok(history)
+}
+
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StageStepEvidence {
+    evidence: EvidenceSpan,
+    objective_quote: String,
+    outcome_quote: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    action_quote: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    action_evidence: Option<EvidenceSpan>,
+    fulfilled_objectives: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<StageStepSource>,
+}
+
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StageStepProgress {
+    objective: String,
+    evidence_parts: Vec<StageStepEvidence>,
+    remaining_objectives: Vec<String>,
+}
+
+struct VerifiedStageStep {
+    task_id: String,
+    progress: StageStepProgress,
+    model_run_id: String,
+}
+
+impl VerifiedStageStep {
+    fn status(&self) -> &'static str {
+        if self.progress.remaining_objectives.is_empty() {
+            "SATISFIED"
+        } else {
+            "ACTIVE"
+        }
+    }
+
+    fn claim(&self) -> TaskProgressCandidate {
+        let proof = self
+            .progress
+            .evidence_parts
+            .iter()
+            .find(|part| part.source.is_none())
+            .unwrap_or(&self.progress.evidence_parts[0]);
+        TaskProgressCandidate {
+            task_id: self.task_id.clone(),
+            status: self.status().into(),
+            evidence: proof.evidence.clone(),
+        }
+    }
+
+    fn has_current_evidence(&self) -> bool {
+        self.progress
+            .evidence_parts
+            .iter()
+            .any(|part| part.source.is_none())
+    }
+
+    fn historical_origin(
+        &self,
+        connection: &libsql_rusqlite::Connection,
+        project_id: &str,
+    ) -> Result<Option<&StageStepSource>, String> {
+        if self.has_current_evidence() {
+            return Ok(None);
+        }
+        let mut latest = None;
+        for source in self
+            .progress
+            .evidence_parts
+            .iter()
+            .filter_map(|part| part.source.as_ref())
+        {
+            let number =
+                NarrativeRepository::chapter_number(connection, project_id, &source.chapter_id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or("B08_STAGE_SOURCE_CHAPTER_REQUIRED")?;
+            if latest.is_none_or(|(latest_number, _)| number > latest_number) {
+                latest = Some((number, source));
+            }
+        }
+        Ok(Some(latest.ok_or("B08_STAGE_SOURCE_CHAPTER_REQUIRED")?.1))
+    }
+
+    fn recorded_progress(&self, chapter_id: &str, final_ref: &ArtifactRef) -> StageStepProgress {
+        let mut progress = self.progress.clone();
+        for part in &mut progress.evidence_parts {
+            if part.source.is_none() {
+                part.source = Some(StageStepSource {
+                    chapter_id: chapter_id.into(),
+                    final_ref: final_ref.clone(),
+                    model_run_id: self.model_run_id.clone(),
+                    verification_chapter_id: None,
+                });
+            }
+        }
+        progress
+    }
+}
+
+fn stage_step_objectives(objective: &str) -> Vec<String> {
+    let compound = objective.replace("以及", "；").replace("并且", "；");
+    // A comparison connects its operands with 与. Keep them in a single
+    // condition unless the author specifies separate results.
+    let separators: &[_] = if objective.contains("比对") {
+        &['；', '且']
+    } else {
+        &['；', '且', '与']
+    };
+    let parts = compound
+        .split(separators)
+        .map(str::trim)
+        .filter(|part| {
+            part.chars()
+                .filter(|&character| crate::chapter_craft::is_han(character))
+                .count()
+                >= 4
+        })
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if parts.len() > 1 {
+        parts
+    } else {
+        vec![objective.to_owned()]
+    }
+}
+
+fn stage_step_remaining(objective: &str, proofs: &[StageStepEvidence]) -> Vec<String> {
+    stage_step_objectives(objective)
+        .into_iter()
+        .filter(|part| {
+            !proofs
+                .iter()
+                .any(|proof| proof.fulfilled_objectives.contains(part))
+        })
+        .collect()
+}
+
+pub(crate) fn refresh_replaced_stage_progress(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    raw: Value,
+    state: &mut Value,
+) -> Result<Option<Value>, String> {
+    let mut progress: StageStepProgress = serde_json::from_value(raw)
+        .map_err(|error| format!("B08_STAGE_STEP_PROGRESS_INVALID:{error}"))?;
+    let mut current = Vec::new();
+    let original_count = progress.evidence_parts.len();
+    for proof in progress.evidence_parts {
+        if stage_step_source_is_current(connection, project_id, &proof)? {
+            current.push(proof);
+        }
+    }
+    if current.len() == original_count {
+        return Ok(None);
+    }
+    progress.remaining_objectives = stage_step_remaining(&progress.objective, &current);
+    if !progress.remaining_objectives.is_empty() {
+        state["status"] = json!("ACTIVE");
+    }
+    progress.evidence_parts = current;
+    let (references, remaining) = stage_step_proof_fields(&progress);
+    state["evidenceRefs"] = json!(references);
+    state["remainingConditions"] = json!(remaining);
+    Ok(Some(json!(progress)))
+}
+
+fn stage_step_proof_fields(progress: &StageStepProgress) -> (Vec<Value>, Vec<Value>) {
+    let mut seen = BTreeSet::new();
+    let references = progress
+        .evidence_parts
+        .iter()
+        .filter_map(|part| {
+            let reference = &part.source.as_ref()?.final_ref;
+            let span = &part.evidence;
+            seen.insert((
+                &reference.artifact_id,
+                reference.version,
+                span.start,
+                span.end,
+            ))
+            .then(|| task_evidence_ref(span, &reference.artifact_id, reference.version))
+        })
+        .collect();
+    let remaining = progress
+        .remaining_objectives
+        .iter()
+        .map(|goal| json!({"kind":"STAGE_STEP_OUTCOME","value":goal}))
+        .collect();
+    (references, remaining)
+}
+
+fn task_evidence_ref(span: &EvidenceSpan, artifact_id: &str, version: i64) -> Value {
+    json!({"artifactId":artifact_id,"version":version,"rangeStart":span.start,
+        "rangeEnd":span.end,"quote":span.quote})
+}
+
+pub(crate) fn stage_step_progress_for_chapter(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    volume_id: &str,
+    chapter_no: i64,
+    task_id: &str,
+    objective: &str,
+) -> Result<Option<Value>, String> {
+    use crate::repositories::narrative::NarrativeRepository;
+    if !is_required_stage_step(task_id) {
+        return Ok(None);
+    }
+    let Some(raw) = NarrativeRepository::active_stage_step_progress(
+        connection, project_id, volume_id, chapter_no, task_id,
+    )
+    .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    let mut progress: StageStepProgress = serde_json::from_value(raw)
+        .map_err(|error| format!("B08_STAGE_STEP_PROGRESS_INVALID:{error}"))?;
+    if progress.objective != objective {
+        return Ok(None);
+    }
+    let mut current = Vec::new();
+    for proof in progress.evidence_parts {
+        if stage_step_source_is_current(connection, project_id, &proof)? {
+            current.push(proof);
+        }
+    }
+    if current.is_empty() {
+        return Ok(None);
+    }
+    progress.remaining_objectives = stage_step_remaining(objective, &current);
+    progress.evidence_parts = current;
+    Ok(Some(json!(progress)))
+}
+
+fn stage_step_source_is_current(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    proof: &StageStepEvidence,
+) -> Result<bool, String> {
+    use crate::repositories::narrative::NarrativeRepository;
+    let Some(source) = proof.source.as_ref() else {
+        return Ok(false);
+    };
+    let current = NarrativeRepository::committed_final_chapter_head(
+        connection,
+        project_id,
+        &source.chapter_id,
+    )
+    .map_err(|error| error.to_string())?;
+    if current.as_ref() != Some(&source.final_ref) {
+        return Ok(false);
+    }
+    let payload =
+        NarrativeRepository::artifact_payload_by_ref(connection, project_id, &source.final_ref)
+            .map_err(|error| error.to_string())?;
+    Ok(payload
+        .as_ref()
+        .and_then(|payload| payload["body"].as_str())
+        .is_some_and(|body| {
+            exact_quote_span(
+                body,
+                proof.evidence.start,
+                proof.evidence.end,
+                &proof.evidence.quote,
+            )
+            .is_ok()
+                && proof.action_evidence.as_ref().is_none_or(|action| {
+                    exact_quote_span(body, action.start, action.end, &action.quote).is_ok()
+                })
+        }))
+}
+
+fn different_batches_shown(quote: &str) -> bool {
+    ["不同批次", "批次各异", "各自的批次"]
+        .iter()
+        .any(|label| quote.contains(label))
+        || quote.match_indices('批').any(|(index, _)| {
+            let mut prefix = quote[..index].trim_end_matches('个').chars().rev();
+            prefix
+                .next()
+                .is_some_and(|number| "二两三四五六七八九十23456789".contains(number))
+                && prefix.next() != Some('第')
+        })
+}
+
+fn stage_step_citations(selection: &Value) -> &[Value] {
+    selection["evidenceParts"]
+        .as_array()
+        .map_or(std::slice::from_ref(selection), Vec::as_slice)
+}
+
+fn stage_step_outcome_is_supported(
+    goal: &str,
+    action: &str,
+    outcome: &str,
+    passages: [&str; 2],
+) -> bool {
+    let contains_any = |text: &str, terms: &[&str]| terms.iter().any(|term| text.contains(term));
+    if contains_any(
+        action,
+        &["还没有", "尚未", "没有做", "未能", "打算", "想要"],
+    ) || contains_any(
+        outcome,
+        &["还没有比对", "尚未比对", "尚未证实", "未能取得", "尚未查明"],
+    ) || outcome.trim_end_matches(['”', '’']).ends_with(['？', '?'])
+    {
+        return false;
+    }
+    if goal.contains("比对")
+        && !passages.iter().any(|passage| {
+            contains_any(
+                passage,
+                &[
+                    "比对",
+                    "对照",
+                    "对比",
+                    "并排对",
+                    "逐一核对",
+                    "相吻合",
+                    "一一对应",
+                    "重合",
+                    "对得上",
+                    "一致",
+                    "丝毫不差",
+                    "分毫不差",
+                    "不同",
+                    "差异",
+                ],
+            )
+        })
+    {
+        return false;
+    }
+    if goal.contains("确认")
+        && goal.contains("同源")
+        && !contains_any(goal, &["不同源", "并非同源"])
+        && (!contains_any(
+            outcome,
+            &[
+                "同源",
+                "出自同一",
+                "来自同一",
+                "同一个源头",
+                "同一来源",
+                "一个来处",
+            ],
+        ) || contains_any(
+            outcome,
+            &["不同源", "并非同源", "不能证实", "无法确认", "无法证实"],
+        ))
+    {
+        return false;
+    }
+    !goal.contains("不同批次")
+        || passages
+            .iter()
+            .any(|passage| different_batches_shown(passage))
+}
+
+fn grounded_stage_step_parts(
+    body: &str,
+    objective: &str,
+    selection: &Value,
+) -> Option<Vec<StageStepEvidence>> {
+    let locate = crate::chapter_craft::exact_punctuation_matched_quote;
+    let selections = stage_step_citations(selection);
+    if !(1..=3).contains(&selections.len()) {
+        return None;
+    }
+    let objectives = stage_step_objectives(objective);
+    let proofs = selections
+        .iter()
+        .filter_map(|part| {
+            let reported = part["outcomeQuote"].as_str()?;
+            let reported_action = part["actionQuote"].as_str()?;
+            if ![reported, reported_action]
+                .iter()
+                .all(|quote| (4..=160).contains(&quote.chars().count()))
+            {
+                return None;
+            }
+            let locate_passage = |quote: &str| {
+                let (first, last) = crate::chapter_craft::numbered_passage_range(body, quote)?;
+                select_stage_step_evidence(
+                    body,
+                    &json!({"firstSentence":first,"outcomeSentence":last}),
+                )
+            };
+            let evidence = select_stage_step_evidence(body, part)
+                .filter(|selected| locate(&selected.quote, reported).is_some())
+                .or_else(|| locate_passage(reported))?;
+            let action_evidence = if locate(&evidence.quote, reported_action).is_some() {
+                None
+            } else {
+                Some(locate_passage(reported_action)?)
+            };
+            let action_span = action_evidence.as_ref().unwrap_or(&evidence);
+            let index = usize::try_from(part["condition"].as_u64()?)
+                .ok()?
+                .checked_sub(1)?;
+            let objective_quote = objectives.get(index)?;
+            let action = locate(&action_span.quote, reported_action)?.to_owned();
+            let outcome_quote = locate(&evidence.quote, reported)?.to_owned();
+            let quote_start = |span: &EvidenceSpan, quote: &str| {
+                span.quote
+                    .find(quote)
+                    .map(|offset| span.start + span.quote[..offset].chars().count())
+            };
+            let outcome_end =
+                quote_start(&evidence, &outcome_quote)? + outcome_quote.chars().count();
+            if quote_start(action_span, &action)? >= outcome_end
+                || !stage_step_outcome_is_supported(
+                    objective_quote,
+                    &action,
+                    &outcome_quote,
+                    [&action_span.quote, &evidence.quote],
+                )
+            {
+                return None;
+            }
+            Some(StageStepEvidence {
+                objective_quote: objective_quote.clone(),
+                outcome_quote,
+                evidence,
+                action_quote: Some(action),
+                action_evidence,
+                fulfilled_objectives: vec![objective_quote.clone()],
+                source: None,
+            })
+        })
+        .collect::<Vec<_>>();
+    (!proofs.is_empty()).then_some(proofs)
+}
+
+#[cfg(test)]
+fn grounded_stage_step_evidence(
+    body: &str,
+    objective: &str,
+    selection: &Value,
+) -> Option<Vec<StageStepEvidence>> {
+    let proofs = grounded_stage_step_parts(body, objective, selection)?;
+    stage_step_remaining(objective, &proofs)
+        .is_empty()
+        .then_some(proofs)
+}
+
+fn evaluate_stage_step(
+    stage: &PlannedStageStep,
+    body: &str,
+    previous_prose: &[(i64, &str)],
+    historical_sources: &[StageStepHistory],
+    selection: &Value,
+    chapter_id: &str,
+    model_run_id: &str,
+) -> Option<VerifiedStageStep> {
+    let citations = stage_step_citations(selection);
+    if !(1..=3).contains(&citations.len()) {
+        return None;
+    }
+    let mut citations = citations.iter().collect::<Vec<_>>();
+    citations.sort_by_key(|citation| citation["sourceChapter"].as_i64().unwrap_or(i64::MAX));
+    let prior = stage
+        .progress
+        .as_ref()
+        .map(|progress| progress.evidence_parts.as_slice())
+        .unwrap_or_default();
+    let mut accomplished = prior
+        .iter()
+        .flat_map(|proof| proof.fulfilled_objectives.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    let mut new_proofs = Vec::new();
+    for citation in citations {
+        let historical = if let Some(number) = citation.get("sourceChapter") {
+            let Some(source) = historical_sources
+                .iter()
+                .find(|source| number.as_i64() == Some(source.chapter_no))
+            else {
+                continue;
+            };
+            Some(source)
+        } else {
+            None
+        };
+        let prose = historical.map_or(body, |source| source.body.as_str());
+        let Some(mut proof) = grounded_stage_step_parts(prose, &stage.objective, citation)
+            .and_then(|proofs| proofs.into_iter().next())
+        else {
+            continue;
+        };
+        let source_number = historical.map_or(i64::MAX, |source| source.chapter_no);
+        if previous_prose.iter().any(|(number, earlier)| {
+            *number < source_number && earlier.contains(&proof.outcome_quote)
+        }) {
+            continue;
+        }
+        if let Some(source) = historical {
+            proof.source = Some(StageStepSource {
+                chapter_id: source.chapter_id.clone(),
+                final_ref: source.final_ref.clone(),
+                model_run_id: model_run_id.into(),
+                verification_chapter_id: Some(chapter_id.into()),
+            });
+        }
+        if proof
+            .fulfilled_objectives
+            .iter()
+            .any(|goal| !accomplished.contains(goal))
+        {
+            accomplished.extend(proof.fulfilled_objectives.iter().cloned());
+            new_proofs.push(proof);
+        }
+    }
+    if new_proofs.is_empty() {
+        return None;
+    }
+    new_proofs.extend_from_slice(prior);
+    let remaining_objectives = stage_step_remaining(&stage.objective, &new_proofs);
+    Some(VerifiedStageStep {
+        task_id: stage.task_id.clone(),
+        model_run_id: model_run_id.into(),
+        progress: StageStepProgress {
+            objective: stage.objective.clone(),
+            evidence_parts: new_proofs,
+            remaining_objectives,
+        },
+    })
+}
+
+fn apply_stage_step_verification(
+    audit: &mut AuditExtraction,
+    stage: Option<&PlannedStageStep>,
+    verified: Option<&VerifiedStageStep>,
+) {
+    for claim in &mut audit.task_progress_candidates {
+        if claim.status != "SATISFIED" || !is_required_stage_step(&claim.task_id) {
+            continue;
+        }
+        if !verified
+            .is_some_and(|result| result.task_id == claim.task_id && result.status() == "SATISFIED")
+        {
+            claim.status = "ACTIVE".into();
+            audit.downgraded_task_claims.push(json!({
+                "taskId":claim.task_id,"claimed":"SATISFIED","reason":"B08_STAGE_STEP_OUTCOME_UNVERIFIED"
+            }));
+        }
+    }
+    if let Some(result) = verified {
+        audit
+            .task_progress_candidates
+            .retain(|claim| claim.task_id != result.task_id);
+        if result.has_current_evidence() {
+            audit.task_progress_candidates.push(result.claim());
+        }
+    } else if let Some(stage) = stage.filter(|step| step.progress.is_some()) {
+        // An unverified ACTIVE claim must not replace earlier verified progress.
+        audit.task_progress_candidates.retain(|claim| {
+            claim.task_id != stage.task_id
+                || matches!(claim.status.as_str(), "BLOCKED" | "INVALIDATED")
+        });
+    }
+}
+
+fn explicit_acquisition(outcome: &str) -> bool {
+    [
+        "获得",
+        "得到",
+        "到手",
+        "入手",
+        "收获",
+        "接过",
+        "交给",
+        "换来",
+        "赢得",
+        "夺得",
+        "夺回",
+        "拾得",
+        "捡到",
+        "捡起",
+        "赠给",
+        "交还",
+        "往他手心里一塞",
+        "往他掌心里一塞",
+    ]
+    .iter()
+    .any(|marker| outcome.contains(marker))
 }
 
 impl EvidenceSpan {
@@ -5653,6 +8289,77 @@ fn candidate_relation_id(candidate: &CanonCandidate) -> Option<String> {
         })
 }
 
+fn resolved_mystery_event_marks(
+    candidates: &[CanonCandidate],
+    mysteries: &[(String, Option<EvidenceSpan>)],
+) -> (BTreeMap<String, (&'static str, Value)>, Vec<String>) {
+    let mut marks = BTreeMap::new();
+    let mut missing = Vec::new();
+    for (mystery, evidence) in mysteries {
+        let matched = evidence.as_ref().and_then(|evidence| {
+            candidates.iter().find(|item| {
+                (item.event_type.is_none()
+                    || item.event_type.as_deref() == Some("MYSTERY_RESOLVED"))
+                    && !marks.contains_key(&item.fact_id)
+                    && item.evidence.start == evidence.start
+                    && item.evidence.end == evidence.end
+                    && item.evidence.quote == evidence.quote
+            })
+        });
+        if let Some(item) = matched {
+            marks.insert(
+                item.fact_id.clone(),
+                ("MYSTERY_RESOLVED", json!({"mysteryId":mystery})),
+            );
+        } else {
+            missing.push(mystery.clone());
+        }
+    }
+    (marks, missing)
+}
+
+fn validate_relation_identity(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    candidate: &CanonCandidate,
+    pending: &mut BTreeMap<String, (String, String)>,
+) -> Result<(), String> {
+    let nested = candidate
+        .object_json
+        .get("relationId")
+        .and_then(Value::as_str);
+    if candidate
+        .relation_id
+        .as_deref()
+        .zip(nested)
+        .is_some_and(|(a, b)| a != b)
+    {
+        return Err("B08_RELATION_IDENTITY_CONFLICT".into());
+    }
+    if let Some(relation_id) = candidate_relation_id(candidate) {
+        let object_id = candidate.object_json["objectId"]
+            .as_str()
+            .unwrap_or_default();
+        let pair = (candidate.subject_id.clone(), object_id.to_string());
+        if pending
+            .get(&relation_id)
+            .is_some_and(|prior| prior != &pair)
+            || crate::repositories::narrative::NarrativeRepository::relation_identity_conflicts(
+                connection,
+                project_id,
+                &relation_id,
+                &pair.0,
+                &pair.1,
+            )
+            .map_err(|error| error.to_string())?
+        {
+            return Err("B08_RELATION_IDENTITY_CONFLICT".into());
+        }
+        pending.insert(relation_id, pair);
+    }
+    Ok(())
+}
+
 /// The id the system gives the `n`th (from 1) new audit item of a kind
 /// (`canon`, `know` or `thread`) in a chapter (LD-1.2).
 pub fn new_audit_item_id(kind: &str, chapter_id: &str, n: usize) -> String {
@@ -5923,12 +8630,21 @@ fn held_back_reason(code: &str) -> &'static str {
         "QC1_OPENING_THREAT_LATE" => {
             "第一章规划的迫近威胁没有在正文前三分之一写出来，开篇紧迫感不足"
         }
-        "QC1_CONTRADICTION" => "改写后这句仍和前面章节的内容矛盾，请确认是否要改",
+        "QC1_CONTRADICTION" => "这段可能与前文状态不一致，请核对原文和状态变化是否已有交代",
+        "QC1_NARRATIVE_CONTINUITY" => "跨章事件或状态衔接还有疑点，请核对前后原文",
+        "QC1_MAIN_EVENT_MISSING" => "本章没有提取到有证据的主要事件，正文已保留，请检查事件记录",
+        "QC1_MAIN_EVENT_SELECTION_FAILED" => "主要事件补充检查没有得到可用结果，未自动生成事件",
+        "QC1_MYSTERY_EVENT_MISSING" => "谜题解决线索未找到引用同一原文的事实，未生成谜题解决事件",
         "QC1_CATCHPHRASE" => "改写后这个口头禅在本章仍出现不止一次",
         "QC1_THREAD_OVER_LIMIT" => {
             "本章新开的伏笔超过 3 条，这条重要性靠后，只作为候选，没有记入档案"
         }
         "B08_KNOWLEDGE_UNBOUND" => "这条认知指向的事实没有记入档案",
+        "B08_RELATION_IDENTITY_CONFLICT" => {
+            "关系编号已属于另一对人物或相反方向，这条关系未记入档案"
+        }
+        "B08_THREAD_AUTHORITY_UNBOUND" => "这条伏笔推进缺少可核对的已有线索，已留待复核",
+        "B08_CHAPTER_GOAL_NOT_VERIFIED" => "本章目标还有结果未得到正文证据支持，请核对章纲和正文",
         code if code.starts_with("B08_CANON_CONFLICT") => "与已确认的事实冲突",
         code if code.starts_with("B08_CANON_SEMANTICS") || code.starts_with("B08_CANON_TIME") => {
             "按设定规则无法判断这条事实的类别、时间或范围"
@@ -6048,8 +8764,9 @@ fn audit_reminder(
 /// `know:{chapter digest}:{n}`; knowledge names its fact by `factIndex` (or
 /// the model's own fact label) and a continuity candidate its source event by
 /// `sourceFactIndex` (or `event:{label}`). A thread ref that names a thread
-/// in `known` (with or without `thread:`) keeps it; any other is a new thread
-/// `thread:{chapter digest}:{n}`. Returns the labels that were replaced.
+/// in `known` (with or without `thread:`) keeps it. Openings receive a new
+/// system id. Updates without authority are returned with the id assignments
+/// so the audit can preserve the other changes and leave a reminder.
 fn assign_audit_ids(raw: &mut Value, chapter_id: &str, known: &BTreeSet<String>) -> Value {
     fn items<'a>(raw: &'a mut Value, array: &str) -> impl Iterator<Item = &'a mut Value> {
         raw.get_mut(array)
@@ -6097,6 +8814,30 @@ fn assign_audit_ids(raw: &mut Value, chapter_id: &str, known: &BTreeSet<String>)
             item["factId"] = json!(fact);
         }
     }
+    let mut unbound_thread_updates = Vec::new();
+    if let Some(threads) = raw["continuityCandidates"].as_array_mut() {
+        threads.retain(|item| {
+            let given = item["threadRef"].as_str().unwrap_or_default();
+            let has_authority = known.contains(given) || known.contains(&format!("thread:{given}"));
+            let operation = item["threadOperation"].as_str();
+            let may_open = match operation {
+                Some("OPEN") => !has_authority && item["disposition"] == "ADVANCE",
+                Some(_) => false,
+                None => {
+                    !item.get("threadRef").is_some_and(Value::is_null)
+                        && matches!(item["disposition"].as_str(), Some("ADVANCE") | None)
+                }
+            };
+            let allowed = (has_authority && operation != Some("OPEN")) || may_open;
+            if !allowed {
+                unbound_thread_updates.push(json!({
+                    "field":"continuityCandidates","threadRef":item["threadRef"],
+                    "disposition":item["disposition"],"reason":"B08_THREAD_AUTHORITY_UNBOUND"
+                }));
+            }
+            allowed
+        });
+    }
     let mut new_threads = Vec::new();
     let mut thread_by_label = BTreeMap::<String, String>::new();
     for item in items(raw, "continuityCandidates") {
@@ -6124,7 +8865,7 @@ fn assign_audit_ids(raw: &mut Value, chapter_id: &str, known: &BTreeSet<String>)
         };
         item["threadRef"] = json!(thread_ref);
     }
-    json!({"factLabels":by_label,"newThreads":new_threads})
+    json!({"factLabels":by_label,"newThreads":new_threads,"unboundThreadUpdates":unbound_thread_updates})
 }
 
 /// Owner decision (2026-10-18): a quote that left words out of one body
@@ -6514,6 +9255,7 @@ fn validate_actual_extraction(
         (String, String),
         Vec<crate::repositories::narrative::SemanticCanonFactRecord>,
     >::new();
+    let mut pending_relations = BTreeMap::<String, (String, String)>::new();
     for evidence in &audit.evidence_ranges {
         exact_quote(body, evidence)?;
     }
@@ -6560,6 +9302,7 @@ fn validate_actual_extraction(
             .expect("canon semantics is required for Canon candidates")
             .validate_predicate(&candidate.predicate)?;
         exact_quote(body, &candidate.evidence)?;
+        validate_relation_identity(connection, project_id, candidate, &mut pending_relations)?;
         let subject_exists =
             crate::repositories::narrative::NarrativeRepository::canon_entity_exists(
                 connection,
@@ -6975,12 +9718,9 @@ fn validate_task_completion_claim(
             })
         })
         .ok_or("B08_TASK_COMPLETION_PREDICATE_UNSATISFIED")?;
-    let dependencies = task
-        .get("dependsOnTaskIds")
-        .and_then(Value::as_array)
+    let dependencies = crate::planning::task_prerequisite_ids(&candidate.task_id, &route)
+        .map_err(|_| "B08_TASK_COMPLETION_PREDICATE_UNSATISFIED")?
         .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
         .collect::<Vec<_>>();
     let dependency_states =
         crate::repositories::narrative::NarrativeRepository::task_states_by_ids_complete(
@@ -7164,6 +9904,153 @@ fn knowledge_authority_is_bound(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn local_expansion_preserves_existing_prose_and_cannot_replace_the_ending() {
+        let original = "林满把账本放平。掌柜挑了挑眉。\n\n铜铃在门外响了。";
+        let anchors = chapter_expansion_anchors(original);
+        let valid = json!([{"afterSentence":0,"text":"他翻到卷角压住的那页。"}]);
+        let patched = insert_chapter_passages(original, &valid, &anchors).unwrap();
+        assert_eq!(
+            patched,
+            "林满把账本放平。\n\n他翻到卷角压住的那页。\n\n掌柜挑了挑眉。\n\n铜铃在门外响了。"
+        );
+        assert!(insert_chapter_passages(
+            original,
+            &json!([{"afterSentence":2,"text":"改写收尾。"}]),
+            &anchors
+        )
+        .is_none());
+        assert!(insert_chapter_passages(
+            original,
+            &json!([
+                {"afterSentence":0,"text":"第一段。"},{"afterSentence":0,"text":"第二段。"}
+            ]),
+            &anchors
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn local_expansion_cannot_split_a_quote_at_an_ellipsis() {
+        let original = "她揭开便签纸，露出铅笔印：‘……修族谱’。沈砚把便签收起来。";
+        let anchors = chapter_expansion_anchors(original);
+        let inside = json!([{"afterSentence":0,"text":"他推开屋门。"}]);
+        assert!(insert_chapter_passages(original, &inside, &anchors).is_none());
+        let outside = json!([{"afterSentence":1,"text":"他推开屋门。"}]);
+        let patched = insert_chapter_passages(original, &outside, &anchors).unwrap();
+        assert!(patched.contains("‘……修族谱’。\n\n他推开屋门。"));
+    }
+
+    #[test]
+    fn round63_a_discovery_and_an_unmet_control_goal_can_both_be_recorded() {
+        let observation = "整条纹路亮了一下，暗了，又亮，又暗——三回。";
+        let discovery = "半枚青铜模具，表面刻着一个壬字。";
+        let body = format!("{observation}\n{discovery}");
+        let event = json!({"firstSentence":1,"outcomeSentence":1,"eventType":"DISCOVERY"});
+        assert!(select_main_event_evidence(&body, &event).unwrap().is_some());
+        let goal = "确认蚀骨粉纹路与松脂纽扣同源且具可控共振特性";
+        let review = json!({"status":"PARTIAL","missing":"可控共振特性",
+            "citations":[{"sentence":0,"quote":observation}]});
+        let bound = bind_chapter_goal_review(goal, &body, &review).unwrap();
+        assert_eq!(bound["status"], "PARTIAL");
+        assert_eq!(bound["missing"], "可控共振特性");
+        assert_eq!(bound["evidence"][0]["quote"], observation);
+    }
+
+    #[test]
+    fn a_goal_review_requires_its_own_exact_current_chapter_evidence() {
+        let body = "他远远望见了门房。林舟亲手把信交给了门口的守卫。";
+        let goal = "林舟把信交给守卫";
+        let mut review = json!({"status":"SUPPORTED","missing":null,"citations":[
+            {"sentence":0,"quote":"林舟亲手把信交给了门口的守卫。"}
+        ]});
+        assert!(bind_chapter_goal_review(goal, body, &review).is_none());
+        review["citations"][0]["sentence"] = json!(1);
+        assert!(bind_chapter_goal_review(goal, body, &review).is_some());
+        review["status"] = json!("PARTIAL");
+        review["missing"] = json!("约定明天汇合");
+        assert!(bind_chapter_goal_review(goal, body, &review).is_none());
+    }
+
+    #[test]
+    fn a_malformed_goal_review_leaves_a_valid_event_selection_available() {
+        let body = "匣里藏着半枚刻有暗记的铜印。";
+        let event = json!({
+            "firstSentence":0,"outcomeSentence":0,"eventType":"DISCOVERY","goalReview":"错误的回包形状"
+        });
+        assert!(crate::model_output::check("SELECT_MAIN_EVENT", &event).is_ok());
+        assert!(select_main_event_evidence(body, &event).unwrap().is_some());
+        assert!(bind_chapter_goal_review("查清铜印来自哪里", body, &event["goalReview"]).is_none());
+    }
+
+    #[test]
+    fn a_saved_body_does_not_make_a_budget_deferred_review_reusable() {
+        let mut checkpoint = ChapterProseCheckpoint {
+            input_digest: "input".into(),
+            body: "林舟把账页摊在案头。".into(),
+            body_digest: "body".into(),
+            renderer: Value::Null,
+            prose_run_ids: vec![],
+            craft_skills: json!({"continuity":{
+                "reviewVersion": CONTINUITY_REVIEW_VERSION,
+                "finalCheck": {"bodyDigest": "body", "modelRunId":"review:original"},
+                "recalledSources": [],
+                "errors": ["QC1_CONFIRMATION_EVIDENCE_DEFERRED_FOR_BUDGET"]
+            }}),
+        };
+        assert!(reusable_continuity_sources(&checkpoint, true).is_none());
+        checkpoint.craft_skills["continuity"]["errors"] = json!([]);
+        assert!(reusable_continuity_sources(&checkpoint, true).is_some());
+    }
+
+    #[test]
+    fn prose_review_is_reusable_only_for_the_checked_body() {
+        let checkpoint = ChapterProseCheckpoint {
+            input_digest: "input".into(),
+            body: "林舟把账页摊在案头。".into(),
+            body_digest: "changed".into(),
+            renderer: Value::Null,
+            prose_run_ids: vec![],
+            craft_skills: json!({"continuity":{
+                "reviewVersion": CONTINUITY_REVIEW_VERSION,
+                "finalCheck": {"bodyDigest": "original", "modelRunId":"review:original"},
+                "recalledSources": [],
+                "errors": []
+            }}),
+        };
+        assert!(reusable_continuity_sources(&checkpoint, true).is_none());
+    }
+
+    #[test]
+    fn optional_polish_leaves_attempts_for_its_recheck_and_final_evidence() {
+        assert!(!fits_before_final_evidence(5, 16, 8, 2));
+        assert!(fits_before_final_evidence(4, 16, 8, 2));
+        assert!(!fits_before_final_evidence(11, 16, 4, 1));
+        assert!(fits_before_final_evidence(10, 16, 4, 1));
+    }
+
+    #[test]
+    fn round59_stage_verification_rebinds_the_exact_result_and_checks_the_batch_constraint() {
+        let objective = "三张不同批次租约附件全部暴露出朱砂补笔痕迹";
+        let mut selection = json!({
+            "firstSentence":3,"outcomeSentence":120,
+            "condition":1,"actionQuote":"显出了朱砂补笔痕迹",
+            "outcomeQuote":"三张不同批次的租约附件上都显出了朱砂补笔痕迹"
+        });
+        assert!(grounded_stage_step_evidence(
+            "三张不同批次的租约附件上都显出了朱砂补笔痕迹。",
+            objective,
+            &selection,
+        )
+        .is_some());
+        selection["outcomeQuote"] = json!("三张同一批次的租约附件上都显出了朱砂补笔痕迹");
+        assert!(grounded_stage_step_evidence(
+            "三张同一批次的租约附件上都显出了朱砂补笔痕迹。",
+            objective,
+            &selection,
+        )
+        .is_none());
+    }
     /// Owner question (2026-11-03): would binding a relation whenever its
     /// sentence names both people bring new problems? These pin down what
     /// the evidence check does today for relations.
@@ -7288,6 +10175,626 @@ mod tests {
     }
 
     use super::*;
+
+    fn relation_candidate(subject: &str, object: &str, relation: &str) -> CanonCandidate {
+        serde_json::from_value(json!({"factId":"fact:1","subjectId":subject,
+            "predicate":"relationship","objectJson":{"objectId":object,"relationId":relation},
+            "authorityLevel":"C","evidence":{"start":0,"end":1,"quote":"人"}}))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_audit_cannot_assign_an_existing_relation_to_the_opposite_direction() {
+        let conn = crate::repositories::narrative::directed_relation_test_db(true);
+        let mut pending = BTreeMap::new();
+        assert_eq!(
+            validate_relation_identity(
+                &conn,
+                "p",
+                &relation_candidate("柳明漪", "陆照", "r"),
+                &mut pending
+            )
+            .unwrap_err(),
+            "B08_RELATION_IDENTITY_CONFLICT"
+        );
+    }
+
+    #[test]
+    fn an_audit_cannot_assign_one_new_relation_id_to_two_directed_pairs() {
+        let conn = crate::repositories::narrative::directed_relation_test_db(false);
+        let mut pending = BTreeMap::new();
+        validate_relation_identity(
+            &conn,
+            "p",
+            &relation_candidate("陆照", "柳明漪", "r"),
+            &mut pending,
+        )
+        .unwrap();
+        assert_eq!(
+            validate_relation_identity(
+                &conn,
+                "p",
+                &relation_candidate("柳明漪", "陆照", "r"),
+                &mut pending
+            )
+            .unwrap_err(),
+            "B08_RELATION_IDENTITY_CONFLICT"
+        );
+    }
+
+    #[test]
+    fn an_audit_can_reuse_a_relation_id_for_the_same_directed_pair() {
+        let conn = crate::repositories::narrative::directed_relation_test_db(true);
+        assert!(validate_relation_identity(
+            &conn,
+            "p",
+            &relation_candidate("陆照", "柳明漪", "r"),
+            &mut BTreeMap::new()
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn an_audit_cannot_claim_a_different_task_relation_in_its_object() {
+        let conn = crate::repositories::narrative::directed_relation_test_db(false);
+        let mut candidate = relation_candidate("陆照", "柳明漪", "relation:other");
+        candidate.relation_id = Some("relation:actual".to_string());
+        assert_eq!(
+            validate_relation_identity(&conn, "p", &candidate, &mut BTreeMap::new()).unwrap_err(),
+            "B08_RELATION_IDENTITY_CONFLICT"
+        );
+    }
+
+    #[test]
+    fn a_resolved_mystery_event_uses_the_fact_with_the_same_evidence() {
+        let mut unrelated = relation_candidate("陆照", "柳明漪", "r");
+        unrelated.fact_id = "fact:unrelated".into();
+        unrelated.evidence = EvidenceSpan {
+            start: 2,
+            end: 3,
+            quote: "旁".into(),
+            rebound: false,
+        };
+        let mut matching = relation_candidate("陆照", "柳明漪", "r");
+        matching.fact_id = "fact:matching".into();
+        let evidence = matching.evidence.clone();
+        let (marks, missing) = resolved_mystery_event_marks(
+            &[unrelated, matching],
+            &[("mystery:1".into(), Some(evidence))],
+        );
+        assert_eq!(marks["fact:matching"].1["mysteryId"], "mystery:1");
+        assert!(!marks.contains_key("fact:unrelated"));
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn a_resolved_mystery_without_matching_fact_is_not_recorded_as_an_unrelated_event() {
+        let unrelated = relation_candidate("陆照", "柳明漪", "r");
+        let evidence = EvidenceSpan {
+            start: 2,
+            end: 3,
+            quote: "旁".into(),
+            rebound: false,
+        };
+        let (marks, missing) =
+            resolved_mystery_event_marks(&[unrelated], &[("mystery:1".into(), Some(evidence))]);
+        assert!(marks.is_empty());
+        assert_eq!(missing, vec!["mystery:1"]);
+    }
+
+    #[test]
+    fn a_prelabelled_mystery_event_keeps_its_mystery_id() {
+        let mut candidate = relation_candidate("陆照", "柳明漪", "r");
+        candidate.event_type = Some("MYSTERY_RESOLVED".into());
+        let evidence = candidate.evidence.clone();
+        let (marks, missing) =
+            resolved_mystery_event_marks(&[candidate], &[("mystery:1".into(), Some(evidence))]);
+        assert_eq!(marks["fact:1"].1["mysteryId"], "mystery:1");
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn a_model_cannot_cite_a_reversed_or_nonexistent_sentence() {
+        let body = "陆照打开绳结。盒里露出一封密信。";
+        for (action, outcome) in [(1, 0), (0, 9)] {
+            let selection = json!({"eventType":"REVEAL", "actionSentence":action,
+                "outcomeSentence":outcome,"outcomeQuote":"盒里露出一封密信"});
+            assert!(select_main_event_evidence(body, &selection).is_err());
+        }
+    }
+
+    #[test]
+    fn no_supported_event_selection_leaves_no_event() {
+        let selection = json!({"actionSentence":null,"outcomeSentence":null,
+            "eventType":null,"outcomeQuote":null});
+        assert!(select_main_event_evidence("天亮了。", &selection)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn round35_event_selection_rejects_destroyed_writing_as_acquisition() {
+        let body = "纸面上的字全毁了，墨迹被火舔成一片黑。";
+        let selection = json!({"actionSentence":0,"outcomeSentence":0,"eventType":"GAIN",
+            "outcomeQuote":"纸面上的字全毁了"});
+        assert!(select_main_event_evidence(body, &selection).is_err());
+    }
+
+    #[test]
+    fn round35_event_selection_rejects_a_gesture_without_a_result() {
+        let body = "苏砚的银镊往前送了半分。";
+        let selection = json!({"actionSentence":0,"outcomeSentence":0,"eventType":"GAIN",
+            "outcomeQuote":body});
+        assert!(select_main_event_evidence(body, &selection).is_err());
+    }
+
+    #[test]
+    fn a_gain_can_use_a_cited_acquisition() {
+        let body = "苏砚接过钥匙，把铜环扣紧。";
+        let selection = json!({"actionSentence":0,"outcomeSentence":0,"eventType":"GAIN",
+            "outcomeQuote":"苏砚接过钥匙"});
+        assert_eq!(
+            select_main_event_evidence(body, &selection)
+                .unwrap()
+                .unwrap()
+                .event_type,
+            "GAIN"
+        );
+    }
+
+    #[test]
+    fn a_main_event_can_be_evidenced_by_the_chapter_without_a_matching_fact() {
+        let body =
+            "陆照抹开炭粉，把羊皮纸翻了过来。背面露出父亲亲手绘制的地宫路线。他把纸藏进袖里。";
+        let selected = select_main_event_evidence(
+            body,
+            &json!({
+                "eventType":"REVEAL","actionSentence":0,"outcomeSentence":1,
+                "outcomeQuote":"背面露出父亲亲手绘制的地宫路线"
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(selected.event_type, "REVEAL");
+        assert_eq!(
+            selected.evidence.quote,
+            "陆照抹开炭粉，把羊皮纸翻了过来。背面露出父亲亲手绘制的地宫路线。"
+        );
+        assert_eq!(selected.evidence.start, 0);
+    }
+
+    #[test]
+    fn round37_reported_punctuation_is_resolved_to_the_exact_outcome() {
+        let body = "陆照翻过纸边。纸边底下有个微凸的圆痕，指甲一刮，涩中带黏——松脂。";
+        let selected = select_main_event_evidence(
+            body,
+            &json!({
+                "eventType":"DISCOVERY","actionSentence":0,"outcomeSentence":1,
+                "outcomeQuote":"纸边底下有个微凸的圆痕,指甲一刮,涩中带黏——松脂."
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            selected.outcome_quote,
+            "纸边底下有个微凸的圆痕，指甲一刮，涩中带黏——松脂。"
+        );
+    }
+
+    #[test]
+    fn round43_a_result_can_span_two_adjacent_numbered_sentences() {
+        let body = "陆照把两样东西并在一起。师父的断玉符。他手里那半截，和砖下这半截，原本是一块。";
+        let selected = select_main_event_evidence(
+            body,
+            &json!({
+                "eventType":"DISCOVERY","actionSentence":0,"outcomeSentence":2,
+                "outcomeQuote":"师父的断玉符。他手里那半截，和砖下这半截，原本是一块。"
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(selected.evidence.quote, body);
+        assert_eq!(
+            selected.outcome_quote,
+            "师父的断玉符。他手里那半截，和砖下这半截，原本是一块。"
+        );
+    }
+
+    #[test]
+    fn round43_a_changed_expression_does_not_prove_a_discovery() {
+        let body = "他问柳明微是否碰过断玉符。柳明微脸色变了。";
+        let result = select_main_event_evidence(
+            body,
+            &json!({
+                "eventType":"DISCOVERY","actionSentence":0,"outcomeSentence":1,
+                "outcomeQuote":"柳明微脸色变了。"
+            }),
+        );
+        assert_eq!(result.err().as_deref(), Some("EVENT_RESULT_IS_REACTION"));
+    }
+
+    #[test]
+    fn round46_a_handoff_is_bound_without_attaching_the_wrong_numbered_action() {
+        let passage =
+            "老陶从腰后摸出一块青石片，往他手心里一塞。\n\n“碑基底下垫着的。”他说。石片入手冰凉。";
+        let body = format!("他撑开窗。院里下雨。{passage}");
+        let selected = select_main_event_evidence(
+            &body,
+            &json!({
+                "eventType":"GAIN", "actionSentence":0, "outcomeSentence":1,
+                "outcomeQuote":passage
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(selected.evidence.quote, passage);
+        assert_eq!(
+            selected.evidence.start,
+            "他撑开窗。院里下雨。".chars().count()
+        );
+    }
+
+    #[test]
+    fn round47_a_question_about_a_key_is_not_a_discovery() {
+        let body = "陆照回过头。老陶问：“那把钥匙呢？”";
+        let selected = select_main_event_evidence(
+            body,
+            &json!({
+                "eventType":"DISCOVERY","actionSentence":0,"outcomeSentence":1,
+                "outcomeQuote":"“那把钥匙呢？”"
+            }),
+        );
+        assert_eq!(selected.err().as_deref(), Some("EVENT_RESULT_IS_REACTION"));
+    }
+
+    #[test]
+    fn round51_a_forecast_is_not_a_discovery() {
+        let body = "“嗯。”\n\n“你就嗯？”\n\n“明天他们还会来。”";
+        let selected = select_main_event_evidence(
+            body,
+            &json!({
+                "eventType":"DISCOVERY","firstSentence":0,"outcomeSentence":2,
+            }),
+        );
+        assert_eq!(selected.err().as_deref(), Some("EVENT_RESULT_IS_FORECAST"));
+    }
+
+    #[test]
+    fn round52_a_guess_without_a_discovered_fact_is_not_a_main_event() {
+        let body = "“闻出来几成？”\n\n“七成。”陆照顿了顿，“剩下三成，小的不敢猜。”";
+        let spans = crate::chapter_craft::sentence_spans(body);
+        let outcome = spans.len() - 1;
+        let selected = select_main_event_evidence(
+            body,
+            &json!({
+                "eventType":"DISCOVERY","firstSentence":0,"outcomeSentence":outcome,
+            }),
+        );
+        assert_eq!(selected.err().as_deref(), Some("EVENT_RESULT_IS_REACTION"));
+    }
+
+    #[test]
+    fn round62_acquiring_the_button_cannot_complete_the_comparison() {
+        let objective = "陆照用松脂纽扣背面四道刻痕比对蚀骨粉纹路，确认二者同源";
+        let quote = "陆照拿到一枚松脂纽扣，背面四道刻痕清清楚楚。";
+        let body = format!("{quote}蚀骨粉还没有比对，同源也尚未证实。");
+        let candidate = json!({"firstSentence":0,"outcomeSentence":0,
+            "condition":1,"actionQuote":"拿到一枚松脂纽扣",
+            "outcomeQuote":quote});
+        assert!(grounded_stage_step_evidence(&body, objective, &candidate).is_none());
+    }
+
+    #[test]
+    fn round62_approved_aliases_can_support_an_actual_comparison() {
+        let objective = "陆照用松脂纽扣背面四道刻痕比对蚀骨粉纹路，确认二者同源";
+        let quote = "他把扣饰的四划压到药灰印上，两条线丝毫不差，证实都出自同一处作坊。";
+        let body = format!("碗里的药灰正是蚀骨粉。树脂扣饰是他昨日找到的松脂纽扣。{quote}");
+        let candidate = json!({"firstSentence":2,"outcomeSentence":2,
+            "condition":1,"actionQuote":"把扣饰的四划压到药灰印上",
+            "outcomeQuote":quote});
+        assert!(grounded_stage_step_evidence(&body, objective, &candidate).is_some());
+    }
+
+    #[test]
+    fn a_comparison_that_proves_different_origins_cannot_complete_a_common_origin_goal() {
+        let objective = "陆照比对松脂纽扣和蚀骨粉的纹路，确认二者同源";
+        let body = "陆照比对了纽扣背面的刻痕和蚀骨粉纹路，确认二者并非同源。";
+        let candidate = json!({"firstSentence":0,"outcomeSentence":0,
+            "condition":1,"actionQuote":"比对了纽扣背面的刻痕和蚀骨粉纹路",
+            "outcomeQuote":"确认二者并非同源"});
+        assert!(grounded_stage_step_evidence(body, objective, &candidate).is_none());
+    }
+
+    #[test]
+    fn round63_comparison_and_origin_can_be_cited_at_separate_positions() {
+        let objective = "陆照用松脂纽扣背面四道刻痕比对蚀骨粉纹路，确认二者同源";
+        let action = "他把纽扣贴在筒壁上，让两组纹路并排对。";
+        let outcome = "筒子里这撮，和扣子上四道，一个来处。";
+        let body = format!(
+            "{action}两组纹路合上了。炉里的火星跳了两下。他翻看竹筒内壁。陈伯进了丹房。{outcome}"
+        );
+        let candidate = json!({"firstSentence":0,"outcomeSentence":5,
+            "condition":1,"actionQuote":action,"outcomeQuote":outcome});
+        let proofs = grounded_stage_step_evidence(&body, objective, &candidate).unwrap();
+        assert_eq!(proofs[0].action_evidence.as_ref().unwrap().quote, action);
+        assert_eq!(proofs[0].evidence.quote, outcome);
+    }
+
+    #[test]
+    fn round63_recovered_button_comparison_is_bound_to_the_actual_source_body() {
+        let action = "他把纽扣贴在筒壁上，让两组纹路并排对。";
+        let outcome = "筒子里这撮，和扣子上四道，一个来处。";
+        let earlier = format!(
+            "{action}两组纹路合上了。炉里的火星跳了两下。他翻看竹筒内壁。陈伯进了丹房。{outcome}"
+        );
+        let current = "模具背面那四道凿纹，他拿纽扣又对了一遍。对上了。";
+        let stage = PlannedStageStep {
+            task_id: "task:required:goal:vol:1:step:1:1:1".into(),
+            objective: "陆照用松脂纽扣背面四道刻痕比对蚀骨粉纹路，确认二者同源".into(),
+            progress: None,
+            recent_unverified_attempts: Vec::new(),
+        };
+        let history = [StageStepHistory {
+            chapter_no: 4,
+            chapter_id: "chapter:four".into(),
+            body: earlier.clone(),
+            final_ref: ArtifactRef {
+                artifact_id: "final:four".into(),
+                version: 1,
+                payload_hash: "a".repeat(64),
+            },
+        }];
+        let mut candidate = json!({"sourceChapter":4,"firstSentence":0,"outcomeSentence":5,
+            "condition":1,"actionQuote":action,"outcomeQuote":outcome});
+        let proof = evaluate_stage_step(
+            &stage,
+            current,
+            &[(4, &earlier)],
+            &history,
+            &candidate,
+            "chapter:five",
+            "run:recover",
+        )
+        .unwrap();
+        assert_eq!(proof.status(), "SATISFIED");
+        assert!(!proof.has_current_evidence());
+        let source = proof.progress.evidence_parts[0].source.as_ref().unwrap();
+        assert_eq!(source.final_ref, history[0].final_ref);
+        assert_eq!(
+            source.verification_chapter_id.as_deref(),
+            Some("chapter:five")
+        );
+        candidate["sourceChapter"] = json!(3);
+        assert!(evaluate_stage_step(
+            &stage,
+            current,
+            &[(4, &earlier)],
+            &history,
+            &candidate,
+            "chapter:five",
+            "run:wrong-source",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn a_stage_step_needs_new_evidence_after_partial_progress() {
+        let mut stage = PlannedStageStep {
+            task_id: "task:required:goal:vol:1:step:1:1:1".into(),
+            objective: "找到线人并且取得账本缺页".into(),
+            progress: None,
+            recent_unverified_attempts: Vec::new(),
+        };
+        let body = "林舟找到了线人周娘子。";
+        let selection = json!({"firstSentence":0,"outcomeSentence":0,
+            "condition":1,"actionQuote":"找到了线人","outcomeQuote":body});
+        let first = evaluate_stage_step(
+            &stage,
+            body,
+            &[],
+            &[],
+            &selection,
+            "chapter:test",
+            "run:first",
+        )
+        .unwrap();
+        assert_eq!(first.status(), "ACTIVE");
+        stage.progress = Some(first.progress);
+        assert!(evaluate_stage_step(
+            &stage,
+            body,
+            &[],
+            &[],
+            &selection,
+            "chapter:test",
+            "run:repeat"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn an_unrecorded_result_in_an_earlier_chapter_cannot_advance_the_current_chapter() {
+        let stage = PlannedStageStep {
+            task_id: "task:required:goal:vol:1:step:1:1:1".into(),
+            objective: "找到账本缺页".into(),
+            progress: None,
+            recent_unverified_attempts: Vec::new(),
+        };
+        let body = "周娘子从匣底抽出账本缺页。";
+        let earlier = format!("他进了库房。{body}");
+        let proof = json!({"firstSentence":0,"outcomeSentence":0,
+            "condition":1,"actionQuote":"从匣底抽出","outcomeQuote":body});
+        assert!(evaluate_stage_step(
+            &stage,
+            body,
+            &[(2, &earlier)],
+            &[],
+            &proof,
+            "chapter:test",
+            "run:repeat"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn round62_an_overlong_citation_does_not_erase_a_separate_earned_result() {
+        let stage = PlannedStageStep {
+            task_id: "task:required:goal:vol:1:step:1:1:1".into(),
+            objective: "找到线人并且取得账本缺页".into(),
+            progress: None,
+            recent_unverified_attempts: Vec::new(),
+        };
+        let valid = "林舟找到了线人周娘子。";
+        let body = format!("{valid}林舟未能取得账本缺页。");
+        let selection = json!({"evidenceParts":[
+            {"firstSentence":0,"outcomeSentence":0,"condition":1,"actionQuote":"找到了线人","outcomeQuote":valid},
+            {"firstSentence":1,"outcomeSentence":1,"condition":2,"actionQuote":"取得账本缺页","outcomeQuote":"拉长的引用".repeat(40)}
+        ]});
+        let checked = evaluate_stage_step(
+            &stage,
+            &body,
+            &[],
+            &[],
+            &selection,
+            "chapter:test",
+            "run:chapter5",
+        )
+        .unwrap();
+        assert_eq!(checked.status(), "ACTIVE");
+        assert_eq!(checked.progress.remaining_objectives, ["取得账本缺页"]);
+        assert_eq!(checked.progress.evidence_parts.len(), 1);
+        assert_eq!(checked.progress.evidence_parts[0].outcome_quote, valid);
+    }
+
+    #[test]
+    fn round52_a_stage_step_requires_an_outcome_on_the_page() {
+        let selection = json!({"firstSentence":0,"outcomeSentence":0});
+        assert!(select_stage_step_evidence("“我知道。”", &selection).is_none());
+        let body = "陆照指尖压住腕疤，灰线停在锁骨边缘，灼痛一点点退了。";
+        assert_eq!(
+            select_stage_step_evidence(body, &selection).unwrap().quote,
+            body
+        );
+    }
+
+    #[test]
+    fn round57_a_short_rejected_outcome_can_be_excluded_from_the_correction() {
+        let selection = json!({"firstSentence":1,"outcomeSentence":1,"eventType":"DISCOVERY"});
+        let body = "谢砚舟签下暂缓执行条款，给丹房二十日查证。\n\n不见了。";
+        let error = select_main_event_evidence(body, &selection).err().unwrap();
+        assert_eq!(rejected_numbered_event_outcome(&selection, &error), Some(1));
+        let corrected =
+            json!({"firstSentence":0,"outcomeSentence":0,"eventType":"SITUATION_CHANGE"});
+        assert!(select_main_event_evidence(body, &corrected)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn round56_a_sighting_does_not_prove_that_the_stage_action_was_done() {
+        let objective = "阿沅趁柳昭仪离殿时偷换其药囊内三粒普通草籽为金纹种，指尖被芽尖刺破出血";
+        let unrelated = "阿沅追上来半步，低声说柳昭仪的袖口暗了一下。陆照停步。";
+        let mut selected = json!({
+            "firstSentence":0,"outcomeSentence":1,
+            "condition":1,"actionQuote":"偷换其药囊内三粒普通草籽为金纹种",
+            "outcomeQuote":"柳昭仪的袖口暗了一下"
+        });
+        assert!(grounded_stage_step_evidence(unrelated, objective, &selected).is_none());
+        let completed = "阿沅抖出药囊里的三粒草籽，换进三粒金纹种。芽尖刺破了她的指腹。";
+        selected["actionQuote"] = json!("换进三粒金纹种");
+        selected["outcomeQuote"] = json!("抖出药囊里的三粒草籽，换进三粒金纹种");
+        assert!(grounded_stage_step_evidence(completed, objective, &selected).is_some());
+    }
+
+    #[test]
+    fn round58_compound_step_requires_broom_and_water_results_even_in_separate_passages() {
+        let objective = "陆照连续三日观察阿公扫地时竹帚沾水频率与溪水银灰浓度变化";
+        let body = "第三日，溪水比前两日浑，水里的银灰多了两成。村口钟响。薄雾沿石阶散开。陆照把样本封好。阿公这三天扫地时竹帚沾水次数由四次增为五次。";
+        let broom = json!({
+            "firstSentence":4,"outcomeSentence":4,
+            "condition":1,"actionQuote":"竹帚沾水次数由四次增为五次",
+            "outcomeQuote":"阿公这三天扫地时竹帚沾水次数由四次增为五次"
+        });
+        let water = json!({
+            "firstSentence":0,"outcomeSentence":0,"condition":2,"actionQuote":"水里的银灰多了两成",
+            "outcomeQuote":"溪水比前两日浑，水里的银灰多了两成"
+        });
+        assert!(grounded_stage_step_evidence(body, objective, &broom).is_none());
+        let proofs =
+            grounded_stage_step_evidence(body, objective, &json!({"evidenceParts":[broom,water]}))
+                .unwrap();
+        assert_eq!(proofs.len(), 2);
+        assert!(proofs[0].evidence.start > proofs[1].evidence.end);
+    }
+
+    #[test]
+    fn an_already_found_order_for_tomorrow_can_be_a_discovery() {
+        let body = "明天的调令已经压在桌下，上面盖着周掌律的私印。";
+        let selected = select_main_event_evidence(
+            body,
+            &json!({
+                "eventType":"DISCOVERY","firstSentence":0,"outcomeSentence":0,
+            }),
+        );
+        assert!(selected.unwrap().is_some());
+    }
+
+    #[test]
+    fn numbered_main_event_evidence_is_read_verbatim_from_the_final_body() {
+        let body = "老陶在院里等了三刻。陆照扒开碎石。\n\n坑底露出半枚印信，边沿刻着失传的符号。";
+        let selection = json!({"eventType":"DISCOVERY","firstSentence":1,"outcomeSentence":2});
+        let event = select_main_event_evidence(body, &selection)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            event.evidence.quote,
+            "陆照扒开碎石。\n\n坑底露出半枚印信，边沿刻着失传的符号。"
+        );
+        assert_eq!(event.outcome_quote, event.evidence.quote);
+        assert!(select_main_event_evidence(
+            body,
+            &json!({"eventType":"DISCOVERY","firstSentence":2,"outcomeSentence":1})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn distant_preparation_is_not_included_in_numbered_event_evidence() {
+        let outcome = "锈环对着铁门，铁门无声地滑开三寸。门里没有尸气。涌出来的是活水。";
+        let body = format!("他低头。先擦干铜环。走到门边。听了一阵。{outcome}");
+        let event = select_main_event_evidence(
+            &body,
+            &json!({
+                "eventType":"SITUATION_CHANGE", "firstSentence":0,"outcomeSentence":6
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(event.evidence.quote, outcome);
+    }
+
+    #[test]
+    fn round47_an_identical_chapter_goal_cannot_pass_through_the_soft_plan_fallback() {
+        let mut reminders = Vec::new();
+        let result = note_if_lenient(true, &mut reminders, Err("B08_PLAN_GOAL_REPEATED".into()));
+        assert_eq!(result.unwrap_err(), "B08_PLAN_GOAL_REPEATED");
+        assert!(reminders.is_empty());
+    }
+
+    #[test]
+    fn a_misnumbered_outcome_never_binds_to_an_unrelated_action() {
+        let body = "陆照把柴堆好。院墙倒了。他擦窗。纸背露出地宫路线。";
+        let selected = select_main_event_evidence(
+            body,
+            &json!({
+                "eventType":"REVEAL","actionSentence":0,"outcomeSentence":1,
+                "outcomeQuote":"纸背露出地宫路线。"
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(selected.evidence.quote, "纸背露出地宫路线。");
+    }
 
     #[test]
     fn fx5_classify_plan_reality_table() {
@@ -8203,6 +11710,49 @@ mod tests {
                 thread(2),
                 thread(3),
             ]
+        );
+    }
+
+    #[test]
+    fn an_unbound_audit_transition_cannot_create_or_close_a_thread() {
+        let mut raw = json!({"continuityCandidates":[
+            {"threadRef":null,"disposition":"ADVANCE","description":"误写成已知伏笔进展"},
+            {"threadRef":"unknown","disposition":"RESOLVE"},
+            {"threadRef":"old-promise","disposition":"RESOLVE"},
+            {"disposition":"ADVANCE","description":"丹房钥匙丢了"}
+        ]});
+        let ids = assign_audit_ids(
+            &mut raw,
+            "chap:5",
+            &BTreeSet::from(["thread:old-promise".into()]),
+        );
+        assert_eq!(raw["continuityCandidates"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            raw["continuityCandidates"][0]["threadRef"],
+            "thread:old-promise"
+        );
+        assert_eq!(ids["unboundThreadUpdates"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_null_thread_reference_does_not_invalidate_the_audit_envelope() {
+        let raw = json!({
+            "qualityFindings":[],"canonCandidates":[{"target":"陈伯"}],"knowledgeCandidates":[],
+            "continuityCandidates":[{"threadRef":null,"disposition":"ADVANCE","threadOperation":"TRANSITION"}],
+            "taskProgressCandidates":[],"revealedReservationRefs":[],"evidenceRanges":[],
+            "auditCompleteness":"COMPLETE_WITH_DELTA","unresolvedHard":false
+        });
+        assert!(crate::model_output::check("AUDIT_EXTRACT", &raw).is_ok());
+        let mut returned = raw.clone();
+        let assigned = assign_audit_ids(&mut returned, "chap:5", &BTreeSet::new());
+        assert_eq!(
+            assigned["unboundThreadUpdates"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(returned["continuityCandidates"], json!([]));
+        assert_eq!(
+            returned["canonCandidates"][0]["target"],
+            raw["canonCandidates"][0]["target"]
         );
     }
 

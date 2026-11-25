@@ -3,6 +3,18 @@ use super::*;
 /// The volume row is fixture setup; each FinalChapter authority is committed
 /// through CommitService so the scope regression uses real committed heads.
 pub(super) fn commit_second_volume_chapters(state: &KernelState, project_id: &str) {
+    commit_second_volume_chapters_inner(state, project_id, false);
+}
+
+pub(super) fn commit_second_volume_chapters_with_relation(state: &KernelState, project_id: &str) {
+    commit_second_volume_chapters_inner(state, project_id, true);
+}
+
+fn commit_second_volume_chapters_inner(
+    state: &KernelState,
+    project_id: &str,
+    relation_update: bool,
+) {
     let connection = state.manager.open(project_id, "", NOW).unwrap();
     let book_id: String = connection
         .query_row(
@@ -32,21 +44,19 @@ pub(super) fn commit_second_volume_chapters(state: &KernelState, project_id: &st
                 &format!("b6:volume-two:chapter:{chapter_no}"),
             )
             .unwrap();
-        let final_id =
-            ai_novel_production_system_core::stable_id::StableIdentityFactory::from_command(
-                ai_novel_production_system_core::stable_id::StableIdKind::Artifact,
-                &format!("b6:volume-two:final:{chapter_no}"),
-            )
-            .unwrap();
-        let body = format!("第二卷第 {chapter_no} 章：林舟继续核对已经确认的线索。");
+        let body = if relation_update && chapter_no == 1 {
+            "第二卷第 1 章：林舟与顾清结盟。".to_string()
+        } else {
+            format!("第二卷第 {chapter_no} 章：林舟继续核对已经确认的线索。")
+        };
         commit_fixture_final_chapter(
             state,
             project_id,
             &volume_id,
             chapter_no,
             &chapter_id,
-            &final_id,
             &body,
+            relation_update && chapter_no == 1,
         );
     }
 }
@@ -86,9 +96,15 @@ fn commit_fixture_final_chapter(
     volume_id: &str,
     chapter_no: i64,
     chapter_id: &str,
-    final_id: &str,
     body: &str,
+    relation_update: bool,
 ) {
+    let final_id = ai_novel_production_system_core::stable_id::StableIdentityFactory::from_command(
+        ai_novel_production_system_core::stable_id::StableIdKind::Artifact,
+        &format!("b6:volume-two:final:{chapter_no}"),
+    )
+    .unwrap();
+    let final_id = final_id.as_str();
     let connection = state.manager.open(project_id, "", NOW).unwrap();
     connection
         .execute(
@@ -102,12 +118,21 @@ fn commit_fixture_final_chapter(
             .unwrap();
     drop(connection);
 
+    let evidence = if relation_update {
+        json!([{
+            "evidenceId":"evidence:quality:later-relation", "factId":"fact:quality:later-relation",
+            "relationId":"relation:b02:linzhou-guqing", "quote":body,
+            "rangeStart":0, "rangeEnd":body.chars().count(), "evidenceType":"ACTUAL_NARRATIVE"
+        }])
+    } else {
+        json!([])
+    };
     let payload = json!({
         "payloadSchema":"final-chapter.r1",
         "chapterId":chapter_id,
         "body":body,
         "wordCount":body.chars().count(),
-        "validatedEvidence":[]
+        "validatedEvidence":evidence
     });
     let payload_hash = sha256_canonical(&payload).unwrap();
     let final_ref = ArtifactRef {
@@ -135,7 +160,7 @@ fn commit_fixture_final_chapter(
     certificate["certificateDigest"] = json!(sha256_canonical(&certificate).unwrap());
     let command_id = format!("b6:commit:volume-two:{chapter_no}");
     let scope = json!({"level":"CHAPTER","chapterId":chapter_id});
-    let bundle: CommitBundle = serde_json::from_value(json!({
+    let mut raw_bundle = json!({
         "commitId":format!("commit:{command_id}"),
         "projectId":project_id,
         "commandId":command_id,
@@ -165,8 +190,17 @@ fn commit_fixture_final_chapter(
             "payloadHash":payload_hash
         }],
         "gateCertificates":[certificate]
-    }))
-    .unwrap();
+    });
+    if relation_update {
+        raw_bundle["canonDelta"] = json!([{
+            "factId":"fact:quality:later-relation", "subjectId":"entity:b02:linzhou",
+            "predicate":"allied_with", "objectJson":{"objectId":"entity:b02:guqing","state":"结盟"},
+            "relationId":"relation:b02:linzhou-guqing", "validFromChapterId":chapter_id,
+            "authorityLevel":"C", "payloadJson":{"chapterId":chapter_id,"sourceArtifactId":final_id,
+                "sourceVersion":1,"evidenceRange":{"start":0,"end":body.chars().count(),"quote":body}}
+        }]);
+    }
+    let bundle: CommitBundle = serde_json::from_value(raw_bundle).unwrap();
     let connection = state.manager.open(project_id, "", NOW).unwrap();
     CommitService::commit(&connection, &bundle, NOW).unwrap();
 }

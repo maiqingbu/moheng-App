@@ -5,7 +5,7 @@
 use crate::chapter_length::ChapterLengthRange;
 use crate::skills_v2::StepSignals;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 pub const CHAPTER_ROLES: [&str; 7] = ["普通", "过渡", "重要", "升级", "回报", "高潮前", "高潮"];
 
@@ -95,6 +95,11 @@ fn normalized_goal(goal: &str) -> String {
         .collect()
 }
 
+pub(crate) fn goal_repeats<'a>(goal: &str, mut prior: impl Iterator<Item = &'a str>) -> bool {
+    let goal = normalized_goal(goal);
+    !goal.is_empty() && prior.any(|previous| normalized_goal(previous) == goal)
+}
+
 /// Rejects a plan that cannot be written well: a missing role or a goal
 /// that repeats a recent chapter's.
 pub fn validate_plan_craft(plan: &Value, recent_chapters: &[Value]) -> Result<(), String> {
@@ -105,17 +110,10 @@ pub fn validate_plan_craft(plan: &Value, recent_chapters: &[Value]) -> Result<()
     {
         return Err("B08_PLAN_ROLE_INVALID".into());
     }
-    let goal = normalized_goal(
-        plan.get("chapterGoal")
-            .and_then(Value::as_str)
-            .unwrap_or(""),
-    );
-    if recent_chapters.iter().any(|chapter| {
-        chapter
-            .get("chapterGoal")
-            .and_then(Value::as_str)
-            .is_some_and(|previous| normalized_goal(previous) == goal)
-    }) {
+    let prior = recent_chapters
+        .iter()
+        .filter_map(|chapter| chapter["chapterGoal"].as_str());
+    if goal_repeats(plan["chapterGoal"].as_str().unwrap_or_default(), prior) {
         return Err("B08_PLAN_GOAL_REPEATED".into());
     }
     Ok(())
@@ -848,6 +846,57 @@ pub(crate) const PHRASE_CHARACTERS: usize = 12;
 /// The use of a phrase window that fails signing F1-5.
 pub(crate) const REPEATED_PHRASE_TIMES: usize = 3;
 
+/// F1-5 checks the complete opening. Each text is counted separately so no
+/// window is formed across the boundary between chapters.
+pub(crate) fn signing_repeated_phrase_windows<'a>(
+    bodies: impl IntoIterator<Item = &'a str>,
+) -> Vec<String> {
+    let texts = bodies
+        .into_iter()
+        .map(|body| body.chars().collect())
+        .collect::<Vec<_>>();
+    let mut windows = phrase_window_counts(&texts)
+        .into_iter()
+        .filter(|(_, count)| *count >= REPEATED_PHRASE_TIMES)
+        .map(|(window, _)| window.iter().collect())
+        .collect::<Vec<_>>();
+    windows.sort_unstable();
+    windows
+}
+
+/// The exact contiguous duplicate threshold used by signing check C0-3.
+pub(crate) const ORIGINALITY_SPAN_CHARS: usize = 100;
+
+fn originality_windows(body: &str) -> impl Iterator<Item = &str> {
+    let offsets = body
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(body.len()))
+        .collect::<Vec<_>>();
+    (0..offsets.len().saturating_sub(ORIGINALITY_SPAN_CHARS))
+        .map(move |start| &body[offsets[start]..offsets[start + ORIGINALITY_SPAN_CHARS]])
+}
+
+/// Check each candidate against earlier candidate windows and the reference
+/// corpus. Duplicates that occur only inside the reference corpus are irrelevant.
+pub(crate) fn originality_duplicate<'a>(
+    references: impl IntoIterator<Item = &'a str>,
+    candidates: impl IntoIterator<Item = &'a str>,
+) -> Option<&'a str> {
+    let mut seen: HashSet<&str> = references
+        .into_iter()
+        .flat_map(originality_windows)
+        .collect();
+    candidates
+        .into_iter()
+        .flat_map(originality_windows)
+        .find(|span| !seen.insert(*span))
+}
+
+pub(crate) fn duplicate_in_chapter(body: &str) -> Option<&str> {
+    originality_duplicate(std::iter::empty(), [body])
+}
+
 /// A window mostly of ASCII letters, digits and hyphens is an identifier
 /// (an archive number, an account name), not a repeated phrase (owner
 /// decision 2026-10-24).
@@ -875,6 +924,53 @@ pub fn overused_phrases(history: &[String], text: &str) -> Vec<String> {
         .chain([text.to_string()])
         .collect::<Vec<_>>();
     phrases_used(&texts, history.len(), REPEATED_PHRASE_TIMES)
+}
+
+/// An exact F1-5 window that the edit added another instance of. Existing
+/// repeats in the saved draft are left for the prose review to address.
+pub(crate) fn added_overused_phrase(
+    history: &[String],
+    before: &str,
+    after: &str,
+) -> Option<String> {
+    let mut texts = history
+        .iter()
+        .map(|text| text.chars().collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    texts.push(before.chars().collect());
+    let old_counts = phrase_window_counts(&texts);
+    let mut edited = texts[..history.len()].to_vec();
+    let after = after.chars().collect::<Vec<_>>();
+    edited.push(after);
+    let new_counts = phrase_window_counts(&edited);
+    edited
+        .last()?
+        .windows(PHRASE_CHARACTERS)
+        .find(|&window| {
+            let new = new_counts.get(window).copied().unwrap_or(0);
+            new >= REPEATED_PHRASE_TIMES && new > old_counts.get(window).copied().unwrap_or(0)
+        })
+        .map(|window| window.iter().collect())
+}
+
+/// Measure the whole candidate, independent of the display limit and how
+/// the same covered characters are grouped for rewrite suggestions.
+pub(crate) fn repeated_character_count(history: &[String], body: &str) -> usize {
+    let texts = history
+        .iter()
+        .map(String::as_str)
+        .chain([body])
+        .map(|text| text.chars().collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let counts = phrase_window_counts(&texts);
+    repeated_coverage(
+        texts.last().expect("candidate included"),
+        &counts,
+        REPEATED_PHRASE_TIMES,
+    )
+    .into_iter()
+    .filter(|covered| *covered)
+    .count()
 }
 
 /// Rule findings the rewrite must fix, one for each sentence of `body` that
@@ -1249,6 +1345,27 @@ pub fn motif_findings(motifs: &[String], body: &str) -> Vec<Value> {
 const COPIED_SENTENCE_CHARACTERS: usize = 15;
 const COPIED_SENTENCE_WINDOW: usize = 3;
 
+/// An expansion must not increase the number of copies of a complete sentence
+/// already present in its draft.
+pub(crate) fn added_copied_sentence<'a>(before: &str, after: &'a str) -> Option<&'a str> {
+    let mut old_counts = std::collections::HashMap::new();
+    for (start, end) in sentence_spans(before) {
+        *old_counts.entry(&before[start..end]).or_insert(0) += 1;
+    }
+    let mut new_counts = std::collections::HashMap::new();
+    for (start, end) in sentence_spans(after) {
+        let sentence = &after[start..end];
+        if sentence.chars().count() >= COPIED_SENTENCE_CHARACTERS {
+            let count = new_counts.entry(sentence).or_insert(0);
+            *count += 1;
+            if *count >= 2 && *count > old_counts.get(sentence).copied().unwrap_or(0) {
+                return Some(sentence);
+            }
+        }
+    }
+    None
+}
+
 /// QC-1 (third acceptance: 14 sentences repeated word for word across
 /// chapters; sixth: one written twice within chapter 1): each sentence of
 /// `body` of at least `COPIED_SENTENCE_CHARACTERS` characters that occurs
@@ -1569,6 +1686,1042 @@ pub fn contradiction_findings(contradictions: &[Value], body: &str) -> Vec<Value
         .collect()
 }
 
+pub(crate) fn numbered_body_sentences(body: &str) -> Vec<Value> {
+    sentence_spans(body)
+        .into_iter()
+        .enumerate()
+        .map(|(number, (start, end))| json!({"number":number,"text":&body[start..end]}))
+        .collect()
+}
+
+pub(crate) fn continuity_anchors(body: &str) -> Vec<String> {
+    const MAX_ANCHORS: usize = 96;
+    let candidates = body
+        .split(['。', '！', '？', '，', '；', '：', '、', '\n'])
+        .map(|clause| {
+            let chars = clause.chars().collect::<Vec<_>>();
+            chars
+                .windows(4)
+                .filter(|window| window.iter().copied().all(is_han))
+                .filter_map(|window| {
+                    let anchor = window.iter().collect::<String>();
+                    let specificity = telling_pairs(&anchor).len();
+                    (specificity >= 2).then_some((anchor, specificity))
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let mut frequency = BTreeMap::new();
+    for (anchor, _) in candidates.iter().flatten() {
+        *frequency.entry(anchor.as_str()).or_insert(0_usize) += 1;
+    }
+    let mut seen = BTreeSet::new();
+    let mut selected = Vec::new();
+    for sentence in &candidates {
+        let mut ranked = sentence
+            .iter()
+            .filter(|(anchor, _)| frequency[anchor.as_str()] <= 2)
+            .collect::<Vec<_>>();
+        ranked.sort_by_key(|(anchor, specificity)| {
+            (frequency[anchor.as_str()], std::cmp::Reverse(*specificity))
+        });
+        selected.extend(
+            ranked
+                .into_iter()
+                .filter_map(|(anchor, _)| seen.insert(anchor).then_some(anchor))
+                .take(2),
+        );
+    }
+    if selected.len() > MAX_ANCHORS {
+        return (0..MAX_ANCHORS)
+            .map(|i| selected[i * selected.len() / MAX_ANCHORS].clone())
+            .collect();
+    }
+    selected.into_iter().cloned().collect()
+}
+
+pub(crate) fn add_recalled_continuity_prose(
+    prior: &mut Vec<Value>,
+    chapters: &[&crate::repositories::ops::ContinuityChapter],
+    body: &str,
+) {
+    const MAX_WINDOWS: usize = 12;
+    const MAX_QUOTED_CHARS: usize = 4_800;
+    const MAX_SENTENCE_CHARS: usize = 240;
+    let current_chars = body.chars().collect::<Vec<_>>();
+    let phrases = current_chars
+        .windows(4)
+        .filter(|window| window.iter().copied().all(is_han))
+        .map(|window| window.iter().collect::<String>())
+        .filter(|phrase| telling_pairs(phrase).len() >= 2)
+        .collect::<BTreeSet<_>>();
+    let current_pairs = sentence_spans(body)
+        .into_iter()
+        .map(|(start, end)| telling_pairs(&body[start..end]))
+        .filter(|pairs| pairs.len() >= 4)
+        .collect::<Vec<_>>();
+    let mut passages = Vec::new();
+    let mut outcome_sentences = BTreeMap::new();
+    for (chapter_index, chapter) in chapters.iter().enumerate() {
+        let existing = prior
+            .iter()
+            .find(|entry| entry["chapterNo"] == chapter.chapter_no);
+        if existing.is_some_and(|entry| entry["chapterId"] != chapter.chapter_id) {
+            continue;
+        }
+        let visible = existing
+            .and_then(|entry| entry["sentences"].as_array())
+            .map_or(0, Vec::len);
+        let spans = sentence_spans(&chapter.body);
+        let outcome_byte = chapter
+            .outcome_end
+            .and_then(|end| chapter.body.char_indices().nth(end.saturating_sub(1)))
+            .map(|(byte, _)| byte);
+        for (number, &(start, end)) in spans.iter().enumerate().skip(visible) {
+            let sentence = &chapter.body[start..end];
+            if sentence.chars().count() > MAX_SENTENCE_CHARS {
+                continue;
+            }
+            if outcome_byte.is_some_and(|byte| (start..end).contains(&byte)) {
+                // A recorded outcome needs no vocabulary overlap to reach review.
+                passages.push((usize::MAX, 0, chapter.chapter_no, chapter_index, number));
+                outcome_sentences.insert(chapter_index, number);
+                continue;
+            }
+            let chars = sentence.chars().collect::<Vec<_>>();
+            let hits = chars
+                .windows(4)
+                .filter(|window| window.iter().copied().all(is_han))
+                .map(|window| window.iter().collect::<String>())
+                .filter(|phrase| phrases.contains(phrase))
+                .count();
+            if hits == 0 {
+                continue;
+            }
+            let pairs = telling_pairs(sentence);
+            let shared = current_pairs
+                .iter()
+                .map(|other| pairs.intersection(other).count())
+                .max()
+                .unwrap_or_default();
+            if shared >= 4 {
+                passages.push((shared, hits, chapter.chapter_no, chapter_index, number));
+            }
+        }
+    }
+    passages.sort_by_key(|&(shared, hits, chapter, _, number)| {
+        std::cmp::Reverse((shared, hits, chapter, number))
+    });
+    let mut windows: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+    let mut used = 0;
+    for (_, _, _, chapter, number) in passages {
+        let selected = windows.entry(chapter).or_default();
+        if selected.len() >= 15 || selected.contains(&number) {
+            continue;
+        }
+        selected.extend(number.saturating_sub(1)..=number.saturating_add(1));
+        used += 1;
+        if used == MAX_WINDOWS {
+            break;
+        }
+    }
+    let mut quote_chars = 0;
+    for (index, numbers) in windows {
+        let chapter = &chapters[index];
+        let existing = prior
+            .iter_mut()
+            .find(|entry| entry["chapterNo"] == chapter.chapter_no);
+        if existing
+            .as_ref()
+            .is_some_and(|entry| entry["chapterId"] != chapter.chapter_id)
+        {
+            continue;
+        }
+        let visible = existing
+            .as_ref()
+            .and_then(|entry| entry["sentences"].as_array())
+            .map_or(0, Vec::len);
+        let sentences = sentence_spans(&chapter.body)
+            .into_iter()
+            .enumerate()
+            .filter(|(number, _)| *number >= visible && numbers.contains(number))
+            .filter_map(|(number, (start, end))| {
+                let text = &chapter.body[start..end];
+                let len = text.chars().count();
+                if len > MAX_SENTENCE_CHARS || quote_chars + len > MAX_QUOTED_CHARS {
+                    return None;
+                }
+                quote_chars += len;
+                Some(json!({"number":number,"text":text}))
+            })
+            .collect::<Vec<_>>();
+        if sentences.is_empty() {
+            continue;
+        }
+        let outcome_sentence = outcome_sentences.get(&index).copied().filter(|number| {
+            sentences
+                .iter()
+                .any(|sentence| sentence["number"] == json!(number))
+        });
+        let source = json!({"chapterId":chapter.chapter_id,"finalRef":chapter.final_ref});
+        let entry = if let Some(entry) = existing {
+            if let Some(existing) = entry["sentences"].as_array_mut() {
+                existing.extend(sentences);
+                existing.sort_by_key(|sentence| sentence["number"].as_u64());
+            }
+            entry["source"] = source;
+            entry["excerpts"] = json!(true);
+            entry
+        } else {
+            prior.push(
+                json!({"chapterNo":chapter.chapter_no,"chapterId":chapter.chapter_id,
+                             "source":source,"excerpts":true,"sentences":sentences}),
+            );
+            prior
+                .last_mut()
+                .expect("the recalled chapter was just added")
+        };
+        if let Some(number) = outcome_sentence {
+            entry["recordedOutcomeSentence"] = json!(number);
+        }
+    }
+}
+
+fn numbered_prior_sentence(chapter: &Value, number: usize) -> Option<&str> {
+    chapter["sentences"]
+        .as_array()?
+        .iter()
+        .find(|sentence| sentence["number"].as_u64() == Some(number as u64))?["text"]
+        .as_str()
+}
+
+/// Candidate pairs for the model to judge, including actions outside the
+/// verb list and restatements that rearrange the same result.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReusedPassage {
+    chapter: i64,
+    prior_sentence: usize,
+    sentence: usize,
+}
+
+pub(crate) fn recurring_outcome_candidates(
+    prior: &[Value],
+    current: &[Value],
+    minimum_pairs: usize,
+) -> Vec<ReusedPassage> {
+    let number = |sentence: &Value| usize::try_from(sentence["number"].as_u64()?).ok();
+    let earlier = prior
+        .iter()
+        .flat_map(|chapter| {
+            chapter["sentences"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|sentence| {
+                    let pairs = telling_pairs(sentence["text"].as_str()?);
+                    (pairs.len() >= minimum_pairs).then_some((
+                        chapter["chapterNo"].as_i64()?,
+                        number(sentence)?,
+                        pairs,
+                    ))
+                })
+        })
+        .collect::<Vec<_>>();
+    let mut matches = current
+        .iter()
+        .filter_map(|sentence| {
+            let pairs = telling_pairs(sentence["text"].as_str()?);
+            if pairs.len() < minimum_pairs {
+                return None;
+            }
+            let (score, chapter, prior_sentence) = earlier
+                .iter()
+                .filter_map(|(chapter, number, prior_pairs)| {
+                    let shared = pairs.intersection(prior_pairs).count();
+                    let shorter = pairs.len().min(prior_pairs.len());
+                    (shared >= minimum_pairs && shared * 2 >= shorter)
+                        .then_some((shared, *chapter, *number))
+                })
+                .max_by_key(|(shared, chapter, _)| (*shared, *chapter))?;
+            Some((
+                score,
+                ReusedPassage {
+                    chapter,
+                    prior_sentence,
+                    sentence: number(sentence)?,
+                },
+            ))
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by_key(|(shared, _)| std::cmp::Reverse(*shared));
+    matches
+        .into_iter()
+        .take(8)
+        .map(|(_, candidate)| candidate)
+        .collect()
+}
+
+/// A scene with two material beats in the same order merits a local rewrite
+/// even when they are not among the fixed physical transition verbs.
+pub(crate) fn replayed_passage_findings(prior: &[Value], body: &str) -> Vec<Value> {
+    let spans = sentence_spans(body);
+    let mut matches = recurring_outcome_candidates(prior, &numbered_body_sentences(body), 6);
+    matches.sort_by_key(|hit| hit.sentence);
+    let mut findings = Vec::new();
+    let mut next = 0;
+    for (index, first) in matches.iter().enumerate() {
+        let start = first.sentence;
+        if start < next {
+            continue;
+        }
+        for second in &matches[index + 1..] {
+            let end = second.sentence;
+            if end - start > 8 {
+                break;
+            }
+            if first.chapter != second.chapter
+                || !second
+                    .prior_sentence
+                    .checked_sub(first.prior_sentence)
+                    .is_some_and(|gap| (1..=8).contains(&gap))
+            {
+                continue;
+            }
+            let quote = &body[spans[start].0..spans[end].1];
+            let context = &body[spans[start.saturating_sub(1)].0..spans[end].1];
+            if quote.chars().count() > 320
+                || body.matches(quote).count() != 1
+                || ["回忆", "回想", "想起", "复述", "转述"]
+                    .iter()
+                    .any(|word| context.contains(word))
+            {
+                continue;
+            }
+            let earlier = prior
+                .iter()
+                .find(|chapter| chapter["chapterNo"] == first.chapter);
+            let earlier_quote = |index| {
+                earlier
+                    .and_then(|chapter| numbered_prior_sentence(chapter, index))
+                    .unwrap_or("")
+            };
+            let first_quote = earlier_quote(first.prior_sentence);
+            let last_quote = earlier_quote(second.prior_sentence);
+            let mut finding = rule_finding("repeated_event", "HIGH", quote,
+                format!("第 {} 章已依次写过「{first_quote}」和「{last_quote}」。请核对这段是否重演了同一组动作或结果。", first.chapter),
+                "从已经发生的场面之后写起，保留这里新增的行动、证据或后果。若是有意重试，写清新的触发原因。");
+            finding["comparison"] = json!({
+                "chapter":first.chapter,"firstSentence":first.prior_sentence,"lastSentence":second.prior_sentence
+            });
+            findings.push(finding);
+            next = end + 1;
+            break;
+        }
+        if findings.len() == 2 {
+            break;
+        }
+    }
+    findings
+}
+
+pub(crate) fn recurring_transition_candidates(prior: &[Value], current: &[Value]) -> Vec<Value> {
+    const ACTIONS: &[&str] = &[
+        "弹开",
+        "打开",
+        "开启",
+        "解开",
+        "揭开",
+        "发现",
+        "取出",
+        "交出",
+        "承认",
+        "夺回",
+        "坍塌",
+        "烧起来",
+        "脱手飞出",
+        "露出",
+    ];
+    fn action_context(text: &str, action: &str) -> Option<String> {
+        let (before, _) = text.rsplit_once(action)?;
+        let clause = before.rsplit(['，', '。', '；', '！', '？']).next()?;
+        let chars = clause.chars().collect::<Vec<_>>();
+        Some(chars[chars.len().saturating_sub(12)..].iter().collect())
+    }
+    let history = prior
+        .iter()
+        .flat_map(|chapter| {
+            chapter["sentences"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|sentence| {
+                    (
+                        &chapter["chapterNo"],
+                        &sentence["number"],
+                        sentence["text"].as_str().unwrap_or(""),
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    current
+        .iter()
+        .filter_map(|sentence| {
+            let text = sentence["text"].as_str()?;
+            ACTIONS.iter().find_map(|action| {
+                let subject = action_context(text, action)?;
+                let chars = subject.chars().collect::<Vec<_>>();
+                let width = if *action == "脱手飞出" { 2 } else { 4 };
+                let anchors = chars
+                    .windows(width)
+                    .filter(|word| word.iter().copied().all(is_han))
+                    .map(|word| word.iter().collect::<String>())
+                    .collect::<Vec<_>>();
+                history
+                    .iter()
+                    .find_map(|(chapter, prior_sentence, earlier)| {
+                        let context = action_context(earlier, action)?;
+                        let anchor = anchors
+                            .iter()
+                            .find(|anchor| context.contains(anchor.as_str()))?;
+                        Some(json!({"sentence":sentence["number"],"chapter":chapter,
+                            "priorSentence":prior_sentence,"action":action,"sharedWording":anchor}))
+                    })
+            })
+        })
+        .take(8)
+        .collect()
+}
+
+/// Two matching outcomes in the same narrow interval merit a rewrite even
+/// when the model overlooks the repeated sequence.
+pub(crate) fn replayed_transition_findings(prior: &[Value], body: &str) -> Vec<Value> {
+    let spans = sentence_spans(body);
+    let current = numbered_body_sentences(body);
+    let candidates = recurring_transition_candidates(prior, &current);
+    candidates.windows(2).filter_map(|pair| {
+        let (first, second) = (&pair[0], &pair[1]);
+        if first["chapter"] != second["chapter"] || first["action"] == second["action"] {
+            return None;
+        }
+        let destructive = [first, second].iter().any(|event| matches!(event["action"].as_str(), Some("烧起来" | "坍塌")));
+        let nearby = |key: &str| second[key].as_u64()?.checked_sub(first[key].as_u64()?).filter(|gap| (1..=3).contains(gap));
+        if !destructive || nearby("sentence").is_none() || nearby("priorSentence").is_none() {
+            return None;
+        }
+        let from = usize::try_from(first["sentence"].as_u64()?).ok()?;
+        let to = usize::try_from(second["sentence"].as_u64()?).ok()?;
+        let passage = &body[spans[from].0..spans[to].1];
+        let context = &body[spans[from.saturating_sub(1)].0..spans[to].1];
+        if body.matches(passage).count() != 1
+            || ["回忆", "回想", "想起", "如同上次"].iter().any(|mark| context.contains(mark))
+        {
+            return None;
+        }
+        let mut finding = rule_finding("repeated_event", "HIGH", passage,
+            format!("第 {} 章已经先后写了「{}」和「{}」，本章同一小段再次按原顺序发生。", first["chapter"], first["action"].as_str()?, second["action"].as_str()?),
+            "从前章已发生的结果往前写。若故事确实安排再次发生，交代造成重演的变化以及新的后果。");
+        finding["comparison"] = json!({
+            "chapter":first["chapter"],"firstSentence":first["priorSentence"],"lastSentence":second["priorSentence"]
+        });
+        Some(finding)
+    }).take(2).collect()
+}
+
+struct SpokenParagraph {
+    start: usize,
+    end: usize,
+    words: BTreeSet<(char, char)>,
+    question: bool,
+}
+
+fn spoken_paragraphs(body: &str) -> Vec<SpokenParagraph> {
+    let mut offset = 0;
+    body.split_inclusive('\n')
+        .filter_map(|line| {
+            let start = offset;
+            offset += line.len();
+            let speech = line
+                .split('“')
+                .skip(1)
+                .filter_map(|segment| segment.split_once('”').map(|(text, _)| text))
+                .collect::<String>();
+            let chars = speech
+                .chars()
+                .filter(|&c| {
+                    is_han(c) && (!COMMON_CHARACTERS.contains(c) || matches!(c, '不' | '没'))
+                })
+                .collect::<Vec<_>>();
+            if chars.len() < 5 {
+                return None;
+            }
+            Some(SpokenParagraph {
+                start,
+                end: start + line.trim_end().len(),
+                words: chars.windows(2).map(|pair| (pair[0], pair[1])).collect(),
+                question: speech.ends_with('？'),
+            })
+        })
+        .collect()
+}
+
+/// Repeated disclosures can be restated without repeating a physical verb.
+/// These matches request a rewrite and still require independent confirmation
+/// before a chapter can be held for review.
+pub(crate) fn replayed_dialogue_findings(
+    history: &[Value],
+    bodies: &[String],
+    body: &str,
+) -> Vec<Value> {
+    let prior = history
+        .iter()
+        .zip(bodies)
+        .map(|(chapter, text)| {
+            let excerpt_end = text
+                .char_indices()
+                .nth(4_000)
+                .map_or(text.len(), |(index, _)| index);
+            let text = &text[..excerpt_end];
+            (&chapter["chapterNo"], text, spoken_paragraphs(text))
+        })
+        .collect::<Vec<_>>();
+    let current = spoken_paragraphs(body);
+    let overlap = |left: &SpokenParagraph, right: &SpokenParagraph, minimum, tenths| {
+        left.words.intersection(&right.words).count() >= minimum
+            && pairs_overlap(&left.words, &right.words, tenths)
+    };
+    let mut next_offset = 0;
+    current
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            if line.start < next_offset {
+                return None;
+            }
+            let (chapter, prior_body, previous, end) =
+                prior.iter().find_map(|(chapter, text, lines)| {
+                    lines.iter().enumerate().find_map(|(prior_index, earlier)| {
+                        if line.question && earlier.question && overlap(line, earlier, 4, 4) {
+                            let answer = current.get(index + 1)?;
+                            let prior_answer = lines.get(prior_index + 1)?;
+                            if !answer.question
+                                && !prior_answer.question
+                                && answer.start - line.end <= 150
+                                && prior_answer.start - earlier.end <= 150
+                                && overlap(answer, prior_answer, 4, 4)
+                            {
+                                return Some((
+                                    chapter,
+                                    *text,
+                                    &text[earlier.start..prior_answer.end],
+                                    answer.end,
+                                ));
+                            }
+                        }
+                        if !line.question && !earlier.question && overlap(line, earlier, 7, 8) {
+                            return Some((
+                                chapter,
+                                *text,
+                                &text[earlier.start..earlier.end],
+                                line.end,
+                            ));
+                        }
+                        None
+                    })
+                })?;
+            let quote = &body[line.start..end];
+            if body.matches(quote).count() != 1
+                || ["回忆", "回想", "复述", "转述"]
+                    .iter()
+                    .any(|word| quote.contains(word))
+            {
+                return None;
+            }
+            next_offset = end;
+            let mut finding = rule_finding(
+                "repeated_event",
+                "HIGH",
+                quote,
+                format!(
+                    "第 {} 章已在对话中交代过「{previous}」。请核对本章是否重新揭示了同一事实。",
+                    chapter
+                ),
+                "保留对话真正带来的新信息和后果。若角色是在转述已知事实，写明转述的对象与目的。",
+            );
+            finding["comparison"] = json!({"chapter":chapter,"quote":previous});
+            if let Some((first, last)) = numbered_passage_range(prior_body, previous) {
+                finding["comparison"]["firstSentence"] = json!(first);
+                finding["comparison"]["lastSentence"] = json!(last);
+            }
+            Some(finding)
+        })
+        .take(3)
+        .collect()
+}
+
+pub(crate) fn exact_punctuation_matched_quote<'a>(
+    sentence: &'a str,
+    reported: &str,
+) -> Option<&'a str> {
+    let normalize = |text: &str| {
+        text.chars()
+            .filter(|character| !character.is_whitespace())
+            .map(|character| match character {
+                '，' => ',',
+                '。' => '.',
+                '！' => '!',
+                '？' => '?',
+                '：' => ':',
+                '；' => ';',
+                '“' | '”' => '"',
+                other => other,
+            })
+            .collect::<String>()
+    };
+    let needle = normalize(reported);
+    if needle.is_empty() {
+        return None;
+    }
+    let normalized = normalize(sentence);
+    let mut matches = normalized.match_indices(&needle);
+    let (offset, _) = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    let mut original = sentence
+        .char_indices()
+        .filter(|(_, character)| !character.is_whitespace());
+    let (start, _) = original.nth(normalized[..offset].chars().count())?;
+    let end = match needle.chars().count() - 1 {
+        0 => start + sentence[start..].chars().next()?.len_utf8(),
+        rest => original
+            .nth(rest - 1)
+            .map(|(end, character)| end + character.len_utf8())?,
+    };
+    Some(&sentence[start..end])
+}
+
+pub(crate) fn numbered_passage_range(body: &str, passage: &str) -> Option<(usize, usize)> {
+    let exact = exact_punctuation_matched_quote(body, passage)?;
+    let start = body.find(exact)?;
+    let end = start + exact.len();
+    let spans = sentence_spans(body);
+    let first = spans
+        .iter()
+        .position(|&(from, to)| from <= start && start < to)?;
+    let last = spans
+        .iter()
+        .position(|&(from, to)| from < end && end <= to)?;
+    Some((first, last))
+}
+
+pub(crate) fn has_grounded_continuity_proof(issue: &Value) -> bool {
+    let evidence = &issue["hardEvidence"];
+    let relation_matches = matches!(
+        (issue["kind"].as_str(), evidence["relation"].as_str()),
+        (Some("REPEATED_EVENT"), Some("COMPLETED_OUTCOME_REPLAYED"))
+            | (Some("STATE_CONFLICT"), Some("INCOMPATIBLE_STATES"))
+    );
+    if !relation_matches {
+        return false;
+    }
+    if issue["kind"] == "REPEATED_EVENT" {
+        let persistence = |text: &str| {
+            [
+                "还在原处",
+                "仍在原处",
+                "还在原位",
+                "仍在原位",
+                "还留在原处",
+                "仍留在原处",
+                "没有挪动",
+            ]
+            .iter()
+            .any(|state| text.contains(state))
+        };
+        let outcome = evidence["currentOutcome"].as_str().unwrap_or_default();
+        let passage = issue["currentQuote"].as_str().unwrap_or_default();
+        let earlier_clause = exact_punctuation_matched_quote(passage, outcome)
+            .and_then(|exact| passage.find(exact))
+            .and_then(|start| {
+                passage[..start]
+                    .rsplit(['。', '！', '？', '；', '但', '却'])
+                    .next()
+            })
+            .unwrap_or_default();
+        // The result can be phrased as a short continuation of the
+        // preceding state clause. A separate later action has its own proof.
+        if persistence(outcome) || (!outcome.contains(['但', '却']) && persistence(earlier_clause))
+        {
+            return false;
+        }
+    }
+    let exact_outcome = |quote: &str, outcome: &str| {
+        let outcome = evidence[outcome].as_str().unwrap_or("");
+        outcome.chars().count() >= 4
+            && issue[quote]
+                .as_str()
+                .is_some_and(|text| exact_punctuation_matched_quote(text, outcome).is_some())
+    };
+    if !exact_outcome("priorQuote", "priorOutcome")
+        || !exact_outcome("currentQuote", "currentOutcome")
+    {
+        return false;
+    }
+    if issue["kind"] != "STATE_CONFLICT" {
+        return true;
+    }
+    let Some(subject) = evidence["subject"]
+        .as_str()
+        .filter(|name| name.chars().count() >= 2)
+    else {
+        return false;
+    };
+    let subject_tail = |key: &str| {
+        let quote = issue[key].as_str()?;
+        let exact = exact_punctuation_matched_quote(quote, subject)?;
+        let tail = quote.get(quote.find(exact)? + exact.len()..)?;
+        Some(tail)
+    };
+    let (Some(prior), Some(current)) = (subject_tail("priorQuote"), subject_tail("currentQuote"))
+    else {
+        return false;
+    };
+    let component = |tail: &str| {
+        let ordinal = tail.strip_prefix('第')?;
+        let boundary = ordinal.find(|character: char| {
+            !character.is_ascii_digit() && !"一二三四五六七八九十两".contains(character)
+        })?;
+        let (number, rest) = ordinal.split_at(boundary);
+        let unit = rest.chars().next()?;
+        (!number.is_empty() && "节层排室格指枚段".contains(unit)).then(|| (number.to_owned(), unit))
+    };
+    if let (Some((prior_number, prior_unit)), Some((current_number, current_unit))) =
+        (component(prior), component(current))
+    {
+        if prior_unit == current_unit && prior_number != current_number {
+            return false;
+        }
+    }
+    evidence["priorOutcome"] != evidence["currentOutcome"]
+}
+
+/// An independent reviewer may clear a suspicion when its two exact passages
+/// show a transition, a different referent, or a material new consequence.
+pub(crate) fn grounded_continuity_dismissals(
+    reported: &[Value],
+    candidates: &[Value],
+    prior: &[Value],
+) -> BTreeSet<usize> {
+    let locate = exact_punctuation_matched_quote;
+    reported
+        .iter()
+        .filter_map(|item| {
+            if !matches!(
+                item["relation"].as_str(),
+                Some(
+                    "SHOWN_TRANSITION"
+                        | "DIFFERENT_REFERENT"
+                        | "NEW_MATERIAL_OUTCOME"
+                        | "ESTABLISHED_PREMISE"
+                )
+            ) {
+                return None;
+            }
+            let index = usize::try_from(item["number"].as_u64()?).ok()?;
+            let candidate = candidates
+                .iter()
+                .find(|candidate| candidate["candidateNumber"] == item["number"])?;
+            locate(
+                candidate["currentPassage"].as_str()?,
+                item["currentQuote"].as_str()?,
+            )?;
+            let evidence = &candidate["earlierEvidence"];
+            let chapter = prior_chapter_number(evidence)?.as_i64()?;
+            let source = prior.iter().find(|entry| entry["chapterNo"] == chapter)?;
+            if evidence
+                .get("priorSource")
+                .is_some_and(|expected| expected != &source["source"])
+            {
+                return None;
+            }
+            let quote = item["earlierQuote"].as_str()?;
+            let sentences = source["sentences"].as_array()?;
+            sentences
+                .iter()
+                .any(|sentence| {
+                    sentence["text"]
+                        .as_str()
+                        .is_some_and(|text| locate(text, quote).is_some())
+                        && sentence["number"].as_u64().is_some_and(|number| {
+                            continuity_prior_passage_matches(evidence, number, quote)
+                        })
+                })
+                .then_some(index)
+        })
+        .collect()
+}
+
+pub(crate) struct ContinuityConfirmation {
+    pub blockers: Vec<Value>,
+    pub dismissals: Vec<Value>,
+    pub needs_evidence: BTreeSet<u64>,
+}
+
+pub(crate) fn ground_continuity_confirmation(
+    review: &Value,
+    candidates: &[Value],
+    prior: &[Value],
+    body: &str,
+    current_chapter: Option<u32>,
+) -> ContinuityConfirmation {
+    let mut blockers: Vec<Value> = Vec::new();
+    let mut needs_evidence = BTreeSet::new();
+    let verdicts = review["dismissedCandidates"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice);
+    let cleared = grounded_continuity_dismissals(verdicts, candidates, prior);
+    let mut disputed = BTreeSet::new();
+    let bind = |issue: &Value| {
+        narrative_continuity_findings(std::slice::from_ref(issue), prior, body)
+            .into_iter()
+            .find(|finding| {
+                candidates
+                    .iter()
+                    .any(|candidate| confirms_same_continuity_pair(candidate, &finding["evidence"]))
+            })
+    };
+    for reported in review["narrativeIssues"].as_array().into_iter().flatten() {
+        let mut issue = reported.clone();
+        let uses_current_number = current_chapter
+            .is_some_and(|chapter| issue["chapter"].as_u64() == Some(u64::from(chapter)));
+        // A reviewer can spell out the current chapter number instead of
+        // returning null. The original candidate and both exact sentence
+        // positions must still bind the confirmation.
+        if uses_current_number {
+            issue["chapter"] = Value::Null;
+        }
+        let issue = &issue;
+        if has_grounded_continuity_proof(issue) {
+            let finding = bind(issue).or_else(|| {
+                if !uses_current_number {
+                    return None;
+                }
+                // The current number can also be echoed in place of the
+                // earlier source. Recover only a unique, exact candidate pair.
+                let chapters = candidates
+                    .iter()
+                    .filter_map(|candidate| {
+                        prior_chapter_number(&candidate["earlierEvidence"])?.as_i64()
+                    })
+                    .collect::<BTreeSet<_>>();
+                let mut matched = chapters.into_iter().filter_map(|chapter| {
+                    let mut sourced = issue.clone();
+                    sourced["chapter"] = json!(chapter);
+                    bind(&sourced)
+                });
+                let first = matched.next()?;
+                matched.next().is_none().then_some(first)
+            });
+            if let Some(finding) = finding {
+                let conflicts = candidates
+                    .iter()
+                    .filter(|candidate| {
+                        confirms_same_continuity_pair(candidate, &finding["evidence"])
+                    })
+                    .filter_map(|candidate| candidate["candidateNumber"].as_u64())
+                    .filter(|number| cleared.contains(&(*number as usize)))
+                    .collect::<Vec<_>>();
+                if !conflicts.is_empty() {
+                    disputed.extend(conflicts);
+                } else if !blockers
+                    .iter()
+                    .any(|prior| prior["evidence"] == finding["evidence"])
+                {
+                    blockers.push(finding);
+                }
+                continue;
+            }
+        }
+        for candidate in candidates {
+            let same_chapter =
+                prior_chapter_number(&candidate["earlierEvidence"]) == issue.get("chapter");
+            let range = &candidate["currentSentenceRange"];
+            let in_range = match (
+                range["firstSentence"].as_u64(),
+                range["lastSentence"].as_u64(),
+            ) {
+                (Some(first), Some(last)) => issue["sentence"]
+                    .as_u64()
+                    .is_some_and(|number| (first..=last).contains(&number)),
+                _ => false,
+            };
+            let overlaps = match (
+                candidate["currentPassage"].as_str(),
+                issue["currentQuote"].as_str(),
+            ) {
+                (Some(passage), Some(quote)) => overlapping_continuity_quote(passage, quote),
+                _ => false,
+            };
+            if same_chapter && (in_range || overlaps) {
+                needs_evidence.extend(candidate["candidateNumber"].as_u64());
+            }
+        }
+    }
+    let mut dismissals = Vec::new();
+    for verdict in verdicts {
+        let Some(number) = verdict["number"].as_u64() else {
+            continue;
+        };
+        if cleared.contains(&(number as usize)) && !disputed.contains(&number) {
+            dismissals.push(verdict.clone());
+        } else if candidates
+            .iter()
+            .any(|candidate| candidate["candidateNumber"] == verdict["number"])
+        {
+            needs_evidence.insert(number);
+        }
+    }
+    needs_evidence.retain(|number| !cleared.contains(&(*number as usize)));
+    needs_evidence.extend(disputed);
+    ContinuityConfirmation {
+        blockers,
+        dismissals,
+        needs_evidence,
+    }
+}
+
+fn prior_chapter_number(evidence: &Value) -> Option<&Value> {
+    evidence
+        .get("priorChapter")
+        .or_else(|| evidence.get("chapter"))
+}
+
+fn overlapping_continuity_quote(left: &str, right: &str) -> bool {
+    !left.is_empty()
+        && !right.is_empty()
+        && (exact_punctuation_matched_quote(left, right).is_some()
+            || exact_punctuation_matched_quote(right, left).is_some())
+}
+
+fn continuity_prior_passage_matches(expected: &Value, number: u64, quote: &str) -> bool {
+    if let Some(prior) = expected["priorSentence"].as_u64() {
+        if number != prior {
+            return false;
+        }
+    }
+    let expected_quote = expected["priorQuote"]
+        .as_str()
+        .or_else(|| expected["quote"].as_str())
+        .or_else(|| expected["fact"].as_str());
+    if let (Some(first), Some(last)) = (
+        expected["firstSentence"].as_u64(),
+        expected["lastSentence"].as_u64(),
+    ) {
+        return (first..=last).contains(&number)
+            && expected_quote.is_none_or(|text| overlapping_continuity_quote(text, quote));
+    }
+    expected_quote.is_some_and(|text| overlapping_continuity_quote(text, quote))
+}
+
+pub(crate) fn confirms_same_continuity_pair(candidate: &Value, reported: &Value) -> bool {
+    let expected = &candidate["earlierEvidence"];
+    let Some(number) = reported["priorSentence"].as_u64() else {
+        return false;
+    };
+    let Some(prior_quote) = reported["priorQuote"].as_str() else {
+        return false;
+    };
+    let Some(current_quote) = reported["currentQuote"].as_str() else {
+        return false;
+    };
+    let same_range = match (
+        candidate["currentSentenceRange"]["firstSentence"].as_u64(),
+        candidate["currentSentenceRange"]["lastSentence"].as_u64(),
+    ) {
+        (Some(first), Some(last)) => reported["currentSentence"]
+            .as_u64()
+            .is_some_and(|number| (first..=last).contains(&number)),
+        _ => true,
+    };
+    same_range
+        && candidate["currentPassage"]
+            .as_str()
+            .is_some_and(|passage| overlapping_continuity_quote(passage, current_quote))
+        && prior_chapter_number(expected)
+            .is_some_and(|chapter| chapter == &reported["priorChapter"])
+        && expected
+            .get("priorSource")
+            .is_none_or(|source| source == &reported["priorSource"])
+        && continuity_prior_passage_matches(expected, number, prior_quote)
+}
+
+/// Require an exact passage from a supplied final chapter or an earlier
+/// passage of this chapter before admitting a narrative finding.
+pub fn narrative_continuity_findings(
+    reported: &[Value],
+    prior: &[Value],
+    body: &str,
+) -> Vec<Value> {
+    let spans = sentence_spans(body);
+    let mut seen = BTreeSet::new();
+    reported
+        .iter()
+        .filter_map(|item| {
+            let index = usize::try_from(item["sentence"].as_u64()?).ok()?;
+            let &(start, end) = spans.get(index)?;
+            let current = unique_quote_ending_at(body, &spans, index)?;
+            let reason = item["reason"].as_str()?;
+            let prior_index = usize::try_from(item["priorSentence"].as_u64()?).ok()?;
+            let current_quote = item["currentQuote"].as_str()?;
+            let prior_quote = item["priorQuote"].as_str()?;
+            if [current_quote, prior_quote]
+                .iter()
+                .any(|quote| !(4..=180).contains(&quote.chars().count()))
+                || reason.trim().is_empty()
+                || reason.chars().count() > 180
+            {
+                return None;
+            }
+            let current_evidence = exact_punctuation_matched_quote(&body[start..end], current_quote)?;
+            let (sentence, location, source) = if item.get("chapter")?.is_null() {
+                if prior_index >= index {
+                    return None;
+                }
+                let &(from, to) = spans.get(prior_index)?;
+                (&body[from..to], "本章前文".to_string(), None)
+            } else {
+                let chapter = item["chapter"].as_i64()?;
+                let entry = prior.iter().find(|entry| entry["chapterNo"] == chapter)?;
+                let sentence = numbered_prior_sentence(entry, prior_index)?;
+                (sentence, format!("第 {chapter} 章原文"), entry.get("source"))
+            };
+            let quote = exact_punctuation_matched_quote(sentence, prior_quote)?;
+            let (code, fix) = match item["kind"].as_str()? {
+                "REPEATED_EVENT" => ("repeated_event", "承接事件已经发生的结果，写出本章真正新增的行动或后果。若是再次尝试或回忆，明确写出区别。"),
+                "STATE_CONFLICT" => ("cross_chapter_state_conflict", "承接前文已经确立的状态。若本章确实有状态变化，用现有情节交代变化的过程。"),
+                _ => return None,
+            };
+            if !seen.insert(index) {
+                return None;
+            }
+            let mut finding = rule_finding(code, "HIGH", current, format!("{location}「{quote}」。{reason}"), fix);
+            finding["evidence"] = json!({
+                "priorChapter":item["chapter"],"priorSentence":prior_index,"priorQuote":quote,
+                "currentSentence":index,"currentQuote":current_evidence
+            });
+            if let Some(source) = source {
+                finding["evidence"]["priorSource"] = source.clone();
+            }
+            if has_grounded_continuity_proof(item) {
+                finding["evidence"]["hardEvidence"] = item["hardEvidence"].clone();
+            }
+            Some(finding)
+        })
+        .take(3)
+        .collect()
+}
+
 /// Whether `sentence` is part of `phrase`: one of its windows is in it, or,
 /// for a sentence shorter than a window, all of it.
 fn uses_phrase(sentence: &str, phrase: &str) -> bool {
@@ -1609,12 +2762,7 @@ fn phrases_used(texts: &[String], from: usize, times: usize) -> Vec<String> {
     let counts = phrase_window_counts(&texts);
     let mut phrases = Vec::new();
     for text in &texts[from..] {
-        let mut covered = vec![false; text.len()];
-        for (start, window) in text.windows(PHRASE_CHARACTERS).enumerate() {
-            if counts.get(window).is_some_and(|count| *count >= times) {
-                covered[start..start + PHRASE_CHARACTERS].fill(true);
-            }
-        }
+        let covered = repeated_coverage(text, &counts, times);
         let mut start = None;
         for (index, is_covered) in covered.iter().chain([&false]).enumerate() {
             match (start, is_covered) {
@@ -1634,8 +2782,432 @@ fn phrases_used(texts: &[String], from: usize, times: usize) -> Vec<String> {
     phrases
 }
 
+fn repeated_coverage(
+    text: &[char],
+    counts: &std::collections::HashMap<&[char], usize>,
+    times: usize,
+) -> Vec<bool> {
+    let mut covered = vec![false; text.len()];
+    for (start, window) in text.windows(PHRASE_CHARACTERS).enumerate() {
+        if counts.get(window).is_some_and(|count| *count >= times) {
+            covered[start..start + PHRASE_CHARACTERS].fill(true);
+        }
+    }
+    covered
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_edit_can_introduce_a_signing_repeat_using_two_instances_from_history() {
+        let phrase = "他听见自己心跳漏了整整一拍";
+        let history = vec![format!("空白里，{phrase}。起风后，{phrase}，他合上窗。")];
+        let before = "他把窗栓拉紧。";
+        let after = format!("{before}{phrase}。门铃突然响了。");
+        let added = added_overused_phrase(&history, before, &after).unwrap();
+        assert!(phrase.contains(&added));
+        assert!(added_overused_phrase(&history, &after, &format!("{after}她走进屋。")).is_none());
+        assert!(added_overused_phrase(&history, &after, before).is_none());
+    }
+
+    #[test]
+    fn round58_a_grain_still_in_place_is_not_a_second_fall() {
+        let mut issue = json!({
+            "kind":"REPEATED_EVENT",
+            "priorQuote":"一颗正卡进《青崖药经》虫蛀的窟窿里，把网洞塞住了。",
+            "currentQuote":"昨夜卡进窟窿的那粒银灰还在原处，堵着‘灵脉’二字间的网洞，旁边却新添了两粒。",
+            "hardEvidence":{
+                "relation":"COMPLETED_OUTCOME_REPLAYED",
+                "priorOutcome":"一颗正卡进《青崖药经》虫蛀的窟窿里",
+                "currentOutcome":"昨夜卡进窟窿的那粒银灰还在原处"
+            }
+        });
+        assert!(!has_grounded_continuity_proof(&issue));
+        issue["hardEvidence"]["currentOutcome"] = json!("堵着‘灵脉’二字间的网洞");
+        assert!(!has_grounded_continuity_proof(&issue));
+        issue["currentQuote"] = json!("新落下一颗银灰，又卡进《青崖药经》同一个窟窿。");
+        issue["hardEvidence"]["currentOutcome"] =
+            json!("新落下一颗银灰，又卡进《青崖药经》同一个窟窿");
+        assert!(has_grounded_continuity_proof(&issue));
+    }
+    #[test]
+    fn round57_a_different_referent_requires_both_dismissal_quotes() {
+        let candidates = [json!({
+            "candidateNumber":7,
+            "currentPassage":"她左耳垂突然浮现细密血丝。",
+            "earlierEvidence":{"priorChapter":2,"priorQuote":"他拇指抹过自己左耳垂。"}
+        })];
+        let prior = [json!({"chapterNo":2,"sentences":numbered_body_sentences(
+            "他拇指抹过自己左耳垂。柳青梧原本耳后就有血丝。"
+        )})];
+        let mut dismissal = json!({
+            "number":7,"relation":"DIFFERENT_REFERENT",
+            "currentQuote":"她左耳垂突然浮现细密血丝","earlierQuote":"他拇指抹过自己左耳垂"
+        });
+        assert_eq!(
+            grounded_continuity_dismissals(&[dismissal.clone()], &candidates, &prior),
+            BTreeSet::from([7])
+        );
+        dismissal["earlierQuote"] = json!("柳青梧原本耳后就有血丝");
+        assert!(grounded_continuity_dismissals(&[dismissal], &candidates, &prior).is_empty());
+    }
+
+    #[test]
+    fn round61_an_unbound_claim_targets_only_its_candidate_and_preserves_a_grounded_dismissal() {
+        let body = "陆照又用斜光确认两页纸出自同一人。赵伯手背的旧裂口更深，有一道正在渗血。";
+        let prior = [json!({"chapterNo":2,"sentences":numbered_body_sentences(
+            "陆照用斜光确认两页纸出自同一人。赵伯手背浮着几道新添的裂口。"
+        )})];
+        let candidates = [
+            json!({"candidateNumber":3,"currentPassage":"陆照又用斜光确认两页纸出自同一人。",
+                "currentSentenceRange":{"firstSentence":0,"lastSentence":0},
+                "earlierEvidence":{"chapter":2,"firstSentence":0,"lastSentence":0}}),
+            json!({"candidateNumber":7,"currentPassage":"赵伯手背的旧裂口更深，有一道正在渗血。",
+                "currentSentenceRange":{"firstSentence":1,"lastSentence":1},
+                "earlierEvidence":{"chapter":2,"firstSentence":1,"lastSentence":1}}),
+        ];
+        let genuine_transition = json!({"number":7,"relation":"NEW_MATERIAL_OUTCOME",
+            "currentQuote":"旧裂口更深，有一道正在渗血","earlierQuote":"手背浮着几道新添的裂口"});
+        let first = json!({
+            "narrativeIssues":[{"kind":"REPEATED_EVENT","chapter":2,"priorSentence":0,"sentence":0,
+                "priorQuote":"陆照用斜光确认两页纸出自同一人","currentQuote":"陆照又用斜光确认两页纸出自同一人",
+                "reason":"再次确认同一结果","hardEvidence":{"relation":"COMPLETED_OUTCOME_REPLAYED",
+                    "priorOutcome":"确认两页纸出自同一人","currentOutcome":"用斜光……同一人"}}],
+            "dismissedCandidates":[genuine_transition]
+        });
+        let initial = ground_continuity_confirmation(&first, &candidates, &prior, body, Some(3));
+        assert!(initial.blockers.is_empty());
+        assert_eq!(initial.dismissals, [genuine_transition]);
+        assert_eq!(initial.needs_evidence, BTreeSet::from([3]));
+
+        let mut corrected = first;
+        corrected["narrativeIssues"][0]["hardEvidence"]["currentOutcome"] =
+            json!("确认两页纸出自同一人");
+        let verified =
+            ground_continuity_confirmation(&corrected, &candidates[..1], &prior, body, Some(3));
+        assert_eq!(verified.blockers.len(), 1);
+        assert!(verified.dismissals.is_empty());
+        assert!(verified.needs_evidence.is_empty());
+    }
+
+    #[test]
+    fn confirmation_cannot_substitute_a_different_earlier_passage_for_the_same_current_sentence() {
+        let candidate = json!({
+            "currentPassage":"他又一次说出玉珏和棺木的气味相同。",
+            "currentSentenceRange":{"firstSentence":9,"lastSentence":9},
+            "earlierEvidence":{"priorChapter":2,"priorSentence":19,"priorQuote":"玉珏和棺木的气味相同。"}
+        });
+        let mut actual = json!({
+            "currentSentence":9,"currentQuote":"玉珏和棺木的气味相同",
+            "priorChapter":2,"priorSentence":19,"priorQuote":"玉珏和棺木的气味相同"
+        });
+        assert!(confirms_same_continuity_pair(&candidate, &actual));
+        actual["priorSentence"] = json!(22);
+        assert!(!confirms_same_continuity_pair(&candidate, &actual));
+        actual["priorSentence"] = json!(19);
+        actual["priorChapter"] = json!(3);
+        assert!(!confirms_same_continuity_pair(&candidate, &actual));
+    }
+
+    #[test]
+    fn round68_confirmation_binds_the_current_chapter_number_to_its_earlier_sentence() {
+        let quote = "他调出系统日志，查到同一时刻有一段时间戳断层。";
+        let body = format!("{quote}沈砚抬起头。{quote}");
+        let candidates = [json!({
+            "candidateNumber":0,
+            "currentPassage":format!("沈砚抬起头。{quote}"),
+            "currentSentenceRange":{"firstSentence":1,"lastSentence":2},
+            "earlierEvidence":{"priorChapter":null,"priorSentence":0,"priorQuote":quote}
+        })];
+        let mut review = json!({"narrativeIssues":[{
+            "kind":"REPEATED_EVENT","chapter":1,"priorSentence":0,"sentence":2,
+            "priorQuote":quote,"currentQuote":quote,"reason":"同一次日志发现原句重演",
+            "hardEvidence":{"relation":"COMPLETED_OUTCOME_REPLAYED",
+                "priorOutcome":"查到同一时刻有一段时间戳断层",
+                "currentOutcome":"查到同一时刻有一段时间戳断层"}
+        }]});
+        assert_eq!(
+            ground_continuity_confirmation(&review, &candidates, &[], &body, Some(1))
+                .blockers
+                .len(),
+            1
+        );
+        assert!(
+            ground_continuity_confirmation(&review, &candidates, &[], &body, Some(2))
+                .blockers
+                .is_empty()
+        );
+        review["narrativeIssues"][0]["priorSentence"] = json!(2);
+        assert!(
+            ground_continuity_confirmation(&review, &candidates, &[], &body, Some(1))
+                .blockers
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn round69_the_nominated_prior_source_can_recover_a_mislabeled_confirmation() {
+        let earlier =
+            "他迅速调出系统底层协议日志，发现这13秒里，有人手动执行了三次数据擦除覆盖操作。";
+        let body = "他放大底层协议日志，三次擦除覆盖操作的时间戳依次跳出来：13秒、13秒、13秒。";
+        let prior = [json!({"chapterNo":1,"sentences":numbered_body_sentences(earlier)})];
+        let candidates = [json!({
+            "candidateNumber":0,"currentPassage":body,
+            "currentSentenceRange":{"firstSentence":0,"lastSentence":0},
+            "earlierEvidence":{"priorChapter":1,"priorSentence":0,"priorQuote":earlier}
+        })];
+        let mut review = json!({"narrativeIssues":[{
+            "kind":"REPEATED_EVENT","chapter":2,"priorSentence":0,"sentence":0,
+            "priorQuote":earlier,"currentQuote":body,"reason":"同一次日志发现重演",
+            "hardEvidence":{"relation":"COMPLETED_OUTCOME_REPLAYED",
+                "priorOutcome":"有人手动执行了三次数据擦除覆盖操作",
+                "currentOutcome":"三次擦除覆盖操作的时间戳依次跳出来"}
+        }]});
+        let confirmed = ground_continuity_confirmation(&review, &candidates, &prior, body, Some(2));
+        assert_eq!(confirmed.blockers.len(), 1);
+        assert_eq!(confirmed.blockers[0]["evidence"]["priorChapter"], 1);
+        review["narrativeIssues"][0]["chapter"] = json!(3);
+        assert!(
+            ground_continuity_confirmation(&review, &candidates, &prior, body, Some(2))
+                .blockers
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn round69_conflicting_judgments_on_the_same_pair_require_another_review() {
+        let earlier = "他用斜光确认纸页出自同一人。";
+        let body = "他再次确认两页纸出自同一人。";
+        let prior = [json!({"chapterNo":1,"sentences":numbered_body_sentences(earlier)})];
+        let candidates = [json!({
+            "candidateNumber":0,"currentPassage":body,
+            "currentSentenceRange":{"firstSentence":0,"lastSentence":0},
+            "earlierEvidence":{"priorChapter":1,"priorSentence":0,"priorQuote":earlier}
+        })];
+        let review = json!({
+            "narrativeIssues":[{
+                "kind":"REPEATED_EVENT","chapter":1,"priorSentence":0,"sentence":0,
+                "priorQuote":earlier,"currentQuote":body,"reason":"重复确认",
+                "hardEvidence":{"relation":"COMPLETED_OUTCOME_REPLAYED",
+                    "priorOutcome":"纸页出自同一人","currentOutcome":"两页纸出自同一人"}
+            }],
+            "dismissedCandidates":[{"number":0,"relation":"NEW_MATERIAL_OUTCOME","currentQuote":body,"earlierQuote":earlier}]
+        });
+        let confirmed = ground_continuity_confirmation(&review, &candidates, &prior, body, Some(2));
+        assert!(confirmed.blockers.is_empty());
+        assert!(confirmed.dismissals.is_empty());
+        assert_eq!(confirmed.needs_evidence, BTreeSet::from([0]));
+    }
+
+    #[test]
+    fn a_recalled_remote_passage_preserves_its_sparse_sentence_and_formal_reference() {
+        use crate::generated::types::ArtifactRef;
+        use crate::repositories::ops::ContinuityChapter;
+        let earlier = "他闻出玉珏上的松脂焦香与师父棺木里的气味一样。";
+        let current = "那层松脂焦香贴着鼻腔泛上来，跟师父棺木里的气味完全一样。";
+        let body = format!("{}\n{earlier}", "闲叙一段。".repeat(75));
+        let source = ContinuityChapter {
+            chapter_id: "chap:opening:two".into(),
+            chapter_no: 2,
+            final_ref: ArtifactRef {
+                artifact_id: "art:opening:two".into(),
+                version: 1,
+                payload_hash: "c".repeat(64),
+            },
+            body,
+            outcome_end: None,
+        };
+        let anchors = continuity_anchors(current);
+        assert!(
+            anchors.iter().any(|anchor| earlier.contains(anchor)),
+            "{anchors:?}"
+        );
+        let mut prior = Vec::new();
+        add_recalled_continuity_prose(&mut prior, &[&source], current);
+        let findings = narrative_continuity_findings(
+            &[json!({
+                "sentence":0,"chapter":2,"priorSentence":75,
+                "priorQuote":earlier,"currentQuote":current,"kind":"REPEATED_EVENT","reason":"把已经认出的气味再次写成首次发现"
+            })],
+            &prior,
+            current,
+        );
+        assert_eq!(findings.len(), 1, "{prior:?}");
+        assert_eq!(
+            findings[0]["evidence"]["priorSource"]["finalRef"]["artifactId"],
+            "art:opening:two"
+        );
+        assert_eq!(findings[0]["evidence"]["priorSentence"], 75);
+    }
+    #[test]
+    fn material_outcome_candidates_cover_disclosures_and_actions_outside_the_verb_list() {
+        for (chapter, earlier, current) in [
+            (
+                4,
+                "他凑近看，四道刮痕排在一起，前三道毛边朝里，第四道毛边朝外。",
+                "银斑血迹边缘，第四道刮痕浮出来了，渗入式的，毛边朝外，跟前三道刮掉的完全不同。",
+            ),
+            (
+                9,
+                "陆照接过焦纸，折成三角，塞进青铜断口的凹槽。",
+                "陆照把拓片折成三角，塞进青铜断口凹槽。",
+            ),
+        ] {
+            let prior = [json!({"chapterNo":chapter,"sentences":numbered_body_sentences(earlier)})];
+            let candidates =
+                recurring_outcome_candidates(&prior, &numbered_body_sentences(current), 8);
+            assert_eq!(
+                json!(candidates),
+                json!([{"chapter":chapter,"priorSentence":0,"sentence":0}])
+            );
+        }
+    }
+
+    #[test]
+    fn round52_similar_beats_in_the_same_order_flag_the_replayed_scene() {
+        let earlier = concat!(
+            "“回管事。”陆照忽然伸手，拇指按在桌沿上，压出两道印。\n\n",
+            "力道、间距、深浅。跟今早他在门框上按的那两道，分毫不差。\n\n",
+            "柳管事瞳孔一缩，袖口那处麻线结猛地绷紧，勒进腕肉里。\n\n",
+            "柳管事盯着他看了三息。炭盆里一点余烬爆了声轻响。",
+        );
+        let current = concat!(
+            "“小的手不抖。”他伸出手，拇指按在桌沿，压出两道印。\n\n",
+            "力道、间距、深浅，跟今早门框上那两道分毫不差。柳管事瞳孔缩了一下，袖口的麻线结绷紧，勒进肉里。\n\n",
+            "柳管事盯他三息。炭盆里余烬爆了声轻响。",
+        );
+        let prior = [json!({"chapterNo":3,"sentences":numbered_body_sentences(earlier)})];
+        let findings = replayed_passage_findings(&prior, current);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding["code"] == "repeated_event"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn round62_different_finger_segments_cannot_prove_incompatible_states() {
+        let prior = "左手小指第一节裂开一道口子，渗着幽蓝色的血。";
+        let current = "左手小指第二节的白点淡了。";
+        let issue = json!({
+            "kind":"STATE_CONFLICT","priorQuote":prior,"currentQuote":current,
+            "hardEvidence":{"relation":"INCOMPATIBLE_STATES",
+                "priorOutcome":prior,"currentOutcome":current,
+                "subject":"左手小指"}
+        });
+        assert!(!has_grounded_continuity_proof(&issue));
+    }
+
+    #[test]
+    fn contradictory_states_of_the_same_seal_can_provide_confirmation_proof() {
+        let prior = "库门封条完整，封泥没有缺口。";
+        let current = "同一刻，库门封条断成两截，封泥撒满台阶。";
+        let issue = json!({
+            "kind":"STATE_CONFLICT","priorQuote":prior,"currentQuote":current,
+            "hardEvidence":{"relation":"INCOMPATIBLE_STATES",
+                "priorOutcome":"库门封条完整","currentOutcome":"库门封条断成两截",
+                "subject":"库门封条"}
+        });
+        assert!(has_grounded_continuity_proof(&issue));
+    }
+
+    #[test]
+    fn round51_a_guessed_state_does_not_supply_confirmation_proof() {
+        let mut issue = json!({
+            "kind":"STATE_CONFLICT",
+            "priorQuote":"她指腹按下去，痕边泛出微青。",
+            "currentQuote":"掌心三道浅痕末端，一道微青细线正缓缓延伸。",
+        });
+        assert!(!has_grounded_continuity_proof(&issue));
+        issue["hardEvidence"] = json!({
+            "relation":"INCOMPATIBLE_STATES",
+            "priorOutcome":"痕边泛出微青",
+            "currentOutcome":"第一次出现细线"
+        });
+        assert!(!has_grounded_continuity_proof(&issue));
+    }
+
+    #[test]
+    fn round50_repeated_dialogue_is_checked_even_with_different_wording() {
+        let prior = [json!({"chapterNo":7}), json!({"chapterNo":9})];
+        let bodies = [
+            concat!(
+                "陆照沉默了两息，问：“你父亲拓到一半收手，是烧了纸，还是烧了手？”\n\n",
+                "柳青梧把袖子放下来，声音很平：“烧了半截小指。剩下的半截，他后来用来按契。”",
+            ).into(),
+            concat!(
+                "“丙寅年冬至子时。”他念，每个字都念得很慢，“你师祖写这八个字的时候，墨里掺了银粉。他说，银粉是从灵脉里取的，灵脉不死，这字就不灭。”\n\n",
+                "“阵眼认了。”他说，声音很平，“你填进去的那一处，它认了。”",
+            ).into(),
+        ];
+        let body = concat!(
+            "“师父当年拓到一半收手，”他抬头看柳青梧，“是看见字就烧了纸，还是手先烧起来？”\n\n",
+            "柳青梧垂下手，袖口盖回腕上，语气听不出起伏：“半截小指没保住。剩下的半截，按了契。”\n\n",
+            "“子时。”他念，语速很慢，“你师祖写那八个字的时候，墨里掺银粉。他说，银粉从灵脉里取，灵脉不死，字就不灭。”\n\n",
+            "“灵脉没死。”陆照说，“沉眠了。”\n\n",
+            "陈砚没回头：“阵眼认了。你填进去那一处，它认了。剩下的，它自己找路。”",
+        );
+        let findings = replayed_dialogue_findings(&prior, &bodies, body);
+        assert_eq!(findings.len(), 3, "{findings:?}");
+        for (finding, chapter, fragment) in [
+            (&findings[0], "第 7 章", "半截小指"),
+            (&findings[1], "第 9 章", "墨里掺银粉"),
+            (&findings[2], "第 9 章", "阵眼认了"),
+        ] {
+            assert!(finding["problem"].as_str().unwrap().contains(chapter));
+            assert!(finding["quote"].as_str().unwrap().contains(fragment));
+        }
+    }
+
+    #[test]
+    fn a_repeated_question_that_gets_a_new_answer_is_not_a_replay() {
+        let prior = [json!({"chapterNo":7})];
+        let bodies =
+            ["“谁把租约藏进了井边的石龛？”\n\n“先前回来那个老药童，袖口上糊着碎霜。”".into()];
+        let body = "“谁把租约藏进了井边的石龛？”\n\n“周使的信使。他借这事陷害陈砚。”";
+        assert!(replayed_dialogue_findings(&prior, &bodies, body).is_empty());
+    }
+
+    #[test]
+    fn round48_burning_the_same_scabbard_and_losing_the_sword_again_is_flagged() {
+        let prior = [json!({"chapterNo":6,"sentences":numbered_body_sentences(
+            "鞘口渗出一缕青烟，紧接着整条剑鞘烧起来，幽火顺着鞘身往上爬，热浪掀起袍角。剑柄脱手飞出，撞在对面墙上。"
+        )})];
+        let current = "他一脚踏进夹道。鞘口渗出一缕青烟，紧接着整条剑鞘烧起来，幽火顺着鞘身往上爬。剑柄脱手飞出，撞在对墙。";
+        let findings = replayed_transition_findings(&prior, current);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0]["code"], "repeated_event");
+        assert!(replayed_transition_findings(
+            &prior,
+            &current.replace("他一脚踏进夹道。", "陆照回想起先前的一幕。")
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn a_replayed_mirror_opening_is_flagged_for_review_even_with_new_wording() {
+        let prior = [
+            json!({"chapterNo":7,"sentences":numbered_body_sentences("镜背夹层无声弹开。里面有星砂结晶。")}),
+        ];
+        let current = numbered_body_sentences("铜锈簌簌剥落，镜背夹层弹开一条缝。衣柜门也弹开了。");
+        assert_eq!(
+            recurring_transition_candidates(&prior, &current),
+            vec![json!({
+                "sentence":0,"chapter":7,"priorSentence":0,"action":"弹开","sharedWording":"镜背夹层"
+            })]
+        );
+    }
+
+    #[test]
+    fn evidence_keeps_the_original_paragraph_break_when_the_model_shortens_it() {
+        let source = "“谢”。\n\n跟阿沅拼出来的那个字，同一把刀刻的。";
+        assert_eq!(
+            exact_punctuation_matched_quote(source, "“谢”。\n跟阿沅拼出来的那个字，同一把刀刻的。"),
+            Some(source)
+        );
+        assert!(exact_punctuation_matched_quote(source, "“柳”。跟阿沅拼出来的那个字").is_none());
+    }
 
     #[test]
     fn markdown_left_in_the_prose_is_taken_out_before_signing_reads_it() {

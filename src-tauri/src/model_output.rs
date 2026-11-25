@@ -16,12 +16,12 @@ const REPORTED_VIOLATIONS: usize = 5;
 /// Each spec and the model steps it covers.
 const SPECS: &[(&[&str], &str)] = &[
     (
-        &[
-            "RENDER_CHAPTER_CRAFT",
-            "ADJUST_CHAPTER_LENGTH",
-            "RENDER_CHAPTER",
-        ],
+        &["RENDER_CHAPTER_CRAFT", "RENDER_CHAPTER"],
         include_str!("../../contracts/model-output/chapter-body.schema.json"),
+    ),
+    (
+        &["ADJUST_CHAPTER_LENGTH"],
+        include_str!("../../contracts/model-output/chapter-length-adjustment.schema.json"),
     ),
     (
         &["CUT_CHAPTER"],
@@ -38,6 +38,30 @@ const SPECS: &[(&[&str], &str)] = &[
     (
         &["CHECK_CONTINUITY"],
         include_str!("../../contracts/model-output/check-continuity.schema.json"),
+    ),
+    (
+        &["CONFIRM_NARRATIVE_CONTINUITY"],
+        include_str!("../../contracts/model-output/confirm-narrative-continuity.schema.json"),
+    ),
+    (
+        &["SELECT_MAIN_EVENT"],
+        include_str!("../../contracts/model-output/main-event-selection.schema.json"),
+    ),
+    (
+        &["VERIFY_STAGE_STEP"],
+        include_str!("../../contracts/model-output/verify-stage-step.schema.json"),
+    ),
+    (
+        &["CHECK_BOOK_CONTINUATION"],
+        include_str!("../../contracts/model-output/check-book-continuation.schema.json"),
+    ),
+    (
+        &["CONFIRM_BOOK_CONTINUATION"],
+        include_str!("../../contracts/model-output/confirm-book-continuation.schema.json"),
+    ),
+    (
+        &["REPAIR_BOOK_PRESSURE"],
+        include_str!("../../contracts/model-output/repair-book-pressure.schema.json"),
     ),
     (
         &["GENERATE_STORY_BIBLE"],

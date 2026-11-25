@@ -723,6 +723,7 @@ export interface ProductionCenterProjection {
     ref?: { artifactId: string; version: number; payloadHash: string } | null
     seedPreserved?: boolean
     reapprovalRequired?: boolean
+    firstVolumeDirectionMissing?: boolean
     steps?: Array<{ id: string; label: string; status: 'pending' | 'active' | 'done' | 'failed' | 'waiting' }>
   }
   gatePolicy?: {
@@ -772,6 +773,7 @@ export interface ProductionCenterProjection {
     title: string
     volumeId: string
     executionMode: 'OPENING_BOOTSTRAP' | 'LONG_FORM'
+    planReady?: boolean
     quota?: { used: number; limit: number; allowance: number } | null
   } | null
   chapterPlan?: {
@@ -806,6 +808,7 @@ export interface ProductionCenterProjection {
   stale?: { status: 'NO_PLAN' | 'PLAN_STALE' | 'VALID' | 'RECHECK_REQUIRED' | 'VALID_OR_REQUIRES_RELEVANT_RECHECK'; reason: string }
   modelRuns?: Array<{ modelRunId: string; capability: string; provider: string; model: string; status: string }>
   candidateRef?: { artifactId: string; version: number; payloadHash: string } | null
+  heldDraft?: { jobId: string; body: string; findings: Array<{ quote: string; problem: string }> } | null
   finalChapterRef?: { artifactId: string; version: number; payloadHash: string } | null
   reconciliation?: 'NO_ACTION' | 'RECOMPILE_NEXT_CHAPTER' | 'RECOMPILE_ROLLING_WINDOW' | 'REPLAN_VOLUME_ROUTE' | 'CHANGE_REQUEST' | null
   repair?: RepairWorkflowProjection | null

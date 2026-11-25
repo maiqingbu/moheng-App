@@ -371,6 +371,23 @@ impl VolumeLifecycleOwner {
         })
     }
 
+    pub(crate) fn read_planning_state(
+        connection: &Connection,
+        project_id: &str,
+        volume_id: &str,
+    ) -> Result<Option<Value>, String> {
+        let pending = crate::repositories::health::HealthRepository::pending_b09_rebuild_at(
+            connection, project_id, volume_id,
+        )
+        .map_err(|error| error.to_string())?;
+        if let Some(marked_at) = pending {
+            return build_planning_state(connection, project_id, volume_id, &marked_at, None)
+                .map(Some);
+        }
+        VolumeLifecycleRepository::planning_projection(connection, project_id, volume_id)
+            .map_err(|error| error.to_string())
+    }
+
     pub fn replan_volume_route(
         connection: &Connection,
         request: RouteReplanRequest,
@@ -1685,6 +1702,9 @@ fn apply_next_volume_handoff(
         &request.now,
         Some(request.expected_revision),
     )?;
+    if current_planning_state["closeReadiness"] != "READY" {
+        return Err("NEXT_VOLUME_BLOCKED_ELIGIBILITY".into());
+    }
     let goal_contract_refs = NarrativeRepository::goal_contract_refs_for_volume(
         connection,
         &request.project_id,
@@ -1714,6 +1734,16 @@ fn apply_next_volume_handoff(
     )
     .map_err(|error| error.to_string())?
     .ok_or_else(|| "VOLUME_EXIT_STATE_PAYLOAD_NOT_FOUND".to_string())?;
+    let exact_evidence_refs = VolumeLifecycleRepository::handoff_evidence(
+        connection,
+        &request.project_id,
+        &request.current_volume_id,
+        20,
+    )
+    .map_err(|error| error.to_string())?;
+    if exact_evidence_refs.is_empty() {
+        return Err("NEXT_VOLUME_BLOCKED_ELIGIBILITY".into());
+    }
     let compiled_input = json!({
         "inputSchema": "b09.next-volume-input.r1",
         "projectId": request.project_id,
@@ -1730,7 +1760,7 @@ fn apply_next_volume_handoff(
         "unresolvedResponsibilities": current_planning_state.get("unresolvedResponsibilities").cloned().unwrap_or_else(|| json!([])),
         "futureReservations": current_intent_payload.get("futureReservationRefs").cloned().unwrap_or_else(|| json!([])),
         "volumeExitState": {"ref": current_exit_ref.clone(), "payload": current_exit_payload.clone()},
-        "exactEvidenceRefs": current_exit_payload.get("handoffEvidenceRefs").cloned().unwrap_or_else(|| json!([])),
+        "exactEvidenceRefs": exact_evidence_refs,
     });
     let compiled_input_digest =
         sha256_canonical(&compiled_input).map_err(|error| error.to_string())?;

@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "evidenced confirmation of a material replay or state contradiction",
+  "type": "object",
+  "required": [
+    "narrativeIssues"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "narrativeIssues": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "required": [
+          "sentence",
+          "chapter",
+          "priorSentence",
+          "currentQuote",
+          "priorQuote",
+          "kind",
+          "reason",
+          "hardEvidence"
+        ],
+        "properties": {
+          "sentence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "chapter": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "priorSentence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "currentQuote": {
+            "type": "string",
+            "minLength": 4,
+            "maxLength": 180
+          },
+          "priorQuote": {
+            "type": "string",
+            "minLength": 4,
+            "maxLength": 180
+          },
+          "kind": {
+            "enum": [
+              "REPEATED_EVENT",
+              "STATE_CONFLICT"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 180
+          },
+          "hardEvidence": {
+            "type": "object",
+            "required": [
+              "relation",
+              "priorOutcome",
+              "currentOutcome"
+            ],
+            "properties": {
+              "relation": {
+                "enum": [
+                  "COMPLETED_OUTCOME_REPLAYED",
+                  "INCOMPATIBLE_STATES"
+                ]
+              },
+              "priorOutcome": {
+                "type": "string",
+                "minLength": 4,
+                "maxLength": 180
+              },
+              "currentOutcome": {
+                "type": "string",
+                "minLength": 4,
+                "maxLength": 180
+              },
+              "subject": {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": 40
+              }
+            },
+            "if": { "properties": { "relation": { "const": "INCOMPATIBLE_STATES" } } },
+            "then": { "required": ["subject"] },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "dismissedCandidates": {
+      "type": "array",
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "number",
+          "relation",
+          "currentQuote",
+          "earlierQuote"
+        ],
+        "properties": {
+          "number": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "relation": {
+            "enum": [
+              "SHOWN_TRANSITION",
+              "DIFFERENT_REFERENT",
+              "NEW_MATERIAL_OUTCOME",
+              "ESTABLISHED_PREMISE"
+            ]
+          },
+          "currentQuote": {
+            "type": "string",
+            "minLength": 4,
+            "maxLength": 180
+          },
+          "earlierQuote": {
+            "type": "string",
+            "minLength": 4,
+            "maxLength": 180
+          }
+        }
+      }
+    }
+  }
+}

@@ -22,6 +22,22 @@ pub struct VolumeMetadata {
 pub struct VolumeLifecycleRepository;
 
 impl VolumeLifecycleRepository {
+    pub(crate) fn volume_id_by_number(
+        connection: &Connection,
+        project_id: &str,
+        book_id: &str,
+        number: i64,
+    ) -> Result<Option<String>, VolumeLifecycleRepositoryError> {
+        connection
+            .query_row(
+                "SELECT volume_id FROM volumes WHERE project_id=?1 AND book_id=?2 AND volume_no=?3",
+                libsql_rusqlite::params![project_id, book_id, number],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn with_planning_health_refresh<T>(
         connection: &Connection,
         operation: impl FnOnce(&Connection) -> Result<T, String>,
@@ -331,7 +347,22 @@ impl VolumeLifecycleRepository {
         limit: i64,
     ) -> Result<Vec<Value>, VolumeLifecycleRepositoryError> {
         let mut statement = connection.prepare(
-            "SELECT e.source_artifact_id,e.source_version,e.range_start,e.range_end,e.quote FROM canon_evidence e JOIN chapters c ON c.project_id=e.project_id AND c.chapter_id=e.final_chapter_id WHERE e.project_id=?1 AND c.volume_id=?2 ORDER BY e.created_at,e.evidence_id LIMIT ?3",
+            "SELECT e.source_artifact_id,e.source_version,e.range_start,e.range_end,e.quote
+             FROM canon_evidence e
+             JOIN chapters c ON c.project_id=e.project_id AND c.chapter_id=e.final_chapter_id
+             JOIN artifacts a ON a.project_id=e.project_id AND a.artifact_id=e.source_artifact_id AND a.version=e.source_version
+             WHERE e.project_id=?1 AND c.volume_id=?2
+               AND (a.artifact_type<>'FinalChapter' OR (
+                    a.artifact_status='COMMITTED' AND c.status='COMMITTED'
+                    AND c.final_artifact_id=e.source_artifact_id AND c.final_version=e.source_version
+                    AND EXISTS (
+                        SELECT 1 FROM canonical_heads h
+                        WHERE h.project_id=c.project_id AND h.artifact_type='FinalChapter'
+                          AND h.scope_level='CHAPTER' AND json_extract(h.scope_key,'$.chapterId')=c.chapter_id
+                          AND h.artifact_id=a.artifact_id AND h.version=a.version AND h.payload_hash=a.payload_hash
+                    )
+               ))
+             ORDER BY e.created_at,e.evidence_id LIMIT ?3",
         )?;
         let rows = statement.query_map(
             libsql_rusqlite::params![project_id, volume_id, limit.clamp(1, 100)],

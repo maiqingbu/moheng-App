@@ -10,9 +10,17 @@ use crate::repositories::runtime::{DurableModelRunner, ModelRunSpec};
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
 use libsql_rusqlite::Connection;
 use serde_json::{json, Map, Value};
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const PLAN_BOOK_DIRECTION: &str = "PLAN_BOOK_DIRECTION";
+pub const CHECK_BOOK_CONTINUATION: &str = "CHECK_BOOK_CONTINUATION";
+pub const CONFIRM_BOOK_CONTINUATION: &str = "CONFIRM_BOOK_CONTINUATION";
+pub(crate) const REPAIR_BOOK_PRESSURE: &str = "REPAIR_BOOK_PRESSURE";
+const BOOK_CONTINUATION_EVIDENCE_INVALID: &str = "B07_BOOK_CONTINUATION_EVIDENCE_INVALID";
+const BOOK_PRESSURE_REPAIR_REQUIRED: &str = "B07_BOOK_PRESSURE_REPAIR_REQUIRED";
+pub(crate) const BOOK_DIRECTION_REQUIRED: &str = "B07_BOOK_DIRECTION_REQUIRED";
+pub(crate) const VOLUME_DIRECTION_ROUTE_REQUIRED: &str = "B07_VOLUME_DIRECTION_ROUTE_REQUIRED";
 
 /// The error prefix of a direction sent back with its problems.
 pub const DIRECTION_ERROR: &str = "B07_DIRECTION";
@@ -127,7 +135,11 @@ fn tidy_seed(seed: &mut Value, room: i64, bible: &Value) {
     let Some(stages) = seed["stages"].as_array_mut() else {
         return;
     };
-    stages.retain(|stage| !text(&stage["goal"]).is_empty());
+    for stage in std::mem::take(stages) {
+        if !text(&stage["goal"]).is_empty() && !stages.contains(&stage) {
+            stages.push(stage);
+        }
+    }
     // VD-1j (real run round 22): a person outside the bible is new cast.
     let known = known_names(bible);
     if !known.is_empty() {
@@ -244,20 +256,66 @@ fn stage_problems(seed: &Value, bible: &Value, label: &str, room: (&str, i64)) -
             "各阶段 estimatedChapters 加起来是 {estimated} 章，{room_label} {room} 章，应在 {least} 到 {room} 之间"
         ));
     }
-    let antagonist = text(&bible["antagonist"]["name"]);
-    if !antagonist.is_empty() && !stages.is_empty() {
-        let acting = stages
-            .iter()
-            .filter(|stage| text(&stage["pressure"]).contains(antagonist))
-            .count();
-        let needed = stages.len().div_ceil(2);
-        if acting < needed {
-            problems.push(format!(
-                "反派{antagonist}只在 {acting} 个阶段的 pressure 里出手，至少要 {needed} 个"
-            ));
-        }
+    if let Some(gap) = pressure_shortfall(stages, text(&bible["antagonist"]["name"])) {
+        problems.push(gap.problem);
     }
     problems
+}
+
+struct PressureShortfall {
+    needed_stages: usize,
+    eligible_stages: Vec<usize>,
+    problem: String,
+}
+
+fn pressure_shortfall(stages: &[Value], antagonist: &str) -> Option<PressureShortfall> {
+    if antagonist.is_empty() {
+        return None;
+    }
+    let eligible_stages = stages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, stage)| {
+            (!text(&stage["pressure"]).contains(antagonist)).then_some(index + 1)
+        })
+        .collect::<Vec<_>>();
+    let acting = stages.len() - eligible_stages.len();
+    let minimum = stages.len().div_ceil(2);
+    (acting < minimum).then(|| PressureShortfall {
+        needed_stages: minimum - acting,
+        eligible_stages,
+        problem: format!(
+            "反派{antagonist}只在 {acting} 个阶段的 pressure 里出手，至少要 {minimum} 个"
+        ),
+    })
+}
+
+fn apply_pressure_repairs(
+    stages: &mut [Value],
+    antagonist: &str,
+    gap: &PressureShortfall,
+    reply: &Value,
+) -> Option<()> {
+    let corrections = reply["pressureCorrections"].as_array()?;
+    if corrections.len() != gap.needed_stages {
+        return None;
+    }
+    let mut patched = BTreeSet::new();
+    let edits = corrections
+        .iter()
+        .map(|item| {
+            let number = usize::try_from(item["stage"].as_u64()?).ok()?;
+            let index = number.checked_sub(1)?;
+            let pressure = text(&item["pressure"]);
+            let action = pressure.strip_prefix(antagonist)?.trim();
+            (gap.eligible_stages.contains(&number) && patched.insert(number) && !action.is_empty())
+                .then_some((index, pressure))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    for (index, pressure) in edits {
+        stages[index]["pressure"] = json!(pressure);
+    }
+    Some(())
 }
 
 /// Everything wrong with `direction` for `input`, as feedback for the model.
@@ -510,8 +568,8 @@ fn signing_conclusions(receipt: &Value) -> Value {
 }
 
 /// Asks the model for the book's direction from the opening and checks it,
-/// sending its problems back up to the plan feedback rounds; what still
-/// fails, or any failed run, keeps the template with a reminder.
+/// sending its problems back up to the plan feedback rounds. An invalid
+/// direction leaves the opening seed available for another attempt.
 pub fn plan(
     connection: &Connection,
     gateway: &dyn ProductionModelGateway,
@@ -542,7 +600,7 @@ pub fn plan(
         )
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "VOLUME_NOT_FOUND".to_string())?;
-    let input = input(
+    let mut input = input(
         &bible,
         &head("StoryConstitution")?["storyCore"],
         &opening,
@@ -550,6 +608,17 @@ pub fn plan(
         first_volume,
         opening_chapters,
     );
+    let committed_opening =
+        crate::repositories::narrative::NarrativeRepository::final_bodies_by_chapter(
+            connection,
+            project_id,
+            opening_chapters,
+        )
+        .map_err(|error| error.to_string())?;
+    input["openingCommittedProse"] = json!(committed_opening.iter()
+        .filter(|(chapter, _)| (1..=opening_chapters).contains(chapter))
+        .map(|(chapter, body)| json!({"chapterNo":chapter,"body":body.chars().take(4_000).collect::<String>()}))
+        .collect::<Vec<_>>());
     let planned = run_direction(
         connection,
         gateway,
@@ -558,26 +627,232 @@ pub fn plan(
         input,
         problems,
     )?;
-    Ok(match planned {
-        Ok((direction, model_run_id)) => Planned {
+    match planned {
+        Ok((direction, model_run_id)) => Ok(Planned {
             direction: Some(direction),
             model_run_id: Some(model_run_id),
             reminder: None,
-        },
-        Err(reason) => Planned {
-            reminder: Some(template_reminder(
-                command_id,
-                project_id,
-                (
-                    "vd1-direction-reminder",
-                    "全书方向",
-                    "全书方向没有生成，第一卷没有阶段目标",
-                ),
-                &reason,
-            )?),
-            ..Planned::default()
-        },
+        }),
+        Err(reason) => Err(format!("{BOOK_DIRECTION_REQUIRED}:{reason}")),
+    }
+}
+
+pub(crate) fn has_first_volume_direction(book: &Value) -> bool {
+    first_volume_direction(book).is_some()
+}
+
+fn planned_outcome(target: &str) -> &str {
+    // An explicit transition can make the preceding state a premise. Check
+    // the consequence rather than treating the premise as the planned result.
+    let outcome = [
+        "但是", "但", "却", "反而", "转而", "随后", "由此", "从而", "进而", "因此",
+    ]
+    .into_iter()
+    .filter_map(|marker| target.rfind(marker).map(|index| index + marker.len()))
+    .max()
+    .map(|start| target[start..].trim())
+    .filter(|outcome| !outcome.is_empty())
+    .unwrap_or(target);
+    // Ordered preparation, travel, and the ensuing finding can occur in
+    // the same step. The finding at the end is the first thing to compare.
+    outcome
+        .trim_end_matches(['。', '！', '？', '；', '，'])
+        .rsplit(['，', '；', '。'])
+        .next()
+        .map(str::trim)
+        .filter(|clause| {
+            clause
+                .chars()
+                .filter(|&c| crate::chapter_craft::is_han(c))
+                .count()
+                >= 6
+        })
+        .unwrap_or(outcome)
+}
+
+struct OpeningReplayReview {
+    candidates: Vec<(Value, String)>,
+    unbound: Vec<Value>,
+}
+
+fn ground_opening_replays(
+    review: &Value,
+    stages: &[Value],
+    opening: &[Value],
+) -> Result<OpeningReplayReview, String> {
+    let index = |value: &Value| value.as_u64().and_then(|index| usize::try_from(index).ok());
+    let one_based = |value: &Value| index(value).and_then(|index| index.checked_sub(1));
+    let issues = review["issues"]
+        .as_array()
+        .ok_or(BOOK_CONTINUATION_EVIDENCE_INVALID)?;
+    let locate = crate::chapter_craft::exact_punctuation_matched_quote;
+    let ground = |issue: &Value| {
+        let stage_index = one_based(&issue["stage"])?;
+        let stage = stages.get(stage_index)?;
+        let target = if issue["step"].is_null() {
+            text(&stage["goal"])
+        } else {
+            names(&stage["steps"]).nth(one_based(&issue["step"])?)?
+        };
+        let planned = locate(target, text(&issue["plannedQuote"]))?;
+        let chapter = opening
+            .iter()
+            .find(|entry| entry["chapterNo"] == issue["openingChapter"])?;
+        let body = text(&chapter["body"]);
+        let cited = text(&issue["openingQuote"]).trim();
+        let spans = crate::chapter_craft::sentence_spans(body);
+        let number = index(&issue["openingSentence"]);
+        let evidence = if cited.chars().count() < 4 {
+            // A short cue can locate the surrounding original prose but
+            // cannot rebound to another occurrence elsewhere in the chapter.
+            let number = number?;
+            let &(start, end) = spans.get(number)?;
+            let cue = cited.trim_end_matches(['。', '.', '！', '!', '？', '?', '…']);
+            locate(&body[start..end], cue)?;
+            let from = spans[number.saturating_sub(2)].0;
+            let to = spans[(number + 1).min(spans.len() - 1)].1;
+            &body[from..to]
+        } else {
+            // An ordinary quote can rebound uniquely within the same chapter.
+            number
+                .and_then(|number| {
+                    let &(start, end) = spans.get(number)?;
+                    locate(&body[start..end], cited)
+                })
+                .or_else(|| locate(body, cited))?
+        };
+        let location = match issue["step"].as_u64() {
+            Some(step) => format!("阶段 {} 的第 {step} 步", stage_index + 1),
+            None => format!("阶段 {} 的目标", stage_index + 1),
+        };
+        let pair = json!({
+            "stage":stage_index + 1,"step":issue["step"],
+            "plannedText":target,"plannedQuote":planned,"plannedOutcome":planned_outcome(target),
+            "openingChapter":chapter["chapterNo"],"openingQuote":evidence,
+        });
+        let feedback = format!("{location}「{planned}」重排了开篇已发生的结果「{evidence}」。{}。请从该结果推进新的后果。",
+            text(&issue["reason"]));
+        Some((pair, feedback))
+    };
+    let mut result = OpeningReplayReview {
+        candidates: Vec::new(),
+        unbound: Vec::new(),
+    };
+    for issue in issues {
+        if let Some(candidate) = ground(issue) {
+            result.candidates.push(candidate);
+        } else {
+            result.unbound.push(issue.clone());
+        }
+    }
+    Ok(result)
+}
+
+fn confirmed_opening_replay_problems(
+    verdict: &Value,
+    candidates: &[(Value, String)],
+) -> Result<Vec<String>, String> {
+    let confirmed = verdict["confirmedCandidates"]
+        .as_array()
+        .ok_or(BOOK_CONTINUATION_EVIDENCE_INVALID)?;
+    let locate = crate::chapter_craft::exact_punctuation_matched_quote;
+    let mut indices = BTreeSet::new();
+    for claim in confirmed {
+        let index = claim["number"]
+            .as_u64()
+            .and_then(|n| usize::try_from(n).ok())
+            .filter(|&index| index < candidates.len())
+            .ok_or(BOOK_CONTINUATION_EVIDENCE_INVALID)?;
+        let (pair, _) = &candidates[index];
+        let opening_outcome = text(&claim["openingOutcomeQuote"]);
+        let planned_outcome = text(&claim["plannedOutcomeQuote"]);
+        if opening_outcome.chars().count() >= 4
+            && planned_outcome.chars().count() >= 4
+            && locate(text(&pair["plannedOutcome"]), planned_outcome).is_some()
+            && locate(text(&pair["openingQuote"]), opening_outcome).is_some()
+        {
+            indices.insert(index);
+        }
+    }
+    Ok(indices
+        .into_iter()
+        .map(|index| candidates[index].1.clone())
+        .collect())
+}
+
+fn first_volume_direction(book: &Value) -> Option<&Value> {
+    crate::planning::volume_seeds(book, 1).find(|seed| {
+        let stages = items(seed, "stages");
+        !text(&seed["climax"]).is_empty()
+            && STAGE_COUNT.contains(&stages.len())
+            && stages.iter().all(|stage| {
+                ["goal", "pressure", "turn"]
+                    .iter()
+                    .all(|field| !text(&stage[*field]).is_empty())
+                    && STEP_COUNT.contains(&items(stage, "steps").len())
+                    && items(stage, "steps").iter().all(|step| {
+                        !text(&step["id"]).is_empty() && !text(&step["goal"]).is_empty()
+                    })
+            })
     })
+}
+
+pub(crate) fn require_first_volume_direction(
+    connection: &Connection,
+    gateway: &dyn ProductionModelGateway,
+    project_id: &str,
+    volume_id: &str,
+    require_route: bool,
+) -> Result<(), String> {
+    use crate::repositories::narrative::NarrativeRepository;
+    if !gateway.plans_book_direction()
+        || NarrativeRepository::volume_number(connection, project_id, volume_id)
+            .map_err(|error| error.to_string())?
+            != Some(1)
+        || !crate::repositories::production::ProductionRepository::expects_first_volume_direction(
+            connection, project_id,
+        )
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(());
+    }
+    let book =
+        crate::repositories::project_entry::canonical_head(connection, project_id, "BookPlan")
+            .map_err(|error| error.to_string())?
+            .map(|head| head.payload)
+            .filter(|payload| {
+                payload["planningMaturity"] == "APPROVED" && has_first_volume_direction(payload)
+            })
+            .ok_or(BOOK_DIRECTION_REQUIRED)?;
+    if require_route {
+        let route = NarrativeRepository::volume_plan_route(connection, project_id, volume_id)
+            .and_then(|reference| {
+                reference
+                    .map(|reference| {
+                        NarrativeRepository::artifact_payload_by_ref(
+                            connection, project_id, &reference,
+                        )
+                    })
+                    .transpose()
+                    .map(Option::flatten)
+            })
+            .map_err(|error| error.to_string())?
+            .ok_or(VOLUME_DIRECTION_ROUTE_REQUIRED)?;
+        let seed = first_volume_direction(&book).ok_or(BOOK_DIRECTION_REQUIRED)?;
+        let has_each_step = items(seed, "stages")
+            .iter()
+            .flat_map(|stage| items(stage, "steps"))
+            .all(|step| {
+                let task = crate::planning::stage_task_id(volume_id, text(&step["id"]));
+                items(&route, "tasks")
+                    .iter()
+                    .any(|item| item["taskId"] == task)
+            });
+        if !has_each_step {
+            return Err(VOLUME_DIRECTION_ROUTE_REQUIRED.into());
+        }
+    }
+    Ok(())
 }
 
 /// Asks the model (`capability`, its runs named by `suffix`) for a
@@ -620,11 +895,187 @@ fn run_direction(
         attempt_no: 1,
         repair_round: 0,
     };
+    let review_profile = if capability == PLAN_BOOK_DIRECTION && gateway.checks_book_continuation()
+    {
+        Some(gateway.resolve_step_profile(CHECK_BOOK_CONTINUATION)?)
+    } else {
+        None
+    };
+    let opening_prose = items(&input, "openingCommittedProse");
+    let opening = opening_prose
+        .iter()
+        .map(|chapter| {
+            json!({"chapterNo":chapter["chapterNo"],
+               "sentences":crate::chapter_craft::numbered_body_sentences(text(&chapter["body"]))})
+        })
+        .collect::<Vec<_>>();
+    let pressure_repair_attempted = Cell::new(false);
+    let accepted_repair_run = Cell::new(None);
     let accept = |mut direction: Value, lenient: bool| {
         tidy(&mut direction, &input);
-        let found = check(&direction, &input);
+        let mut found = check(&direction, &input);
+        let mut repair_run = None;
+        if review_profile.is_some() && found.len() == 1 {
+            let antagonist = text(&input["storyBible"]["antagonist"]["name"]);
+            let first = direction["volumeIntentSeeds"]
+                .as_array_mut()
+                .into_iter()
+                .flatten()
+                .find(|seed| seed["volumeNo"] == 1);
+            if let Some(stages) = first.and_then(|seed| seed["stages"].as_array_mut()) {
+                if let Some(gap) =
+                    pressure_shortfall(stages, antagonist).filter(|gap| gap.problem == found[0])
+                {
+                    if pressure_repair_attempted.replace(true) {
+                        return Err(format!("{BOOK_PRESSURE_REPAIR_REQUIRED}:{}", gap.problem));
+                    }
+                    let repair = ModelRunSpec {
+                        capability: REPAIR_BOOK_PRESSURE.into(),
+                        ..crate::production::follow_up_spec(&spec, ":pressure-repair", 1)?
+                    };
+                    let (run_id, outcome) =
+                        crate::production::execute_production_model_with_profile_recorded(
+                            connection,
+                            gateway,
+                            &profile,
+                            &repair,
+                            REPAIR_BOOK_PRESSURE,
+                            json!({
+                                "antagonist":input["storyBible"]["antagonist"],
+                                "neededStages":gap.needed_stages,
+                                "eligibleStages":gap.eligible_stages,
+                                "stages":stages.iter().enumerate().map(|(index, stage)| json!({
+                                    "number":index+1,"goal":stage["goal"],"pressure":stage["pressure"],
+                                    "turn":stage["turn"],"cast":stage["cast"],
+                                })).collect::<Vec<_>>()
+                            }),
+                            now,
+                        )?;
+                    outcome
+                        .parsed
+                        .as_ref()
+                        .and_then(|reply| apply_pressure_repairs(stages, antagonist, &gap, reply))
+                        .ok_or_else(|| {
+                            format!("{BOOK_PRESSURE_REPAIR_REQUIRED}:{}", gap.problem)
+                        })?;
+                    found = check(&direction, &input);
+                    if !found.is_empty() {
+                        return Err(format!(
+                            "{BOOK_PRESSURE_REPAIR_REQUIRED}:{}",
+                            found.join("；")
+                        ));
+                    }
+                    repair_run = Some(run_id);
+                }
+            }
+        }
+        if let Some(profile) = review_profile.as_ref().filter(|_| found.is_empty()) {
+            let first_volume = items(&direction, "volumeIntentSeeds")
+                .iter()
+                .find(|seed| seed["volumeNo"] == 1)
+                .ok_or(BOOK_DIRECTION_REQUIRED)?;
+            let stages = items(first_volume, "stages");
+            let review_input = json!({"opening":opening,"stages":stages});
+            let digest =
+                crate::hash::sha256_canonical(&review_input).map_err(|error| error.to_string())?;
+            let review_spec = ModelRunSpec {
+                capability: CHECK_BOOK_CONTINUATION.into(),
+                provider: profile.provider.clone(),
+                model: profile.model.clone(),
+                ..crate::production::follow_up_spec(&spec, &format!(":check-opening:{digest}"), 0)?
+            };
+            let review = |spec: &ModelRunSpec, input: Value| {
+                crate::production::execute_production_model_with_profile(
+                    connection,
+                    gateway,
+                    profile,
+                    spec,
+                    CHECK_BOOK_CONTINUATION,
+                    input,
+                    now,
+                )?
+                .parsed
+                .ok_or_else(|| "B07_BOOK_CONTINUATION_OUTPUT_INVALID".to_string())
+            };
+            let first = review(&review_spec, review_input.clone())?;
+            let OpeningReplayReview {
+                mut candidates,
+                unbound,
+            } = ground_opening_replays(&first, stages, opening_prose)?;
+            if !unbound.is_empty() {
+                let retry =
+                    crate::production::follow_up_spec(&review_spec, ":evidence-feedback", 1)?;
+                let mut input = review_input;
+                input["evidenceFeedback"] = json!({
+                    "instruction":"只复查以下无法定位原文的疑点。核对正文相邻句，引用实际完成结果而非准备动作，逐字复制。若原文不能证明同一结果已经发生，则去掉该疑点。",
+                    "previousIssues":unbound
+                });
+                let same_target = |left: &Value, right: &Value| {
+                    ["stage", "step", "openingChapter"]
+                        .iter()
+                        .all(|field| left[*field] == right[*field])
+                };
+                let reply = review(&retry, input)?;
+                let requested = items(&reply, "issues")
+                    .iter()
+                    .filter(|issue| unbound.iter().any(|original| same_target(original, issue)))
+                    .collect::<Vec<_>>();
+                let corrected =
+                    ground_opening_replays(&json!({"issues":requested}), stages, opening_prose)?;
+                if !corrected.unbound.is_empty() {
+                    found.push("开篇复核仍有引文无法定位。请改写对应阶段的小步，明确哪些结果已发生，本阶段要推进什么新后果。".into());
+                }
+                for original in &unbound {
+                    if let Some(candidate) = corrected
+                        .candidates
+                        .iter()
+                        .find(|(pair, _)| same_target(original, pair))
+                    {
+                        if !candidates.iter().any(|(pair, _)| pair == &candidate.0) {
+                            candidates.push(candidate.clone());
+                        }
+                    }
+                }
+            }
+            if !candidates.is_empty() {
+                let comparisons = candidates
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (pair, _))| {
+                        let mut pair = pair.clone();
+                        pair["number"] = json!(index);
+                        pair
+                    })
+                    .collect::<Vec<_>>();
+                // Exclude the initial review's interpretation. Identical
+                // props or methods may lead to genuinely different outcomes.
+                let confirmation_profile =
+                    gateway.resolve_step_profile(CONFIRM_BOOK_CONTINUATION)?;
+                let confirmation = ModelRunSpec {
+                    capability: CONFIRM_BOOK_CONTINUATION.into(),
+                    provider: confirmation_profile.provider.clone(),
+                    model: confirmation_profile.model.clone(),
+                    ..crate::production::follow_up_spec(&review_spec, ":confirm-outcomes", 1)?
+                };
+                let verdict = crate::production::execute_production_model_with_profile(
+                    connection,
+                    gateway,
+                    &confirmation_profile,
+                    &confirmation,
+                    CONFIRM_BOOK_CONTINUATION,
+                    json!({"opening":opening,"confirmCandidates":comparisons}),
+                    now,
+                )?
+                .parsed
+                .ok_or("B07_BOOK_CONTINUATION_OUTPUT_INVALID")?;
+                found.extend(confirmed_opening_replay_problems(&verdict, &candidates)?);
+            }
+        }
         match (found.is_empty(), lenient) {
-            (true, _) => Ok((direction, found)),
+            (true, _) => {
+                accepted_repair_run.set(repair_run);
+                Ok((direction, found))
+            }
             (false, true) => Ok((Value::Null, found)),
             (false, false) => Err(format!("{DIRECTION_ERROR}:{}", found.join("；"))),
         }
@@ -639,9 +1090,10 @@ fn run_direction(
             now,
             &accept,
         ) {
-            Ok((direction, model_run_id, _)) if !direction.is_null() => {
-                Ok((direction, model_run_id))
-            }
+            Ok((direction, model_run_id, _)) if !direction.is_null() => Ok((
+                direction,
+                accepted_repair_run.take().unwrap_or(model_run_id),
+            )),
             Ok((_, _, problems)) => Err(problems.join("；")),
             Err(error) => Err(error),
         },
@@ -660,14 +1112,13 @@ pub fn plan_volume(
     (command_id, idempotency_key, now): (&str, &str, &str),
 ) -> Result<Planned, String> {
     use crate::repositories::narrative::NarrativeRepository;
+    use crate::repositories::volume_lifecycle::VolumeLifecycleRepository;
     if !gateway.plans_book_direction() {
         return Ok(Planned::default());
     }
-    let volume = crate::repositories::volume_lifecycle::VolumeLifecycleRepository::volume_metadata(
-        connection, project_id, volume_id,
-    )
-    .map_err(|error| error.to_string())?
-    .ok_or_else(|| "VOLUME_NOT_FOUND".to_string())?;
+    let volume = VolumeLifecycleRepository::volume_metadata(connection, project_id, volume_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "VOLUME_NOT_FOUND".to_string())?;
     let book_plan =
         NarrativeRepository::canonical_project_head_ref(connection, project_id, "BookPlan")
             .and_then(|reference| {
@@ -689,29 +1140,57 @@ pub fn plan_volume(
         volume.chapter_start,
     )
     .map_err(|error| error.to_string())?;
-    let completed =
-        NarrativeRepository::satisfied_task_chapters(connection, project_id, volume.chapter_start)
-            .map_err(|error| error.to_string())?;
-    let previous_stages = crate::planning::volume_seeds(&book_plan, volume.volume_no - 1)
-        .flat_map(|seed| items(seed, "stages"))
-        .map(|stage| {
-            let suffix = format!(":{}", text(&stage["id"]));
-            json!({"goal":text(&stage["goal"]),"completedInChapter":completed
-                .iter()
-                .find(|(task, _)| task.ends_with(&suffix))
-                .map(|(_, chapter)| *chapter)})
-        })
-        .collect::<Vec<_>>();
-    let previous = json!({
-        "stages":previous_stages,
-        "lastChapters":prior[prior.len().saturating_sub(3)..].iter().map(|(chapter, craft)| json!({
-            "chapter":chapter,
-            "goal":craft["chapterGoal"],
-            "situationChange":craft["situationChange"],
-            "endHook":craft["endHook"]
-        })).collect::<Vec<_>>(),
+    let previous_number = volume.volume_no - 1;
+    let mut previous = json!({
+        "stages":[],
+        "lastChapters":[],
         "lastAppearances":crate::craft_plan::last_appearances(&prior, &bible)
     });
+    if let Some(previous_id) = VolumeLifecycleRepository::volume_id_by_number(
+        connection,
+        project_id,
+        &volume.book_id,
+        previous_number,
+    )
+    .map_err(|error| error.to_string())?
+    {
+        let completed = NarrativeRepository::satisfied_volume_task_chapters(
+            connection,
+            project_id,
+            &previous_id,
+        )
+        .map_err(|error| error.to_string())?;
+        previous["stages"] = json!(crate::planning::volume_seeds(&book_plan, previous_number)
+            .flat_map(|seed| items(seed, "stages"))
+            .map(|stage| json!({
+                "goal":text(&stage["goal"]),
+                "completedInChapter":completed_stage_chapter(stage, &previous_id, &completed)
+            }))
+            .collect::<Vec<_>>());
+        let history = crate::repositories::ops::volume_chapter_history(
+            connection,
+            project_id,
+            &previous_id,
+            3,
+        )
+        .map_err(|error| error.to_string())?;
+        previous["lastChapters"] = json!(history.recent);
+        history.extend_continuation_input(&mut previous);
+        if let Some(reference) = NarrativeRepository::canonical_head_ref(
+            connection,
+            project_id,
+            "VolumeExitState",
+            &previous_id,
+        )
+        .map_err(|error| error.to_string())?
+        {
+            let exit =
+                NarrativeRepository::artifact_payload_by_ref(connection, project_id, &reference)
+                    .map_err(|error| error.to_string())?
+                    .ok_or("VOLUME_EXIT_STATE_PAYLOAD_NOT_FOUND")?;
+            previous["exitState"] = json!({"ref":reference,"payload":exit});
+        }
+    }
     let input = volume_input(
         &bible,
         &book_plan,
@@ -747,6 +1226,26 @@ pub fn plan_volume(
             ..Planned::default()
         },
     })
+}
+
+fn completed_stage_chapter(
+    stage: &Value,
+    volume_id: &str,
+    completed: &BTreeMap<String, i64>,
+) -> Option<i64> {
+    let steps = items(stage, "steps");
+    let units = if steps.is_empty() {
+        std::slice::from_ref(stage)
+    } else {
+        steps
+    };
+    let mut last_chapter = None;
+    for unit in units {
+        let task_id = crate::planning::stage_task_id(volume_id, unit["id"].as_str()?);
+        let chapter = *completed.get(&task_id)?;
+        last_chapter = last_chapter.max(Some(chapter));
+    }
+    last_chapter
 }
 
 /// The reminder that a direction (`what`, titled `title`, its decision id
@@ -817,8 +1316,15 @@ pub fn chapter_direction(
     if stages.is_empty() {
         return None;
     }
-    // A stage is done when its last task is.
-    let ended = |index: usize| completed.get(&stages[index].1.last()?.1).copied();
+    let ended = |index: usize| {
+        stages[..=index]
+            .iter()
+            .flat_map(|(_, tasks)| tasks)
+            .map(|(_, task)| completed.get(task).copied())
+            .collect::<Option<Vec<_>>>()?
+            .into_iter()
+            .max()
+    };
     let current = (0..stages.len())
         .position(|index| ended(index).is_none())
         .unwrap_or(stages.len());
@@ -847,7 +1353,12 @@ pub fn chapter_direction(
         if unit["id"] != stage["id"] {
             // The planner sees the step, never the stage's end: its goal,
             // and its turn until the last step.
-            built["goal"] = json!(text(&unit["goal"]));
+            let route_objective = items(route, "tasks")
+                .iter()
+                .find(|entry| entry["taskId"] == task.as_str())
+                .and_then(|entry| entry["objective"].as_str())
+                .filter(|objective| !objective.trim().is_empty());
+            built["goal"] = json!(route_objective.unwrap_or_else(|| text(&unit["goal"])));
             if let Some(stage) = built.as_object_mut() {
                 stage.remove("steps");
                 if step + 1 < units.len() {
@@ -895,26 +1406,21 @@ pub fn for_chapter(
     else {
         return Ok(None);
     };
-    let payload = |head: Result<Option<_>, _>| {
-        head.and_then(|reference| {
-            reference
-                .map(|reference| {
-                    NarrativeRepository::artifact_payload_by_ref(connection, project_id, &reference)
-                })
-                .transpose()
-                .map(Option::flatten)
-        })
-        .map_err(|error| error.to_string())
+    let book_ref =
+        NarrativeRepository::canonical_project_head_ref(connection, project_id, "BookPlan")
+            .map_err(|error| error.to_string())?;
+    let route_ref =
+        NarrativeRepository::canonical_head_ref(connection, project_id, "VolumePlan", &volume_id)
+            .map_err(|error| error.to_string())?;
+    let (Some(book_ref), Some(route_ref)) = (book_ref, route_ref) else {
+        return Ok(None);
     };
-    let book_plan = payload(NarrativeRepository::canonical_project_head_ref(
-        connection, project_id, "BookPlan",
-    ))?;
-    let route = payload(NarrativeRepository::canonical_head_ref(
-        connection,
-        project_id,
-        "VolumePlan",
-        &volume_id,
-    ))?;
+    let payload = |reference: &crate::generated::types::ArtifactRef| {
+        NarrativeRepository::artifact_payload_by_ref(connection, project_id, reference)
+            .map_err(|error| error.to_string())
+    };
+    let book_plan = payload(&book_ref)?;
+    let route = payload(&route_ref)?;
     let (Some(book_plan), Some(route)) = (book_plan, route) else {
         return Ok(None);
     };
@@ -926,14 +1432,53 @@ pub fn for_chapter(
         1 => crate::repositories::project_entry::OPENING_CHAPTER_COUNT,
         _ => volume.chapter_start - 1,
     };
-    Ok(chapter_direction(
+    let mut direction = chapter_direction(
         &book_plan,
         &route,
         (&volume_id, volume.volume_no),
         before_stages,
         &completed,
         chapter_no,
-    ))
+    );
+    if let Some(stage) = direction
+        .as_mut()
+        .and_then(|value| value.get_mut("currentStage"))
+    {
+        if let (Some(task_id), Some(objective)) = (stage["taskId"].as_str(), stage["goal"].as_str())
+        {
+            let unverified = if stage.get("step").is_some() {
+                NarrativeRepository::recent_unverified_stage_attempts(
+                    connection,
+                    project_id,
+                    &volume_id,
+                    chapter_no,
+                    task_id,
+                    objective,
+                    route["routeVersion"].as_u64() == Some(1),
+                )
+                .map_err(|error| error.to_string())?
+            } else {
+                Vec::new()
+            };
+            if let Some(progress) = crate::production::stage_step_progress_for_chapter(
+                connection, project_id, &volume_id, chapter_no, task_id, objective,
+            )? {
+                stage["progress"] = progress;
+            }
+            if !unverified.is_empty() {
+                stage["recentUnverifiedAttempts"] = json!(unverified);
+            }
+            if stage.get("step").is_some() {
+                let objective = text(&stage["goal"]);
+                stage["outcomeRules"] = crate::production::stage_step_rules(objective);
+                stage["ruleDigest"] = json!(crate::hash::sha256_canonical(&json!({
+                    "bookPlan":book_ref,"volumePlan":route_ref,"stage":stage
+                }))
+                .map_err(|error| error.to_string())?);
+            }
+        }
+    }
+    Ok(direction)
 }
 
 /// VD-1g (real run round 18): the problem with a chapter goal that copies
@@ -1032,6 +1577,64 @@ pub fn reminders(direction: &Value, on_stage: &BTreeSet<&str>, chapter_no: i64) 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn round54_outcome_confirmation_rejects_the_candidate_review_format() {
+        let check = |payload| crate::model_output::check(CONFIRM_BOOK_CONTINUATION, &payload);
+        assert!(check(json!({"issues":[]})).is_err());
+        assert!(check(json!({"confirmedCandidates":[0]})).is_err());
+        assert!(check(json!({"confirmedCandidates":[{
+            "number":0,"openingOutcomeQuote":"那道刻度自己亮了","plannedOutcomeQuote":"刻度自行亮起"
+        }]}))
+        .is_ok());
+        assert!(crate::model_output::check(
+            CHECK_BOOK_CONTINUATION,
+            &json!({"confirmedCandidates":[]})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn round54_a_confirmed_premise_does_not_block_the_new_consequence() {
+        let old = "那道刻度自己亮了。亮得稳稳的，不再跳。";
+        let target =
+            "竹尺第七刻度已自行稳定亮起，陆照发现它不再随呼吸浮动，却开始微幅吸摄四周游离灵息";
+        let candidate = |plan| {
+            (
+                json!({"plannedOutcome":planned_outcome(plan),"openingQuote":old}),
+                "已完成结果".into(),
+            )
+        };
+        let verdict = json!({"confirmedCandidates":[{
+            "number":0,"plannedOutcomeQuote":"刻度已自行稳定亮起","openingOutcomeQuote":"那道刻度自己亮了"
+        }]});
+        assert!(
+            confirmed_opening_replay_problems(&verdict, &[candidate(target)])
+                .unwrap()
+                .is_empty()
+        );
+        let repeated = candidate("他检查石缝，随后刻度已自行稳定亮起。");
+        assert_eq!(
+            confirmed_opening_replay_problems(&verdict, &[repeated]).unwrap(),
+            ["已完成结果"]
+        );
+    }
+
+    #[test]
+    fn round57_a_shared_place_does_not_prove_replay_of_the_planned_result() {
+        let target = "他用冷炊饼引开扫地犬，潜入西厢最东头库房，见柳青梧正伏案补描第七条修订稿缺角处松脂弯痕";
+        let old = "西厢最东头库房的门半开着。";
+        let candidate = (
+            json!({"plannedOutcome":planned_outcome(target),"openingQuote":old}),
+            "重排开篇".into(),
+        );
+        let verdict = json!({"confirmedCandidates":[{
+            "number":0,"plannedOutcomeQuote":target,"openingOutcomeQuote":old
+        }]});
+        assert!(confirmed_opening_replay_problems(&verdict, &[candidate])
+            .unwrap()
+            .is_empty());
+    }
+
     use super::*;
 
     fn bible() -> Value {
@@ -1052,6 +1655,59 @@ mod tests {
             (1, 36),
             3,
         )
+    }
+
+    #[test]
+    fn round53_one_bad_issue_does_not_discard_a_rebound_opening_quote() {
+        let stages = [json!({"goal":"查清地火","steps":["刻度指向第七日峰值","取回铜印"]})];
+        let opening = [json!({
+            "chapterNo":1,
+            "body":"刻度到哪儿，他的眼睛就到哪儿。第七日峰值。分毫不差。"
+        })];
+        let review = json!({"issues":[
+            {"stage":1,"step":2,"plannedQuote":"取回铜印","openingChapter":1,
+             "openingSentence":0,"openingQuote":"他从泥中取回了铜印。","reason":"未见于正文"},
+            {"stage":1,"step":1,"plannedQuote":"刻度指向第七日峰值","openingChapter":1,
+             "openingSentence":0,"openingQuote":"第七日峰值。分毫不差。","reason":"已证实峰值"}
+        ]});
+        let review_result = ground_opening_replays(&review, &stages, &opening).unwrap();
+        assert_eq!(review_result.candidates.len(), 1);
+        assert_eq!(
+            review_result.candidates[0].0["openingQuote"],
+            "第七日峰值。分毫不差。"
+        );
+        assert_eq!(review_result.unbound, [review["issues"][0].clone()]);
+    }
+
+    #[test]
+    fn round62_a_short_opening_cue_locates_evidence_without_proving_a_replay_by_itself() {
+        let stages = [json!({"goal":"查明灰中文字","steps":["陆照比对灰烬与饼上的炭字笔锋"]})];
+        let opening = [json!({"chapterNo":1,"body":
+            "墨迹慢慢晕开，显出半个字来。右上折笔，一横，一竖。壬。陆照盯着那半个字。饼皮上用炭条写着一个字。壬。"
+        })];
+        let issue = json!({
+            "stage":1,"step":1,"plannedQuote":"陆照比对灰烬与饼上的炭字笔锋",
+            "openingChapter":1,"openingSentence":2,"openingQuote":"壬。","reason":"可能复现已读到的字"
+        });
+        let review = json!({"issues":[issue]});
+        crate::model_output::check(CHECK_BOOK_CONTINUATION, &review).unwrap();
+        let result = ground_opening_replays(&review, &stages, &opening).unwrap();
+        assert!(result.unbound.is_empty());
+        let opening_passage = result.candidates[0].0["openingQuote"].as_str().unwrap();
+        assert!(opening_passage.contains("墨迹慢慢晕开，显出半个字来"));
+        assert!(!opening_passage.contains("饼皮上"));
+        let verdict = json!({"confirmedCandidates":[{"number":0,"openingOutcomeQuote":"壬。",
+            "plannedOutcomeQuote":"陆照比对灰烬与饼上的炭字笔锋"}]});
+        assert!(
+            confirmed_opening_replay_problems(&verdict, &result.candidates)
+                .unwrap()
+                .is_empty()
+        );
+        let mut other = review;
+        other["issues"][0]["openingSentence"] = json!(1);
+        let missing = ground_opening_replays(&other, &stages, &opening).unwrap();
+        assert!(missing.candidates.is_empty());
+        assert_eq!(missing.unbound.len(), 1);
     }
 
     fn stage(goal: &str, pressure: &str, cast: &[&str], chapters: i64) -> Value {
@@ -1075,6 +1731,117 @@ mod tests {
                 {"volumeNo":2,"description":"走出青崖宗"}
             ]
         })
+    }
+
+    #[test]
+    fn a_lone_pressure_gap_repairs_only_missing_pressure_before_opening_review() {
+        use crate::production::{ProductionModelResponse, ResolvedProviderProfile};
+        use crate::project_db::{paths::AppPaths, ProjectManager};
+        use std::sync::Mutex;
+
+        struct Gateway {
+            original: Value,
+            calls: Mutex<Vec<(String, Value)>>,
+        }
+        impl ProductionModelGateway for Gateway {
+            fn checks_book_continuation(&self) -> bool {
+                true
+            }
+
+            fn resolve_profile(&self) -> Result<ResolvedProviderProfile, String> {
+                Ok(ResolvedProviderProfile {
+                    provider: "direction-fixture".into(),
+                    model: "fixed".into(),
+                    endpoint: "fixture://direction".into(),
+                    timeout_ms: 1_000,
+                })
+            }
+
+            fn invoke(
+                &self,
+                capability: &str,
+                input: &Value,
+            ) -> Result<ProductionModelResponse, String> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((capability.into(), input.clone()));
+                let reply = match capability {
+                    PLAN_BOOK_DIRECTION => self.original.clone(),
+                    "REPAIR_BOOK_PRESSURE" => json!({"pressureCorrections":[{
+                        "stage":2,"pressure":"裴砚舟命守库的执事封住原账，陆照只能去找旧抄本。"
+                    }]}),
+                    CHECK_BOOK_CONTINUATION => json!({"issues":[]}),
+                    _ => return Err(format!("unexpected capability {capability}")),
+                };
+                Ok(ProductionModelResponse::deterministic(reply))
+            }
+        }
+
+        let mut original = direction();
+        original["volumeIntentSeeds"][0]["stages"][1]["pressure"] = json!("宗门断了丹房的炭");
+        let gateway = Gateway {
+            original: original.clone(),
+            calls: Mutex::new(Vec::new()),
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let manager = ProjectManager::new(AppPaths::new(temp.path()));
+        let now = "2026-09-13T12:00:00Z";
+        let db = manager.create("pressure-fixture", "方向复核", now).unwrap();
+        let (accepted, model_run_id) = run_direction(
+            &db,
+            &gateway,
+            (
+                "pressure-fixture",
+                "pressure-check",
+                "pressure-check:key",
+                now,
+            ),
+            (PLAN_BOOK_DIRECTION, "book-direction"),
+            direction_input(),
+            problems,
+        )
+        .unwrap()
+        .unwrap();
+        let calls = gateway.calls.lock().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                PLAN_BOOK_DIRECTION,
+                "REPAIR_BOOK_PRESSURE",
+                CHECK_BOOK_CONTINUATION
+            ]
+        );
+        let mut expected = original;
+        expected["volumeIntentSeeds"][0]["stages"][1]["pressure"] =
+            json!("裴砚舟命守库的执事封住原账，陆照只能去找旧抄本。");
+        tidy(&mut expected, &direction_input());
+        assert_eq!(accepted, expected);
+        let response = DurableModelRunner::persisted_parsed_response(&db, &model_run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            response["pressureCorrections"][0]["pressure"],
+            expected["volumeIntentSeeds"][0]["stages"][1]["pressure"]
+        );
+    }
+
+    #[test]
+    fn pressure_correction_cannot_replace_an_existing_action() {
+        let original = [
+            json!({"pressure":"裴砚舟已经扣下丹房月例"}),
+            json!({"pressure":"旧案牵连药库"}),
+            json!({"pressure":"丹炉失火"}),
+        ];
+        let mut stages = original.clone();
+        let gap = pressure_shortfall(&stages, "裴砚舟").unwrap();
+        let overwrite =
+            json!({"pressureCorrections":[{"stage":1,"pressure":"裴砚舟命人烧掉旧账"}]});
+        assert!(apply_pressure_repairs(&mut stages, "裴砚舟", &gap, &overwrite).is_none());
+        assert_eq!(stages, original);
     }
 
     /// The approved plan and route VD-1a and VD-1b make from `direction()`.
@@ -1309,6 +2076,19 @@ mod tests {
         assert_eq!(
             stage_goal_problem(&direction, "陆照查清丹房的账·第二步"),
             None
+        );
+    }
+
+    #[test]
+    fn a_chapter_uses_the_current_route_objective_for_its_stage_step() {
+        let (plan, _) = plan_and_route();
+        let mut route = stepped_route();
+        route["tasks"][0]["objective"] = json!("陆照从旧出库单上查到漏记的两笔账");
+        let direction =
+            chapter_direction(&plan, &route, ("vol:1", 1), 3, &BTreeMap::new(), 4).unwrap();
+        assert_eq!(
+            direction["currentStage"]["goal"],
+            route["tasks"][0]["objective"]
         );
     }
 
@@ -1564,6 +2344,19 @@ mod tests {
             problems(&direction, &direction_input()),
             Vec::<String>::new()
         );
+    }
+
+    #[test]
+    fn tidying_drops_an_exact_duplicate_stage_and_preserves_the_direction() {
+        let mut direction = direction();
+        let stages = direction["volumeIntentSeeds"][0]["stages"]
+            .as_array_mut()
+            .unwrap();
+        let expected = stages.clone();
+        stages.push(stages.last().unwrap().clone());
+        tidy(&mut direction, &direction_input());
+        assert_eq!(direction["volumeIntentSeeds"][0]["stages"], json!(expected));
+        assert!(problems(&direction, &direction_input()).is_empty());
     }
 
     #[test]

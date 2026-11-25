@@ -113,11 +113,25 @@ const canEvaluateOpening = computed(() => openingProgress.value?.completed === o
   && signing.value?.status !== 'PASS')
 const canFinalizeBookPlan = computed(() => signing.value?.status === 'PASS'
   && signing.value?.confirmation?.confirmed === true
-  && (bookPlan.value?.status !== 'APPROVED' || bookPlan.value?.reapprovalRequired === true))
+  && (bookPlan.value?.status !== 'APPROVED' || bookPlan.value?.reapprovalRequired === true || bookPlan.value?.firstVolumeDirectionMissing === true))
 const canConfirmSigning = computed(() => signing.value?.status === 'PASS'
   && signing.value?.confirmation?.confirmed !== true
   && passingSigningPlatforms.value.length > 0)
-const canStartProduction = computed(() => !productionLoadError.value && production.value?.validation?.canExecute !== false && production.value?.stale?.status !== 'PLAN_STALE' && Boolean(production.value?.nextChapter) && (productionIsActive.value || !production.value?.jobStatus || ['COMPLETED', 'CANCELLED'].includes(production.value.jobStatus) || canRetryProduction.value))
+const longFormStartBlocker = computed(() => {
+  const next = production.value?.nextChapter
+  if (next?.executionMode !== 'LONG_FORM') return ''
+  if (bookPlan.value?.reapprovalRequired) return '签约回执已更新，请先更新正式总纲。'
+  if (next.planReady === false) return '下一章的章计划尚未编译，请先在卷工作区编译。'
+  return ''
+})
+const canStartProduction = computed(() => {
+  const current = production.value
+  if (productionLoadError.value || current?.validation?.canExecute === false
+    || current?.stale?.status === 'PLAN_STALE' || !current?.nextChapter) return false
+  if (productionIsActive.value) return true
+  const status = current.jobStatus
+  return !longFormStartBlocker.value && (!status || ['COMPLETED', 'CANCELLED'].includes(status) || canRetryProduction.value)
+})
 const activeStep = computed(() => {
   const item = production.value?.timeline?.find(entry => entry.status === 'active')
   return item ? `正在${timelineLabel(item.title)}` : ''
@@ -319,6 +333,7 @@ async function startProduction() {
     return
   }
   lastCommand.value = 'production-start'
+  const retryOfJobId = production.value?.heldDraft?.jobId ?? production.value?.tasks[0]?.id
   runtimePoller.start({ waitForActive: true })
   try {
     await store.runCommand(lastCommand.value, {
@@ -330,8 +345,8 @@ async function startProduction() {
         entityIds: [],
         references: [],
         skillsEnabled: true,
-        ...(canRetryProduction.value && production.value?.tasks[0]?.id
-          ? { retryOfJobId: production.value.tasks[0].id }
+        ...(canRetryProduction.value && retryOfJobId
+          ? { retryOfJobId }
           : {}),
       }, chapter.executionMode === 'LONG_FORM' ? null : chapterLengthRange.value),
     })
@@ -406,6 +421,7 @@ function evaluationActionLabel() {
 }
 
 function bookPlanActionLabel() {
+  if (bookPlan.value?.firstVolumeDirectionMissing === true) return '重新生成全书方向'
   if (bookPlan.value?.reapprovalRequired === true) return '更新正式总纲'
   return bookPlanInFlight.value || production.value?.runtimeOperation?.kind === 'B02::BOOK_PLAN'
     ? '查看正式总纲进度'
@@ -559,6 +575,7 @@ function costText(value: number | null | undefined) {
       <button v-if="productionIsActive" class="btn" @click="controlProduction('production_cancel')">取消本章生成</button>
       <RouterLink v-if="store.pendingDecisionCount > 0" class="btn" :class="{ primary: !canStartProduction }" :to="`/projects/${project.id}/decisions`">去处理 {{ store.pendingDecisionCount }} 项决定</RouterLink>
     </RuntimeBanner>
+    <div v-if="longFormStartBlocker && !productionIsActive" class="banner warning" role="status">{{ longFormStartBlocker }}</div>
     <div v-if="canStartProduction && !productionIsActive && production.nextChapter && production.nextChapter.executionMode !== 'LONG_FORM'" class="section" data-chapter-length-override>
       <ChapterLengthPicker v-model="chapterLengthRange" allow-default :default-range="store.settings?.chapterLengthRange ?? null" :label="`第 ${production.nextChapter.number} 章字数区间`" />
     </div>
@@ -793,7 +810,14 @@ function costText(value: number | null | undefined) {
         <section class="card pad">
           <h2 class="card-title">创作步骤与结果</h2>
           <div v-for="run in production.modelRuns" :key="run.modelRunId" class="task-row"><strong>{{ capabilityLabel(run.capability) }}</strong><small class="muted">上次尝试：{{ run.model }} · {{ statusLabel(run.status) }}</small></div>
-          <p class="muted">制作稿：{{ production.candidateRef ? '已生成，等待检查' : '无' }}</p>
+          <details v-if="production.heldDraft">
+            <summary>查看待复核草稿</summary>
+            <ul>
+              <li v-for="finding in production.heldDraft.findings" :key="finding.quote">{{ finding.problem }}</li>
+            </ul>
+            <p style="white-space: pre-wrap">{{ production.heldDraft.body }}</p>
+          </details>
+          <p v-else class="muted">制作稿：{{ production.candidateRef ? '已生成，等待检查' : '无' }}</p>
           <p class="muted">正式正文：{{ production.finalChapterRef ? '已提交' : '无' }}</p>
         </section>
       </aside>

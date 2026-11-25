@@ -1374,6 +1374,10 @@ fn r2_model_output(capability: &str, input: &Value, task_id: &str) -> Value {
         }
         "REVIEW_CHAPTER" => json!({"findings":[]}),
         "REWRITE_PASSAGES" => json!({"edits":[]}),
+        // The opening sentence is the chapter's main event.
+        "SELECT_MAIN_EVENT" => {
+            json!({"firstSentence":0,"outcomeSentence":0,"eventType":"DISCOVERY"})
+        }
         "AUDIT_EXTRACT" => json!({
             "qualityFindings":[],
             "canonCandidates":[{
@@ -1460,6 +1464,8 @@ fn r2_spawn_local_provider_server(
                 .unwrap_or_default();
             let capability = if system_prompt.contains("qualityFindings") {
                 "AUDIT_EXTRACT"
+            } else if system_prompt.contains("\"firstSentence\":integer") {
+                "SELECT_MAIN_EVENT"
             } else if system_prompt.contains("\"body\":string") {
                 "RENDER_CHAPTER"
             } else {
@@ -2249,8 +2255,9 @@ fn r2_registered_async_production_and_export_keep_runtime_canary_private() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let canary = r2_runtime_canary();
     // The opening chapter is planned, written whole (owner decision
-    // 2026-10-23), reviewed and audited; then the next chapter is planned.
-    let expected_requests = 5;
+    // 2026-10-23), reviewed, audited and has its main event picked; then the next
+    // chapter is planned.
+    let expected_requests = 6;
     let R2LocalProviderServer {
         endpoint,
         stop,

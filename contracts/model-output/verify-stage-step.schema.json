@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "evidenced progress of the active volume stage step",
+  "type": "object",
+  "anyOf": [
+    { "required": ["stageStepCompletion"] },
+    { "required": ["stageStepProgress"] }
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "stageStepCompletion": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/selection"
+        }
+      ]
+    },
+    "stageStepProgress": {
+      "$ref": "#/$defs/selection"
+    }
+  },
+  "if": {
+    "required": [
+      "stageStepProgress"
+    ]
+  },
+  "then": {
+    "properties": {
+      "stageStepCompletion": {
+        "type": "null"
+      }
+    }
+  },
+  "$defs": {
+    "citation": {
+      "type": "object",
+      "properties": {
+        "sourceChapter": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "firstSentence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outcomeSentence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "condition": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "actionQuote": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 640
+        },
+        "outcomeQuote": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 640
+        }
+      },
+      "required": [
+        "firstSentence",
+        "outcomeSentence",
+        "condition",
+        "actionQuote",
+        "outcomeQuote"
+      ],
+      "additionalProperties": false
+    },
+    "selection": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/citation"
+        },
+        {
+          "type": "object",
+          "required": [
+            "evidenceParts"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "evidenceParts": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 3,
+              "items": {
+                "$ref": "#/$defs/citation"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

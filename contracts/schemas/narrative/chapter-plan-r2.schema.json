@@ -22,6 +22,10 @@
   "contextManifestRef": {
    "$ref": "../artifact/artifact-ref.schema.json"
   },
+  "stageStepRulesDigest": {
+   "type": "string",
+   "pattern": "^[a-f0-9]{64}$"
+  },
   "chapterGoal": {
    "type": "string",
    "minLength": 1

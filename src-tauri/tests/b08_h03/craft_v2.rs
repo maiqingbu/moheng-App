@@ -97,7 +97,6 @@ impl ProductionModelGateway for CraftGateway {
             .unwrap()
             .push((capability.to_string(), input.clone()));
         let audits = self.inputs("AUDIT_EXTRACT").len();
-        // A length adjustment returns a whole chapter, like the writer.
         let writes = matches!(capability, "RENDER_CHAPTER" | "ADJUST_CHAPTER_LENGTH");
         let mut response =
             RecordingGateway.invoke(if writes { "RENDER_CHAPTER" } else { capability }, input)?;
@@ -155,6 +154,10 @@ impl ProductionModelGateway for CraftGateway {
                 .body_lengths
                 .get(renders)
                 .unwrap_or_else(|| self.body_lengths.last().unwrap());
+            if capability == "ADJUST_CHAPTER_LENGTH" && input["patchOnly"] == true {
+                response.output = fixture_length_insertions(input, length);
+                return Ok(response);
+            }
             let motif = format!(
                 "{}{}",
                 MOTIF.repeat(self.motifs.get(renders).copied().unwrap_or(0)),
@@ -269,7 +272,8 @@ fn craft_v2_a_chapter_is_written_once_and_sized_by_one_adjustment() {
     let adjust = gateway.inputs("ADJUST_CHAPTER_LENGTH");
     assert_eq!(adjust.len(), 1);
     assert_eq!(adjust[0]["currentChars"], 1200);
-    assert_eq!(adjust[0]["targetChars"], 2500);
+    assert_eq!(adjust[0]["targetChars"], 2024);
+    assert_eq!(adjust[0]["patchOnly"], true);
     assert_eq!(committed_word_count(&state, project_id, &chapter_id), 2500);
 }
 
@@ -298,11 +302,7 @@ fn ld4_a_chapter_too_long_is_cut_by_the_sentences_the_writer_chooses() {
     // Real run 2026-11-01: asked to compress, the writer cut 0-10% of
     // chapters a third too long; it now only chooses the sentences.
     let mut gateway = CraftGateway::new(vec![good_plan()], &[3400]);
-    let walking = (0..60)
-        .map(|n| format!("第{n:02}次沈砚沿着走廊走到档案室门口。"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    gateway.inject = vec![walking];
+    gateway.inject = vec![distinct_cuttable_sentences()];
     let gateway = Arc::new(gateway);
     let project_id = "p-ld4-cut";
     let (_temp, state, chapter_id, result) = produce(gateway.clone(), project_id);
@@ -310,12 +310,24 @@ fn ld4_a_chapter_too_long_is_cut_by_the_sentences_the_writer_chooses() {
     let cut = gateway.inputs("CUT_CHAPTER");
     assert_eq!(cut.len(), 1);
     assert_eq!(cut[0]["currentChars"], 3400);
-    assert_eq!(cut[0]["cutChars"], 900);
+    assert_eq!(cut[0]["cutChars"], 100);
     assert_eq!(cut[0]["sentences"][0]["n"], 0);
     assert!(cut[0]["sentences"][0]["chars"].as_i64().unwrap() > 0);
     assert!(gateway.inputs("ADJUST_CHAPTER_LENGTH").is_empty());
     let committed = committed_word_count(&state, project_id, &chapter_id);
-    assert!((2000..=2500).contains(&committed), "{committed}");
+    assert!((2000..=3300).contains(&committed), "{committed}");
+}
+
+fn distinct_cuttable_sentences() -> String {
+    (0..60)
+        .map(|n| {
+            (0..17)
+                .map(|i| char::from_u32(0x9f00 - n * 17 - i).unwrap())
+                .chain(std::iter::once('。'))
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]
@@ -323,10 +335,7 @@ fn ld4_a_cut_that_leaves_the_chapter_too_long_is_followed_by_one_more() {
     // Real run 2026-11-01 (round 10): the writer chose sentences for 70% of
     // what had to go.
     let mut gateway = CraftGateway::new(vec![good_plan()], &[3600]);
-    gateway.inject = vec![(0..60)
-        .map(|n| format!("第{n:02}次沈砚沿着走廊走到档案室门口。"))
-        .collect::<Vec<_>>()
-        .join("\n")];
+    gateway.inject = vec![distinct_cuttable_sentences()];
     gateway.first_cut = Some(10);
     let gateway = Arc::new(gateway);
     let project_id = "p-ld4-cut-twice";
@@ -337,7 +346,7 @@ fn ld4_a_cut_that_leaves_the_chapter_too_long_is_followed_by_one_more() {
     // Ten sentences of 18 characters and the nine line breaks between them.
     assert_eq!(cut[1]["currentChars"], 3411);
     let committed = committed_word_count(&state, project_id, &chapter_id);
-    assert!((2000..=2500).contains(&committed), "{committed}");
+    assert!((2000..=3300).contains(&committed), "{committed}");
 }
 
 #[test]
@@ -368,8 +377,8 @@ fn committed_word_count(state: &KernelState, project_id: &str, chapter_id: &str)
 }
 
 #[test]
-fn craft_v2_retry_writes_the_chapter_again() {
-    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[600, 600, 2500]));
+fn craft_v2_retry_expands_the_saved_draft() {
+    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[600, 600, 600, 2500]));
     let project_id = "p-craft-retry";
     let (_temp, state, chapter_id, result) = produce(gateway.clone(), project_id);
     assert!(result
@@ -397,8 +406,11 @@ fn craft_v2_retry_writes_the_chapter_again() {
         "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"],"retryOfJobId":failed_job}
     }))
     .unwrap();
-    // The configured writer never reuses sized prose: the retry writes anew.
-    assert_eq!(gateway.inputs("RENDER_CHAPTER").len(), 2);
+    assert_eq!(gateway.inputs("RENDER_CHAPTER").len(), 1);
+    assert_eq!(
+        gateway.inputs("ADJUST_CHAPTER_LENGTH")[2]["currentChars"],
+        600
+    );
 }
 
 #[test]
@@ -594,7 +606,7 @@ fn craft_v2_committed_prose_uses_chinese_punctuation() {
 }
 
 #[test]
-fn craft_v2_a_retry_with_new_prose_audits_the_new_prose() {
+fn craft_v2_a_failed_audit_is_retried_on_the_same_saved_prose() {
     let gateway = Arc::new(CraftGateway {
         fail_first_audit: true,
         ..CraftGateway::new(vec![good_plan()], &[2500])
@@ -624,10 +636,10 @@ fn craft_v2_a_retry_with_new_prose_audits_the_new_prose() {
         "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"],"retryOfJobId":failed_job}
     }))
     .unwrap();
-    // The retry wrote the chapter again, so its prose gets its own audit
-    // (after the first attempt's audit and its resend).
-    assert_eq!(gateway.inputs("RENDER_CHAPTER").len(), 2);
-    assert_eq!(gateway.inputs("AUDIT_EXTRACT").len(), 3);
+    assert_eq!(gateway.inputs("RENDER_CHAPTER").len(), 1);
+    let audits = gateway.inputs("AUDIT_EXTRACT");
+    assert_eq!(audits.len(), 3);
+    assert_eq!(audits[0]["body"], audits[2]["body"]);
 }
 
 #[test]
@@ -794,7 +806,7 @@ fn craft_v2_a_rewrite_that_leaves_the_length_range_is_discarded() {
 }
 
 #[test]
-fn craft_v2_a_phrase_used_a_third_time_goes_to_the_rewrite() {
+fn craft_v2_a_phrase_that_survives_the_rewrites_does_not_reach_audit() {
     // The chapter uses the image three times, as a real code label did
     // on 2026-10-19.
     let gateway = Arc::new(CraftGateway {
@@ -802,8 +814,10 @@ fn craft_v2_a_phrase_used_a_third_time_goes_to_the_rewrite() {
         ..CraftGateway::new(vec![good_plan()], &[2500])
     });
     let project_id = "p-craft-review-repeat";
-    let (_temp, state, _chapter_id, result) = produce(gateway.clone(), project_id);
-    result.unwrap();
+    let (_temp, state, chapter_id, result) = produce(gateway.clone(), project_id);
+    assert!(result
+        .unwrap_err()
+        .starts_with("B08_RENDER_SIGNING_REPETITION"));
     let rewrites = gateway.inputs("REWRITE_PASSAGES");
     // RP-1: the fixture rewrite leaves the repeat, so the repeat alone is
     // rewritten once more.
@@ -819,12 +833,22 @@ fn craft_v2_a_phrase_used_a_third_time_goes_to_the_rewrite() {
         .unwrap()
         .iter()
         .all(|finding| finding["code"] == "word_repetition"));
-    assert!(
-        receipt_craft(&state, project_id)["proseReview"]["repeatedPhrases"]
-            .as_u64()
-            .unwrap()
-            > 0
-    );
+    assert!(gateway.inputs("AUDIT_EXTRACT").is_empty());
+    let handle = state.manager.open(project_id, "", NOW).unwrap();
+    let persisted: (String, Option<String>) = handle
+        .query_row(
+            "SELECT c.status, json_extract(k.boundary_json,'$.body') FROM chapters c
+         JOIN jobs j ON j.chapter_id=c.chapter_id JOIN job_checkpoints k USING(job_id)
+         WHERE c.chapter_id=?1 AND k.stage='RENDER'",
+            [&chapter_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(persisted.0, "PLANNED");
+    assert!(persisted
+        .1
+        .as_deref()
+        .is_some_and(|body| body.matches(MOTIF).count() == 3));
 }
 
 #[test]
@@ -840,7 +864,9 @@ fn craft_v2_a_repeat_that_would_fail_signing_is_the_first_rewrite_finding() {
     });
     let project_id = "p-craft-repeat-first";
     let (_temp, _state, _chapter_id, result) = produce(gateway.clone(), project_id);
-    result.unwrap();
+    assert!(result
+        .unwrap_err()
+        .starts_with("B08_RENDER_SIGNING_REPETITION"));
     let findings = gateway.inputs("REWRITE_PASSAGES")[0]["findings"].clone();
     let findings = findings.as_array().unwrap();
     assert!(findings.len() > 1, "{findings:?}");

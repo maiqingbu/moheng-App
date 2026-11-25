@@ -197,6 +197,7 @@ export interface ContextManifestR1 {
 }
 
 export interface ChapterPlanR1 {
+  "stageStepRulesDigest"?: string
   "payloadSchema": unknown
   "chapterId": string
   "compiledFromProjectRevision": number
@@ -222,6 +223,7 @@ export interface ChapterPlanR2 {
   "compiledFromProjectRevision": number
   "compiledFromStateDigest": string
   "contextManifestRef": ArtifactRef
+  "stageStepRulesDigest"?: string
   "chapterGoal": string
   "chapterRole"?: "普通" | "过渡" | "重要" | "升级" | "回报" | "高潮前" | "高潮"
   "activeTaskRefs": Array<string>

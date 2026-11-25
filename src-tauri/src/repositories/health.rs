@@ -600,6 +600,18 @@ impl HealthRepository {
         Ok(())
     }
 
+    pub(crate) fn pending_b09_rebuild_at(
+        connection: &Connection,
+        project_id: &str,
+        volume_id: &str,
+    ) -> Result<Option<String>, HealthRepositoryError> {
+        connection.query_row(
+            "SELECT marked_at FROM health_b09_rebuild_pending WHERE project_id=?1 AND volume_id=?2",
+            libsql_rusqlite::params![project_id, volume_id],
+            |row| row.get(0),
+        ).optional().map_err(Into::into)
+    }
+
     /// Called only by the B09 owner after its planning projection has been
     /// persisted in the same transaction as the subsequent Health refresh.
     pub fn complete_b09_rebuild_pending(

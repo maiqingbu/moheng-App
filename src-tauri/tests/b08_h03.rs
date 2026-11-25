@@ -44,6 +44,28 @@ fn varied_prose(length: usize) -> String {
         .collect()
 }
 
+/// A scripted expansion for the provider fixtures. Each insertion starts
+/// after a numbered line and contributes two paragraph-break characters.
+fn fixture_length_insertions(input: &Value, next_length: usize) -> Value {
+    let current = input["currentChars"].as_u64().unwrap() as usize;
+    let gap = next_length.saturating_sub(current).min(1800);
+    if gap == 0 {
+        return json!({"insertions":[{"afterSentence":9999,"text":"这段补写的位置无效。"}]});
+    }
+    let mut cursor = current;
+    let insertions = (0..gap.div_ceil(600))
+        .map(|number| {
+            let length = (gap - number * 600).min(600).saturating_sub(2);
+            let text = (cursor..cursor + length)
+                .map(|offset| char::from_u32(0x4E00 + offset as u32).unwrap())
+                .collect::<String>();
+            cursor += length;
+            json!({"afterSentence":number,"text":text})
+        })
+        .collect::<Vec<_>>();
+    json!({"insertions":insertions})
+}
+
 struct RecordingGateway;
 
 #[derive(Clone, Default)]

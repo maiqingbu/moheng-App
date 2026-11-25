@@ -51,6 +51,20 @@ fn has(problems: &[String], needle: &str) -> bool {
 }
 
 #[test]
+fn an_added_clause_cannot_hide_a_repeated_action_from_a_recent_goal() {
+    let bible = bible();
+    let mut earlier = plan()["craft"].clone();
+    earlier["chapterGoal"] = json!(
+        "陆照将截流玉珏裹进紫穗草籽囊，塞进哑叔刚修好的丹炉风门夹层，完成对暗桩实物证据的隐蔽转移"
+    );
+    let ledger = creation_ledger(&[(5, earlier)], &bible);
+    let mut current = plan();
+    current["chapterGoal"] = json!("陆照在哑叔铁钳敲击节奏的掩护下，将截流玉珏裹进紫穗草籽囊塞入丹炉风门夹层，并确认玉珏背面无纹、棱角齐整——代价不是消耗寿元，而是确认真相后左耳垂灰线彻底凝固如旧疤。");
+    let problems = plan_problems(&current, 8, &bible, &ledger);
+    assert!(has(&problems, "重复第 5 章的动作"), "{problems:?}");
+}
+
+#[test]
 fn a_concrete_first_chapter_plan_passes() {
     let problems = plan_problems(&plan(), 1, &bible(), &creation_ledger(&[], &bible()));
     assert!(problems.is_empty(), "{problems:?}");
@@ -231,6 +245,23 @@ fn skill_decisions_name_the_plan_fields_each_selected_skill_decided() {
         decisions[1]["decisions"]["readerQuestions"],
         json!(["少的两箱去了哪里", "少的两箱去了哪里"])
     );
+}
+
+#[test]
+fn an_unwritten_planned_ending_is_not_passed_to_the_next_planner_as_story_state() {
+    use ai_novel_production_system_core::craft_plan::prompt_ledger;
+    let mut craft = plan()["craft"].clone();
+    craft["chapterGoal"] = json!("确认纽扣的来源");
+    craft["situationChange"]["after"] = json!("东墙豁口深处的松枝震颤三次");
+    craft["endHook"] = json!("柳执事带着密信从门内走出");
+    let ledger = creation_ledger(&[(4, craft)], &bible());
+    let view = prompt_ledger(&ledger);
+    assert_eq!(
+        view["endings"][0],
+        json!({"chapter":4,"plannedGoal":"确认纽扣的来源"})
+    );
+    assert!(!view.to_string().contains("震颤三次"));
+    assert!(!view.to_string().contains("带着密信"));
 }
 
 #[test]

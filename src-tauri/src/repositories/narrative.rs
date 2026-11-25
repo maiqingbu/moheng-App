@@ -343,6 +343,157 @@ pub struct CanonEventRecord {
 pub struct NarrativeRepository;
 
 impl NarrativeRepository {
+    /// A relation id is an identity for one directed pair in one project.
+    pub(crate) fn relation_identity_conflicts(
+        connection: &Connection,
+        project_id: &str,
+        relation_id: &str,
+        subject_id: &str,
+        object_id: &str,
+    ) -> Result<bool, libsql_rusqlite::Error> {
+        connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM canon_relations WHERE relation_id=?1 AND (project_id<>?2 OR subject_id<>?3 OR object_id<>?4))",
+            libsql_rusqlite::params![relation_id, project_id, subject_id, object_id],
+            |row| row.get(0),
+        )
+    }
+
+    /// A later relation change may explain a changed projection only when a
+    /// committed later FinalChapter binds this exact relation, fact and quote.
+    pub(crate) fn later_relation_change_is_evidenced(
+        connection: &Connection,
+        project_id: &str,
+        opening_last_chapter: &str,
+        signed: &OpeningActualRelation,
+    ) -> Result<bool, NarrativeRepositoryError> {
+        let current = connection.query_row(
+            "SELECT r.subject_id,r.predicate,r.object_id,r.valid_from_chapter_id,se.canonical_name,oe.canonical_name \
+             FROM canon_relations r LEFT JOIN canon_entities se ON se.project_id=r.project_id AND se.entity_id=r.subject_id \
+             LEFT JOIN canon_entities oe ON oe.project_id=r.project_id AND oe.entity_id=r.object_id \
+             WHERE r.project_id=?1 AND r.relation_id=?2",
+            libsql_rusqlite::params![project_id, signed.relation_id],
+            |row| Ok((row.get::<_, String>(0)?,row.get::<_, String>(1)?,row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,row.get::<_, Option<String>>(4)?,row.get::<_, Option<String>>(5)?)),
+        ).optional()?;
+        let Some((subject, predicate, object, Some(chapter), subject_name, object_name)) = current
+        else {
+            return Ok(false);
+        };
+        if subject != signed.subject_id
+            || object != signed.object_id
+            || subject_name != signed.subject_name
+            || object_name != signed.object_name
+        {
+            return Ok(false);
+        }
+        let mut statement = connection.prepare(
+            "SELECT p.payload_json,p.payload_hash,e.evidence_id,e.fact_id,e.quote,e.range_start,e.range_end,f.evidence_range_json \
+             FROM chapters c JOIN volumes v ON v.project_id=c.project_id AND v.volume_id=c.volume_id \
+             JOIN chapters base ON base.project_id=c.project_id AND base.chapter_id=?3 \
+             JOIN volumes bv ON bv.project_id=base.project_id AND bv.volume_id=base.volume_id \
+             JOIN canonical_heads h ON h.project_id=c.project_id AND h.artifact_type='FinalChapter' AND h.scope_level='CHAPTER' \
+               AND json_extract(h.scope_key,'$.chapterId')=c.chapter_id AND h.artifact_id=c.final_artifact_id AND h.version=c.final_version \
+             JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version AND p.payload_hash=h.payload_hash \
+             JOIN canon_facts f ON f.project_id=c.project_id AND f.source_chapter_id=c.chapter_id \
+               AND f.source_artifact_id=c.final_artifact_id AND f.source_version=c.final_version \
+             JOIN canon_evidence e ON e.project_id=f.project_id AND e.fact_id=f.fact_id AND e.relation_id=?2 \
+               AND e.final_chapter_id=c.chapter_id AND e.source_artifact_id=c.final_artifact_id AND e.source_version=c.final_version \
+             WHERE c.project_id=?1 AND c.chapter_id=?4 AND c.status='COMMITTED' \
+               AND (v.volume_no>bv.volume_no OR (v.volume_no=bv.volume_no AND c.chapter_no>base.chapter_no)) \
+               AND f.subject_id=?5 AND f.predicate=?6 AND json_extract(f.object_json,'$.objectId')=?7 LIMIT 100"
+        )?;
+        let rows = statement.query_map(
+            libsql_rusqlite::params![
+                project_id,
+                signed.relation_id,
+                opening_last_chapter,
+                chapter,
+                subject,
+                predicate,
+                object
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                ))
+            },
+        )?;
+        for row in rows {
+            let (
+                raw,
+                hash,
+                evidence_id,
+                fact_id,
+                Some(quote),
+                Some(start),
+                Some(end),
+                Some(fact_range),
+            ) = row?
+            else {
+                continue;
+            };
+            if start < 0 || end <= start {
+                continue;
+            }
+            let final_payload: Value = serde_json::from_str(&raw)?;
+            if final_payload["payloadSchema"] != "final-chapter.r1"
+                || final_payload["chapterId"] != chapter
+            {
+                continue;
+            }
+            if crate::hash::sha256_canonical(&final_payload)
+                .map_err(|error| NarrativeRepositoryError::Invariant(error.to_string()))?
+                != hash
+            {
+                continue;
+            }
+            let range: Value = serde_json::from_str(&fact_range)?;
+            if range["start"] != json!(start)
+                || range["end"] != json!(end)
+                || range["quote"] != quote
+            {
+                continue;
+            }
+            let Some(body) = final_payload["body"].as_str() else {
+                continue;
+            };
+            if end as usize > body.chars().count() {
+                continue;
+            }
+            let actual = body
+                .chars()
+                .skip(start as usize)
+                .take((end - start) as usize)
+                .collect::<String>();
+            if actual != quote {
+                continue;
+            }
+            let bound = final_payload["validatedEvidence"]
+                .as_array()
+                .is_some_and(|items| {
+                    items.iter().any(|item| {
+                        item["evidenceId"] == evidence_id
+                            && item["factId"] == fact_id
+                            && item["relationId"] == signed.relation_id
+                            && item["quote"] == quote
+                            && item["rangeStart"] == json!(start)
+                            && item["rangeEnd"] == json!(end)
+                    })
+                });
+            if bound {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub fn chapter_title(
         connection: &Connection,
         project_id: &str,
@@ -1886,13 +2037,129 @@ impl NarrativeRepository {
         project_id: &str,
         before_chapter_no: i64,
     ) -> Result<BTreeMap<String, i64>, NarrativeRepositoryError> {
+        Self::satisfied_task_chapters_in_scope(connection, project_id, before_chapter_no, None)
+    }
+
+    pub(crate) fn satisfied_volume_task_chapters(
+        connection: &Connection,
+        project_id: &str,
+        volume_id: &str,
+    ) -> Result<BTreeMap<String, i64>, NarrativeRepositoryError> {
+        Self::satisfied_task_chapters_in_scope(connection, project_id, i64::MAX, Some(volume_id))
+    }
+
+    fn satisfied_task_chapters_in_scope(
+        connection: &Connection,
+        project_id: &str,
+        before_chapter_no: i64,
+        volume_id: Option<&str>,
+    ) -> Result<BTreeMap<String, i64>, NarrativeRepositoryError> {
         let mut statement = connection.prepare(
             "SELECT d.state_id, c.chapter_no FROM state_deltas d JOIN chapters c ON c.project_id=d.project_id AND c.chapter_id=d.chapter_id \
-             WHERE d.project_id=?1 AND d.state_type='volume.task.progress' AND json_extract(d.value_json,'$.status')='SATISFIED' AND c.chapter_no<?2",
+             WHERE d.project_id=?1 AND d.state_type='volume.task.progress' AND json_extract(d.value_json,'$.status')='SATISFIED' \
+             AND c.status='COMMITTED' AND c.chapter_no<?2 AND (?3 IS NULL OR c.volume_id=?3)",
         )?;
         let rows = statement.query_map(
-            libsql_rusqlite::params![project_id, before_chapter_no],
+            libsql_rusqlite::params![project_id, before_chapter_no, volume_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        rows.collect::<Result<_, _>>().map_err(Into::into)
+    }
+
+    pub(crate) fn active_stage_step_progress(
+        connection: &Connection,
+        project_id: &str,
+        volume_id: &str,
+        chapter_no: i64,
+        task_id: &str,
+    ) -> Result<Option<Value>, NarrativeRepositoryError> {
+        let raw: Option<String> = connection.query_row(
+            "SELECT json_extract(d.payload_json,'$.stageStepProgress') \
+             FROM state_deltas d JOIN chapters c ON c.project_id=d.project_id AND c.chapter_id=d.chapter_id \
+             WHERE d.project_id=?1 AND c.volume_id=?2 AND c.chapter_no<?3 AND d.state_id=?4 \
+             AND d.state_type='volume.task.progress' AND json_extract(d.value_json,'$.status')='ACTIVE' \
+             AND c.status='COMMITTED'",
+            libsql_rusqlite::params![project_id, volume_id, chapter_no, task_id],
+            |row| row.get::<_, Option<String>>(0),
+        ).optional()?.flatten();
+        raw.map(|value| serde_json::from_str(&value).map_err(Into::into))
+            .transpose()
+    }
+
+    pub(crate) fn recent_unverified_stage_attempts(
+        connection: &Connection,
+        project_id: &str,
+        volume_id: &str,
+        chapter_no: i64,
+        task_id: &str,
+        objective: &str,
+        allow_legacy_attempts: bool,
+    ) -> Result<Vec<Value>, NarrativeRepositoryError> {
+        let mut statement = connection.prepare(
+            // Keep the first pending occurrence eligible across later
+            // attempts. Send at most two recent attempts alongside it.
+            "WITH attempts AS (
+             SELECT c.chapter_no,f.artifact_id,f.version,f.payload_hash,c.chapter_id
+             FROM chapters c JOIN canonical_heads f
+               ON f.project_id=?1 AND f.artifact_type='FinalChapter' AND f.scope_level='CHAPTER'
+               AND f.scope_key=json_object('chapterId',c.chapter_id,'level','CHAPTER')
+               AND f.artifact_id=c.final_artifact_id AND f.version=c.final_version
+             JOIN canonical_heads r ON r.project_id=f.project_id AND r.artifact_type='ProductionReceipt'
+               AND r.scope_level=f.scope_level AND r.scope_key=f.scope_key
+             JOIN artifact_payloads p ON p.artifact_id=r.artifact_id AND p.version=r.version AND p.payload_hash=r.payload_hash
+             JOIN artifacts a ON a.project_id=f.project_id AND a.artifact_status='COMMITTED'
+               AND a.artifact_id=json_extract(p.payload_json,'$.auditRef.artifactId')
+               AND a.version=json_extract(p.payload_json,'$.auditRef.version')
+               AND a.payload_hash=json_extract(p.payload_json,'$.auditRef.payloadHash')
+             JOIN artifact_payloads ap ON ap.artifact_id=a.artifact_id AND ap.version=a.version AND ap.payload_hash=a.payload_hash
+             WHERE c.project_id=?1 AND c.volume_id=?2 AND c.chapter_no<?3 AND c.status='COMMITTED'
+               AND json_extract(p.payload_json,'$.finalChapterRef.artifactId')=f.artifact_id
+               AND json_extract(p.payload_json,'$.finalChapterRef.version')=f.version
+               AND json_extract(p.payload_json,'$.finalChapterRef.payloadHash')=f.payload_hash
+               AND (EXISTS (
+                 SELECT 1 FROM json_each(ap.payload_json,'$.audit.normalization.heldBack') issue
+                 WHERE json_extract(issue.value,'$.taskId')=?4
+                   AND json_extract(issue.value,'$.reason') IN ('B08_STAGE_STEP_OUTCOME_UNVERIFIED','B08_TASK_COMPLETION_PREDICATE_UNSATISFIED')
+                   AND (json_extract(issue.value,'$.objective')=?5 OR (
+                     ?6 AND json_type(issue.value,'$.objective') IS NULL AND EXISTS (
+                       SELECT 1 FROM artifact_dependencies d JOIN canonical_heads b
+                         ON b.project_id=f.project_id AND b.artifact_type='BookPlan'
+                         AND b.artifact_id=d.target_artifact_id AND b.version=d.target_version
+                         AND b.payload_hash=d.target_payload_hash
+                       WHERE d.source_artifact_id=json_extract(p.payload_json,'$.contextManifestRef.artifactId')
+                         AND d.source_version=json_extract(p.payload_json,'$.contextManifestRef.version')
+                     )
+                   ))
+               ) OR (
+                 json_extract(ap.payload_json,'$.audit.normalization.stageStepVerification.taskId')=?4
+                 AND json_extract(ap.payload_json,'$.audit.normalization.stageStepVerification.objective')=?5
+                 AND json_extract(ap.payload_json,'$.audit.normalization.stageStepVerification.status') IN ('ACTIVE','UNVERIFIED')
+               ))
+             )
+             SELECT chapter_no,artifact_id,version,payload_hash,chapter_id FROM attempts
+             WHERE chapter_no=(SELECT MIN(chapter_no) FROM attempts)
+                OR chapter_no IN (SELECT chapter_no FROM attempts ORDER BY chapter_no DESC LIMIT 2)
+             ORDER BY chapter_no DESC"
+        )?;
+        let rows = statement.query_map(
+            libsql_rusqlite::params![
+                project_id,
+                volume_id,
+                chapter_no,
+                task_id,
+                objective,
+                allow_legacy_attempts
+            ],
+            |row| {
+                Ok(json!({
+                    "chapterNo":row.get::<_, i64>(0)?,
+                    "chapterId":row.get::<_, String>(4)?,
+                    "finalRef":{
+                        "artifactId":row.get::<_, String>(1)?,"version":row.get::<_, i64>(2)?,
+                        "payloadHash":row.get::<_, String>(3)?
+                    }
+                }))
+            },
         )?;
         rows.collect::<Result<_, _>>().map_err(Into::into)
     }
@@ -2004,7 +2271,10 @@ impl NarrativeRepository {
         artifact_type: &str,
         scope_key: &str,
     ) -> Result<Option<ArtifactRef>, NarrativeRepositoryError> {
-        let canonical_scope = if artifact_type == "VolumeIntent" || artifact_type == "VolumePlan" {
+        let canonical_scope = if matches!(
+            artifact_type,
+            "VolumeIntent" | "VolumePlan" | "VolumeExitState"
+        ) {
             Self::volume_scope_key(scope_key)?
         } else if artifact_type == "ChapterPlan" {
             Self::chapter_scope_key(scope_key)?
@@ -2676,6 +2946,39 @@ impl NarrativeRepository {
             .map_err(Into::into)
     }
 
+    /// A later volume can extend a signed BookPlan through its predecessor.
+    /// An explicit signing dependency on an intermediate version ends that
+    /// lineage: an older approval cannot override the nearer approval.
+    pub(crate) fn book_plan_uses_signing(
+        connection: &Connection,
+        project_id: &str,
+        book_plan: &ArtifactRef,
+        signing: &ArtifactRef,
+    ) -> Result<bool, NarrativeRepositoryError> {
+        connection.query_row(
+            "WITH RECURSIVE plans(id, version) AS ( \
+               SELECT artifact_id,version FROM artifacts \
+               WHERE project_id=?1 AND artifact_id=?2 AND version=?3 AND payload_hash=?4 \
+               AND artifact_type='BookPlan' AND artifact_status='COMMITTED' \
+               UNION \
+               SELECT parent.artifact_id,parent.version FROM plans p \
+               JOIN artifact_dependencies d ON d.source_artifact_id=p.id AND d.source_version=p.version \
+               JOIN artifacts parent ON parent.artifact_id=d.target_artifact_id AND parent.version=d.target_version \
+                 AND parent.payload_hash=d.target_payload_hash \
+               WHERE parent.project_id=?1 AND parent.artifact_type='BookPlan' AND parent.artifact_status='COMMITTED' \
+               AND NOT EXISTS (SELECT 1 FROM artifact_dependencies bound \
+                 JOIN artifacts receipt ON receipt.artifact_id=bound.target_artifact_id AND receipt.version=bound.target_version \
+                 WHERE bound.source_artifact_id=p.id AND bound.source_version=p.version \
+                 AND receipt.project_id=?1 AND receipt.artifact_type='SimulatedSigningReceipt') \
+             ) SELECT EXISTS (SELECT 1 FROM plans p \
+               JOIN artifact_dependencies d ON d.source_artifact_id=p.id AND d.source_version=p.version \
+               WHERE d.target_artifact_id=?5 AND d.target_version=?6 AND d.target_payload_hash=?7)",
+            libsql_rusqlite::params![project_id, book_plan.artifact_id, book_plan.version,
+                book_plan.payload_hash, signing.artifact_id, signing.version, signing.payload_hash],
+            |row| row.get(0),
+        ).map_err(Into::into)
+    }
+
     pub fn signing_receipt_passes(
         connection: &Connection,
         project_id: &str,
@@ -2962,7 +3265,9 @@ impl NarrativeRepository {
     ) -> Result<bool, NarrativeRepositoryError> {
         connection
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM canon_events WHERE project_id=?1 AND ((?2 IS NOT NULL AND event_id=?2) OR (?3 IS NOT NULL AND event_type=?3)))",
+                "SELECT EXISTS(SELECT 1 FROM canon_events WHERE project_id=?1 AND ((?2 IS NOT NULL AND event_id=?2) OR (?3 IS NOT NULL AND event_type=?3)) \
+                 AND COALESCE(json_extract(payload_json,'$.event.eventTypeSource'),'')<>'fallback_fact' \
+                 AND NOT (event_type='SITUATION_CHANGE' AND COALESCE(json_type(payload_json,'$.event.description'),'')='text'))",
                 libsql_rusqlite::params![project_id, event_id, event_type],
                 |row| row.get(0),
             )
@@ -3713,4 +4018,63 @@ mod fx11_scoped_canon_lookup_tests {
             );
         }
     }
+}
+
+#[cfg(test)]
+mod event_proof_tests {
+    use super::*;
+
+    #[test]
+    fn an_old_fallback_fact_cannot_satisfy_a_required_event() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE canon_events(project_id TEXT,event_id TEXT,event_type TEXT,payload_json TEXT); INSERT INTO canon_events VALUES ('p','event:1','SITUATION_CHANGE','{\"event\":{\"eventTypeSource\":\"fallback_fact\"}}');").unwrap();
+        assert!(
+            !NarrativeRepository::canon_event_exists(&conn, "p", Some("event:1"), None).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_legacy_plan_description_cannot_satisfy_a_required_event() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE canon_events(project_id TEXT,event_id TEXT,event_type TEXT,payload_json TEXT); INSERT INTO canon_events VALUES ('p','event:legacy','SITUATION_CHANGE','{\"event\":{\"description\":\"计划中的变化\"}}');").unwrap();
+        assert!(
+            !NarrativeRepository::canon_event_exists(&conn, "p", Some("event:legacy"), None)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_genuine_event_can_satisfy_a_required_event() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE canon_events(project_id TEXT,event_id TEXT,event_type TEXT,payload_json TEXT); INSERT INTO canon_events VALUES ('p','event:2','DISCOVERY','{}');").unwrap();
+        assert!(
+            NarrativeRepository::canon_event_exists(&conn, "p", Some("event:2"), None).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_situation_event_without_a_fallback_description_is_not_discarded() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE canon_events(project_id TEXT,event_id TEXT,event_type TEXT,payload_json TEXT); INSERT INTO canon_events VALUES ('p','event:3','SITUATION_CHANGE','{}');").unwrap();
+        assert!(
+            NarrativeRepository::canon_event_exists(&conn, "p", Some("event:3"), None).unwrap()
+        );
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn directed_relation_test_db(existing: bool) -> Connection {
+    let connection = Connection::open_in_memory().unwrap();
+    connection.execute_batch(
+        "CREATE TABLE canon_relations(project_id TEXT,relation_id TEXT,subject_id TEXT,object_id TEXT);",
+    ).unwrap();
+    if existing {
+        connection
+            .execute(
+                "INSERT INTO canon_relations VALUES ('p','r','陆照','柳明漪')",
+                [],
+            )
+            .unwrap();
+    }
+    connection
 }
