@@ -19,6 +19,12 @@ pub const CONFIRM_BOOK_CONTINUATION: &str = "CONFIRM_BOOK_CONTINUATION";
 pub(crate) const REPAIR_BOOK_PRESSURE: &str = "REPAIR_BOOK_PRESSURE";
 const BOOK_CONTINUATION_EVIDENCE_INVALID: &str = "B07_BOOK_CONTINUATION_EVIDENCE_INVALID";
 const BOOK_PRESSURE_REPAIR_REQUIRED: &str = "B07_BOOK_PRESSURE_REPAIR_REQUIRED";
+/// The most candidates one confirmation judges (its schema's limit).
+const CONFIRM_CANDIDATES: usize = 20;
+
+/// How much of the end of the opening the planner is shown.
+const OPENING_ENDING_CHARS: usize = 800;
+
 pub(crate) const BOOK_DIRECTION_REQUIRED: &str = "B07_BOOK_DIRECTION_REQUIRED";
 pub(crate) const VOLUME_DIRECTION_ROUTE_REQUIRED: &str = "B07_VOLUME_DIRECTION_ROUTE_REQUIRED";
 
@@ -615,16 +621,28 @@ pub fn plan(
             opening_chapters,
         )
         .map_err(|error| error.to_string())?;
-    input["openingCommittedProse"] = json!(committed_opening.iter()
+    let committed_opening = committed_opening
+        .iter()
         .filter(|(chapter, _)| (1..=opening_chapters).contains(chapter))
+        .collect::<Vec<_>>();
+    // The planner is shown where the opening ends, not its scenes: given the
+    // three chapters, it planned them again (real runs rounds 6 and 7).
+    if let Some((chapter, body)) = committed_opening.last() {
+        let characters = body.chars().count();
+        input["openingEnding"] = json!({"chapterNo":chapter,
+            "text":body.chars().skip(characters.saturating_sub(OPENING_ENDING_CHARS)).collect::<String>()});
+    }
+    let opening_prose = committed_opening
+        .iter()
         .map(|(chapter, body)| json!({"chapterNo":chapter,"body":body.chars().take(4_000).collect::<String>()}))
-        .collect::<Vec<_>>());
+        .collect::<Vec<_>>();
     let planned = run_direction(
         connection,
         gateway,
         (project_id, command_id, idempotency_key, now),
         (PLAN_BOOK_DIRECTION, "book-direction"),
         input,
+        &opening_prose,
         problems,
     )?;
     match planned {
@@ -702,6 +720,68 @@ pub(crate) fn drop_replayed_steps(direction: &mut Value, feedback: &Value) {
     }
 }
 
+fn replay_feedback(location: &str, planned: &str, evidence: &str, reason: &str) -> String {
+    format!("{location}「{planned}」重排了开篇已发生的结果「{evidence}」。{reason}。请从该结果推进新的后果。")
+}
+
+/// The sentences of the opening a step is compared with at a time.
+const RETOLD_SENTENCES: usize = 3;
+/// A step may tell a passage again when it shares this many telling pairs
+/// with it, and at least 35% of its own.
+const RETOLD_PAIRS: usize = 5;
+
+/// The steps worded like a passage of the opening, each with the passage
+/// nearest to it, for the confirmation to judge.
+fn retold_steps(stages: &[Value], opening: &[Value]) -> Vec<(Value, String)> {
+    let pairs = crate::chapter_craft::telling_pairs;
+    let passages = opening
+        .iter()
+        .flat_map(|chapter| {
+            let body = text(&chapter["body"]);
+            let spans = crate::chapter_craft::sentence_spans(body);
+            (0..spans.len())
+                .map(|first| {
+                    let last = (first + RETOLD_SENTENCES - 1).min(spans.len() - 1);
+                    let passage = &body[spans[first].0..spans[last].1];
+                    (&chapter["chapterNo"], passage, pairs(passage))
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let mut found = Vec::new();
+    for (stage_index, stage) in stages.iter().enumerate() {
+        for (index, step) in names(&stage["steps"]).enumerate() {
+            let planned = pairs(step);
+            let shared = |passage: &BTreeSet<(char, char)>| planned.intersection(passage).count();
+            let Some((chapter, passage, nearest)) = passages
+                .iter()
+                .max_by_key(|(_, _, passage)| shared(passage))
+            else {
+                continue;
+            };
+            let shared = shared(nearest);
+            if shared < RETOLD_PAIRS || shared * 100 < planned.len() * 35 {
+                continue;
+            }
+            let number = index as u64 + 1;
+            found.push((
+                json!({
+                    "stage":stage_index + 1,"step":number,
+                    "plannedText":step,"plannedQuote":step,"plannedOutcome":planned_outcome(step),
+                    "openingChapter":chapter,"openingQuote":passage,
+                }),
+                replay_feedback(
+                    &step_location(stage_index, number),
+                    step,
+                    passage,
+                    "两处写的是同一件事",
+                ),
+            ));
+        }
+    }
+    found
+}
+
 struct OpeningReplayReview {
     candidates: Vec<(Value, String)>,
     unbound: Vec<Value>,
@@ -762,9 +842,10 @@ fn ground_opening_replays(
             "plannedText":target,"plannedQuote":planned,"plannedOutcome":planned_outcome(target),
             "openingChapter":chapter["chapterNo"],"openingQuote":evidence,
         });
-        let feedback = format!("{location}「{planned}」重排了开篇已发生的结果「{evidence}」。{}。请从该结果推进新的后果。",
-            text(&issue["reason"]));
-        Some((pair, feedback))
+        Some((
+            pair,
+            replay_feedback(&location, planned, evidence, text(&issue["reason"])),
+        ))
     };
     let mut result = OpeningReplayReview {
         candidates: Vec::new(),
@@ -909,6 +990,7 @@ fn run_direction(
     (project_id, command_id, idempotency_key, now): (&str, &str, &str, &str),
     (capability, suffix): (&str, &str),
     input: Value,
+    opening_prose: &[Value],
     check: fn(&Value, &Value) -> Vec<String>,
 ) -> Result<Result<(Value, String), String>, String> {
     // P2: the methods selected for the book or the volume plan.
@@ -945,7 +1027,6 @@ fn run_direction(
     } else {
         None
     };
-    let opening_prose = items(&input, "openingCommittedProse");
     let opening = opening_prose
         .iter()
         .map(|chapter| {
@@ -1079,6 +1160,14 @@ fn run_direction(
                             candidates.push(candidate.clone());
                         }
                     }
+                }
+            }
+            for (pair, feedback) in retold_steps(stages, opening_prose) {
+                let reviewed = candidates.iter().any(|(other, _)| {
+                    other["stage"] == pair["stage"] && other["step"] == pair["step"]
+                });
+                if !reviewed && candidates.len() < CONFIRM_CANDIDATES {
+                    candidates.push((pair, feedback));
                 }
             }
             if !candidates.is_empty() {
@@ -1248,6 +1337,7 @@ pub fn plan_volume(
         (project_id, command_id, idempotency_key, now),
         (PLAN_VOLUME_DIRECTION, "volume-direction"),
         input,
+        &[],
         volume_problems,
     )?;
     Ok(match planned {
@@ -1759,6 +1849,38 @@ mod tests {
     }
 
     #[test]
+    fn round77_steps_that_tell_the_opening_again_are_all_put_to_the_confirmation() {
+        // Real run round 7: most steps of four stages told the opening again
+        // and the review named five at most.
+        let stages = [json!({"goal":"查清车库","steps":[
+            "沈砚走出车库时，鞋底沾起三滴水，滚入打孔机冲头孔洞蒸干",
+            "沈砚撕下‘停止调查’通知单，在背面写下‘A7-3号未归档事件：继续’",
+            "沈砚顺着借调名单找到当年的调度员"
+        ]})];
+        let opening = [
+            json!({"chapterNo":2,"body":"沈砚盯着它看了两秒。然后他伸手把通知单撕下来，翻到背面，用断笔芯写：A7-3号未归档事件：继续。"}),
+            json!({"chapterNo":3,"body":"坡道尽头站着老陈。沈砚踩过去。鞋底沾起三滴水，走到打孔机冲头孔洞边上时，一滴滚落进去，嗤一声蒸干。“那批借调名单，我经手过。”"}),
+        ];
+        let found = retold_steps(&stages, &opening);
+        assert_eq!(
+            found
+                .iter()
+                .map(|(pair, _)| (
+                    pair["step"].as_u64().unwrap(),
+                    pair["openingChapter"].as_i64().unwrap()
+                ))
+                .collect::<Vec<_>>(),
+            [(1, 3), (2, 2)]
+        );
+        let (pair, feedback) = &found[0];
+        assert!(pair["openingQuote"]
+            .as_str()
+            .unwrap()
+            .contains("鞋底沾起三滴水"));
+        assert!(feedback.starts_with("阶段 1 的第 1 步「"));
+    }
+
+    #[test]
     fn round76_a_rejected_replay_is_not_handed_back_to_the_planner() {
         // Real run round 7: the same step came back in the next two plans.
         let mut direction = direction();
@@ -1897,6 +2019,7 @@ mod tests {
             ),
             (PLAN_BOOK_DIRECTION, "book-direction"),
             direction_input(),
+            &[],
             problems,
         )
         .unwrap()

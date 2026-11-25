@@ -9,7 +9,7 @@
   "properties": {
     "confirmedCandidates": {
       "type": "array",
-      "maxItems": 5,
+      "maxItems": 20,
       "uniqueItems": true,
       "items": {
         "type": "object",
@@ -23,7 +23,7 @@
           "number": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 4
+            "maximum": 19
           },
           "openingOutcomeQuote": {
             "type": "string",

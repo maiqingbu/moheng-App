@@ -1174,16 +1174,13 @@ fn vd1a_a_direction_planned_after_signing_fills_the_approved_book_plan() {
             > 0
     );
     assert!(!inputs[0]["signing"]["verdict"].as_str().unwrap().is_empty());
-    let opening = inputs[0]["openingCommittedProse"].as_array().unwrap();
-    assert_eq!(opening.len(), 3);
-    for (index, chapter) in opening.iter().enumerate() {
-        let number = index + 1;
-        assert_eq!(chapter["chapterNo"], number);
-        assert!(chapter["body"]
-            .as_str()
-            .unwrap()
-            .contains(&BehaviorGateway::quote(number)));
-    }
+    // Where the opening ends, not its scenes to plan again.
+    assert!(inputs[0].get("openingCommittedProse").is_none());
+    let ending = &inputs[0]["openingEnding"];
+    assert_eq!(ending["chapterNo"], 3);
+    let shown = ending["text"].as_str().unwrap();
+    assert_eq!(shown.chars().count(), 800);
+    assert!(BehaviorGateway::quote(3).ends_with(shown));
     assert_eq!(
         approved["protagonistMacroDirection"],
         "林舟从躲债的学徒走到替全城重算旧账的人"
