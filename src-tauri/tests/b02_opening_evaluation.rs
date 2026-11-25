@@ -3964,8 +3964,31 @@ fn a_missing_signing_item_is_requested_again_and_the_receipt_names_the_accepted_
     assert_ne!(item("E3-8")["modelRunId"], item("R2-5")["modelRunId"]);
 }
 
-/// Real run 2026-11-25: 11 items came back twice, word for word, and the
-/// opening ended unverified without asking again.
+/// Real run 2026-11-26: 15 items came back twice, word for word, and the
+/// reply asked for instead left one out.
+#[test]
+fn signing_items_returned_twice_word_for_word_count_once() {
+    let gateway = Arc::new(InvalidSigningOnceGateway {
+        inner: B02Gateway::new(true, "A"),
+        signing_inputs: Mutex::new(Vec::new()),
+        invalidate: |items, _| items.extend(items.clone()),
+    });
+    let (state, _temp) = state_with_custom_gateway(gateway.clone());
+    let project = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project);
+    let evaluation = command(
+        &state,
+        &project,
+        "qc1:signing:word-for-word",
+        "opening_evaluate",
+        json!({}),
+    );
+    assert_eq!(evaluation["result"]["status"], "PASS", "{evaluation}");
+    assert_eq!(gateway.signing_inputs.lock().unwrap().len(), 1);
+}
+
+/// Real run 2026-11-25: items came back twice and the opening ended
+/// unverified without asking again.
 #[test]
 fn signing_items_returned_twice_are_requested_again() {
     let gateway = Arc::new(InvalidSigningOnceGateway {
@@ -3973,11 +3996,12 @@ fn signing_items_returned_twice_are_requested_again() {
         signing_inputs: Mutex::new(Vec::new()),
         invalidate: |items, attempt| {
             if attempt == 1 {
-                let again = items
+                let mut again = items
                     .iter()
                     .find(|item| item["itemId"] == "E3-8")
                     .unwrap()
                     .clone();
+                again["result"] = json!("FAIL");
                 items.push(again);
             }
         },

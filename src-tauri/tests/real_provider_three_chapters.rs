@@ -1071,11 +1071,25 @@ fn configured_provider_writes_ten_chapters_and_evaluates_signing() {
         let signing = ai_novel_production_system_core::repositories::production::ProductionRepository::center_projection(
             &connection, &project_id,
         ).unwrap()["signing"].clone();
-        assert_eq!(signing["status"], "PASS");
-        assert_eq!(signing["confirmation"]["confirmed"], true);
         println!("REAL_TEN_CHAPTER_STARTED projectId={project_id}");
-        let evaluation = json!({"projectId":project_id,"resumedFromSignedOpening":true});
-        println!("REAL_SIGNING_EVALUATION response={evaluation} signing={signing}");
+        if signing["status"] == "NOT_VERIFIED" {
+            // The author asks for an unverified evaluation again.
+            let chapter_ids = connection
+                .prepare("SELECT chapter_id FROM chapters WHERE project_id=?1 AND chapter_no BETWEEN 1 AND 3 ORDER BY chapter_no")
+                .unwrap()
+                .query_map([&project_id], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            drop(connection);
+            let written = chapter_ids.len();
+            write_and_sign_real_opening(&state, &project_id, &prefix, &chapter_ids, written, None);
+        } else {
+            assert_eq!(signing["status"], "PASS");
+            assert_eq!(signing["confirmation"]["confirmed"], true);
+            let evaluation = json!({"projectId":project_id,"resumedFromSignedOpening":true});
+            println!("REAL_SIGNING_EVALUATION response={evaluation} signing={signing}");
+        }
         project_id
     } else {
         let title = format!("Harness 真实十章验收 {run}");

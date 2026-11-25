@@ -482,7 +482,9 @@ fn model_results(
                 unknown = true;
                 continue;
             }
-            if by_id.insert(item_id.to_string(), item).is_some() {
+            // The same item word for word says nothing new.
+            let earlier = by_id.insert(item_id.to_string(), item);
+            if earlier.is_some_and(|earlier| earlier != item) {
                 duplicates.insert(item_id.to_string());
             }
         }
