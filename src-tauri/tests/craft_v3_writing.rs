@@ -51,6 +51,8 @@ struct CraftGateway {
     fail_audit_schema: AtomicBool,
     copy_prior_chapter_on_render: bool,
     repeat_prior_phrase_on_render: bool,
+    /// Told of the repeat, the writer repeats it again; the rewrite fixes it.
+    keeps_the_repeat: bool,
     length_adjustments: Vec<String>,
     length_insertions: Vec<Value>,
 }
@@ -204,6 +206,21 @@ impl ProductionModelGateway for CraftGateway {
             {
                 json!({"body":input["recentCommittedProse"][0]["body"]})
             }
+            "RENDER_CHAPTER_CRAFT" if self.keeps_the_repeat && input["chapterNumber"] == 2 => {
+                json!({"body":format!(
+                    "林满{R69_REPEATED_PHRASE}\n老董{R69_REPEATED_PHRASE}\n{}",
+                    long_body(2)
+                )})
+            }
+            "REWRITE_PASSAGES" if self.keeps_the_repeat => json!({"edits":input["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|finding| finding["quote"].as_str())
+                .filter(|quote| quote.contains(R69_REPEATED_PHRASE))
+                .map(|quote| json!({"quote":quote,
+                    "replacement":quote.replace(R69_REPEATED_PHRASE, "合上账本，走到窗边去。")}))
+                .collect::<Vec<_>>()}),
             "RENDER_CHAPTER_CRAFT"
                 if self.repeat_prior_phrase_on_render
                     && input["chapterNumber"] == 2
@@ -1608,6 +1625,29 @@ fn round69_an_initial_opening_render_cannot_add_the_third_use_of_a_phrase() {
     let adjustments = inputs(&calls, "ADJUST_CHAPTER_LENGTH");
     assert_eq!(adjustments.len(), 2);
     assert!(!adjustments[1]["body"]
+        .as_str()
+        .unwrap()
+        .contains(R69_REPEATED_PHRASE));
+}
+
+/// Real run 2026-11-25: chapter 3 quoted a clue a third time, both drafts
+/// were refused, and the chapter failed before the rewrite could word it
+/// differently.
+#[test]
+fn a_second_draft_that_still_repeats_goes_on_to_the_steps_that_fix_it() {
+    let (_temp, state, gateway, project_id) = project_ready_to_write_with(
+        "rendered-third-phrase-twice",
+        CraftGateway {
+            repeat_prior_phrase_on_render: true,
+            keeps_the_repeat: true,
+            ..CraftGateway::default()
+        },
+    );
+    write_next_chapter(&state, &project_id, "third-phrase-twice:one");
+    write_next_chapter(&state, &project_id, "third-phrase-twice:two");
+    let calls = gateway.calls.lock().unwrap();
+    assert_eq!(inputs(&calls, "RENDER_CHAPTER_CRAFT").len(), 3);
+    assert!(!inputs(&calls, "AUDIT_EXTRACT").last().unwrap()["body"]
         .as_str()
         .unwrap()
         .contains(R69_REPEATED_PHRASE));

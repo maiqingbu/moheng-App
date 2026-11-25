@@ -3587,9 +3587,8 @@ fn run_chapter_production_inner(
             if copies_prior_chapter(&body) {
                 return Err(PRIOR_CHAPTER_COPY_ERROR.into());
             }
-            if signing_repeat(&body).is_some() {
-                return Err(RENDER_SIGNING_REPETITION_ERROR.into());
-            }
+            // A repeat the second draft kept is left to the rewrite; the check
+            // before the audit still refuses one it leaves.
             (model_run_id, body)
         } else {
             (model_run_id, body)
