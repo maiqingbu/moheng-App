@@ -374,6 +374,7 @@ fn model_item_result(
 /// Why an item whose quote is in none of the chapters is unverified.
 const UNLOCATED_QUOTE: &str = "引用原文或起止位置与已提交正文不完全一致。";
 const MISSING_MODEL_ITEM: &str = "模型未返回该必评项。";
+const DUPLICATE_MODEL_ITEM: &str = "模型重复返回该评估项。";
 const ITEM_RESULTS_ERROR: &str = "S35 item results:";
 
 /// What S35 puts in its payload for signing.
@@ -491,11 +492,7 @@ fn model_results(
         .map(|item_id| {
             let forced = envelope_failure
                 .or_else(|| unknown.then_some("模型输出包含未知评估项，未按其结果判定。"))
-                .or_else(|| {
-                    duplicates
-                        .contains(item_id)
-                        .then_some("模型重复返回该评估项。")
-                });
+                .or_else(|| duplicates.contains(item_id).then_some(DUPLICATE_MODEL_ITEM));
             model_item_result(by_id.get(item_id).copied(), item_id, chapters, forced)
         })
         .collect()
@@ -1655,7 +1652,7 @@ pub fn execute_opening_evaluation_with_observer(
                 if let Some(error) = off_spec {
                     let instruction = match error.split_once(ITEM_RESULTS_ERROR) {
                     Some((_, items)) => format!(
-                        "上一次回复里这些评估项缺失或原文不可核验：{items}。逐项检查完整编号清单，每项刚好一次。引用使用所选章节实际给出的句子编号，返回完整回复。"
+                        "上一次回复里这些评估项缺失、重复或原文不可核验：{items}。逐项检查完整编号清单，每项刚好一次。引用使用所选章节实际给出的句子编号，返回完整回复。"
                     ),
                     None => format!(
                         "上一次回复不符合 S35 输出信封：skillId、skillVersion、bundleDigest、taskId、status、confidence 放在最外层，{} 放进 payload，返回完整回复。",
@@ -1691,6 +1688,7 @@ pub fn execute_opening_evaluation_with_observer(
                             .filter_map(|item| {
                                 let issue = match item["reason"].as_str()? {
                                     MISSING_MODEL_ITEM => "缺失",
+                                    DUPLICATE_MODEL_ITEM => "重复",
                                     UNLOCATED_QUOTE => "引用无法定位",
                                     _ => return None,
                                 };

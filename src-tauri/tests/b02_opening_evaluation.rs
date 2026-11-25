@@ -3964,6 +3964,41 @@ fn a_missing_signing_item_is_requested_again_and_the_receipt_names_the_accepted_
     assert_ne!(item("E3-8")["modelRunId"], item("R2-5")["modelRunId"]);
 }
 
+/// Real run 2026-11-25: 11 items came back twice, word for word, and the
+/// opening ended unverified without asking again.
+#[test]
+fn signing_items_returned_twice_are_requested_again() {
+    let gateway = Arc::new(InvalidSigningOnceGateway {
+        inner: B02Gateway::new(true, "A"),
+        signing_inputs: Mutex::new(Vec::new()),
+        invalidate: |items, attempt| {
+            if attempt == 1 {
+                let again = items
+                    .iter()
+                    .find(|item| item["itemId"] == "E3-8")
+                    .unwrap()
+                    .clone();
+                items.push(again);
+            }
+        },
+    });
+    let (state, _temp) = state_with_custom_gateway(gateway.clone());
+    let project = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project);
+    let evaluation = command(
+        &state,
+        &project,
+        "qc1:signing:returned-twice",
+        "opening_evaluate",
+        json!({}),
+    );
+    assert_eq!(evaluation["result"]["status"], "PASS", "{evaluation}");
+    let inputs = gateway.signing_inputs.lock().unwrap();
+    assert_eq!(inputs.len(), 2);
+    let feedback = inputs[1]["outputFeedback"].to_string();
+    assert!(feedback.contains("E3-8（重复）"), "{feedback}");
+}
+
 #[test]
 fn signing_sentence_numbers_bind_the_exact_committed_prose() {
     let gateway = Arc::new(InvalidSigningOnceGateway {
