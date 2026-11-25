@@ -2612,7 +2612,7 @@ fn prior_chapter_number(evidence: &Value) -> Option<&Value> {
         .or_else(|| evidence.get("chapter"))
 }
 
-fn overlapping_continuity_quote(left: &str, right: &str) -> bool {
+pub(crate) fn overlapping_continuity_quote(left: &str, right: &str) -> bool {
     !left.is_empty()
         && !right.is_empty()
         && (exact_punctuation_matched_quote(left, right).is_some()

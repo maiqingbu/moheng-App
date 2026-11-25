@@ -27,8 +27,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tauri::State;
 
-/// The required route tasks ahead a chapter's context carries by default.
-const CONTEXT_REQUIRED_TASKS_AHEAD: usize = 4;
+/// The required route tasks ahead a chapter's context carries by default: the
+/// current step only (real run 2026-11-25: shown four, chapter 4 wrote step 3,
+/// and chapter 5 wrote it again).
+const CONTEXT_REQUIRED_TASKS_AHEAD: usize = 1;
 
 #[derive(Clone)]
 pub struct KernelState {
@@ -3326,7 +3328,18 @@ pub(crate) fn context_input_from_authority(
                         .and_then(Value::as_str)
                         == Some("REQUIRED");
                     required_ahead += usize::from(required);
-                    !required || required_ahead <= CONTEXT_REQUIRED_TASKS_AHEAD
+                    let ready = route_task_contracts
+                        .get(*task_ref)
+                        .and_then(|task| task["dependsOnTaskIds"].as_array())
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .all(|dependency| satisfied.contains(dependency));
+                    if required {
+                        required_ahead <= CONTEXT_REQUIRED_TASKS_AHEAD
+                    } else {
+                        ready
+                    }
                 })
                 .map(ToOwned::to_owned)
                 .collect()

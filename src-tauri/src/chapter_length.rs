@@ -184,7 +184,8 @@ const EVENT_PAIRS: usize = 3;
 
 /// LD-4: `body` shortened by deleting its sentences (numbered as in
 /// `chapter_craft::sentence_spans`) in the order `cut` names them, until
-/// it fits the accepted range. A cut is skipped when it would take
+/// it is at most the range's maximum, which leaves the rewrite the 10% past
+/// it. A cut is skipped when it would take
 /// the chapter below the minimum, or `can_cut_sentence` refuses it.
 pub(crate) fn cut_sentences(
     body: &str,
@@ -196,7 +197,7 @@ pub(crate) fn cut_sentences(
     let mut removed = vec![false; spans.len()];
     let mut shortened = body.to_string();
     for &number in cut {
-        if range.accepts(character_count(&shortened)) {
+        if character_count(&shortened) <= range.max {
             break;
         }
         if !can_cut_sentence(body, &spans, number, events) || removed[number] {
@@ -318,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn round61_a_cut_stops_before_removing_an_object_introduction_if_length_is_already_accepted() {
+    fn round61_a_cut_stops_before_removing_an_object_introduction_once_short_enough() {
         let body = format!(
             "{}\n一枚青丸滚出来，停在陆照鞋尖前。\n陆照后来把青丸攥进袖口。",
             lines_of_ten(10)
@@ -327,7 +328,7 @@ mod tests {
         let max = length * 10 / 11;
         let range = ChapterLengthRange { min: max - 30, max };
         assert!(length > range.ceiling());
-        let shortened = cut_sentences(&body, &[0, 10], range, &[]);
+        let shortened = cut_sentences(&body, &[0, 1, 10], range, &[]);
         assert!(range.accepts(character_count(&shortened)));
         assert!(shortened.contains("一枚青丸滚出来"), "{shortened}");
     }

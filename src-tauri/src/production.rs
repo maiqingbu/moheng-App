@@ -1183,18 +1183,12 @@ pub fn plan_chapter_with_feedback(
             feedback["previousDirection"] = previous;
         }
         if craft_chapter {
-            if result
-                .as_ref()
-                .is_err_and(|error| error == "B08_PLAN_GOAL_REPEATED")
-                && !rejected_goals.contains(&last["chapterGoal"])
-            {
+            if let Some(previous) = previous_plan(&last, &feedback) {
+                feedback["previousPlan"] = previous;
+            } else if !rejected_goals.contains(&last["chapterGoal"]) {
                 rejected_goals.push(last["chapterGoal"].clone());
             }
             feedback["rejectedRepeatedGoals"] = json!(rejected_goals);
-            feedback["previousPlan"] = json!({
-                "chapterGoal":last["chapterGoal"],"chapterRole":last["chapterRole"],
-                "craft":last["craft"],"horizonPreview":last["horizonPreview"],
-            });
             earlier_craft_plans.push((run_id.clone(), last.clone()));
         }
         input["planFeedback"] = feedback;
@@ -1223,6 +1217,34 @@ pub fn plan_chapter_with_feedback(
         Err(error) => return Err(error),
     };
     Ok((plan, run_id, problems))
+}
+
+/// The rejected plan a replan starts from: without its ending when that was
+/// the problem, and not at all when its goal repeats a chapter (real run
+/// 2026-11-25: given them back, the planner kept them in all three plans).
+fn previous_plan(plan: &Value, feedback: &Value) -> Option<Value> {
+    let problems = || {
+        feedback["problems"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+    };
+    if feedback["rejectedFor"] == "B08_PLAN_GOAL_REPEATED"
+        || problems().any(crate::craft_plan::is_repeated_goal)
+    {
+        return None;
+    }
+    let mut craft = plan["craft"].clone();
+    if problems().any(crate::craft_plan::is_repeated_hook) {
+        if let Some(craft) = craft.as_object_mut() {
+            craft.remove("endHook");
+        }
+    }
+    Some(json!({
+        "chapterGoal":plan["chapterGoal"],"chapterRole":plan["chapterRole"],
+        "craft":craft,"horizonPreview":plan["horizonPreview"],
+    }))
 }
 
 /// In a lenient plan check (LD-1 step 2), a problem the planner could fix is
@@ -3233,6 +3255,10 @@ fn run_chapter_production_inner(
     {
         scene.remove("estimatedCharacters");
     }
+    // Shown the coming chapters' goals, a writer writes them early.
+    if let Some(plan) = writer_plan.as_object_mut() {
+        plan.remove("horizonPreview");
+    }
     let mut render_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":writer_plan,"contextManifestRef":context_ref,"contextManifest":context_payload,"authorityContext":authority_context.clone(),"chapterLengthRange":length_range.to_json()});
     if let Some(stage) = &stage_step {
         render_input["stageStep"] = stage.input();
@@ -3768,7 +3794,7 @@ fn run_chapter_production_inner(
             let events = crate::chapter_length::planned_events(&plan_payload);
             // LD-4 (real run 2026-11-01): asked to compress, the writer cut
             // 0-10% of chapters a third too long; it now only chooses the
-            // sentences, and they are cut here until the length is accepted.
+            // sentences, and they are cut here to the range's maximum.
             // It chose too few once in a while, so a cut that still leaves the chapter
             // too long gets a second round.
             for round in 0..2 {
@@ -3792,8 +3818,8 @@ fn run_chapter_production_inner(
                     json!({
                         "chapterId":chapter_id,"chapterPlan":writer_plan,"sentences":sentences,
                         "currentChars":length,
-                        "targetChars":length_range.ceiling(),
-                        "cutChars":length - length_range.ceiling()
+                        "targetChars":length_range.max,
+                        "cutChars":length - length_range.max
                     }),
                 )?;
                 prose_run_ids.push(run_id);
@@ -4131,12 +4157,6 @@ fn run_chapter_production_inner(
             }
             findings
         };
-        let quotes_of = |findings: &[Value]| {
-            findings
-                .iter()
-                .filter_map(|finding| finding["quote"].as_str().map(ToOwned::to_owned))
-                .collect::<Vec<_>>()
-        };
         let narrative_findings_before =
             narrative_findings(&narrative_issues, &body, &evidence_history);
         // A sentence the check flagged is fixed for that reason first; a
@@ -4240,8 +4260,11 @@ fn run_chapter_production_inner(
             .collect::<Vec<_>>();
         let checked_body = body.clone();
         let mut applied = 0;
-        let mut in_range = true;
-        let mut repeats_grew = false;
+        let mut discarded = Value::Null;
+        let repeated_chars = |text: &str| {
+            crate::chapter_craft::repeated_character_count(&chapter_history.bodies, text)
+        };
+        let fits = |text: &str| length_range.accepts(character_count(text));
         let mut rewrite_error = None;
         let mut sent_to_rewrite = Vec::new();
         if (!to_fix.is_empty() || !repeated.is_empty()) && room_for_polish(2)? {
@@ -4270,21 +4293,25 @@ fn run_chapter_production_inner(
                 rewrite_error = Some(error);
                 json!({"edits":[]})
             });
-            if rewrite_error.is_none() {
-                sent_to_rewrite.extend(quotes_of(&narrative_findings_before));
-            }
-            let (revised, count) = apply_unique_edits(&body, &rewrite, &additions);
-            let revised = crate::chapter_craft::normalize_typography(revised.trim());
-            let length = character_count(&revised);
-            in_range = (length_range.min..=length_range.ceiling()).contains(&length);
-            let repeated_chars = |text: &str| {
-                crate::chapter_craft::repeated_character_count(&chapter_history.bodies, text)
+            let repeats_before = repeated_chars(&body);
+            let repeats = |text: &str| {
+                repeated_chars(text) > repeats_before || duplicate_in_chapter(text).is_some()
             };
-            repeats_grew = repeated_chars(&revised) > repeated_chars(&body)
-                || (count > 0 && duplicate_in_chapter(&revised).is_some());
-            applied = count;
-            if applied > 0 && in_range && !repeats_grew {
-                body = revised;
+            let edits = apply_edits_that_fit(&body, &rewrite, &additions, |text| {
+                fits(text) && !repeats(text)
+            });
+            if rewrite_error.is_none() {
+                sent_to_rewrite.extend(edits.passages_tried(&narrative_findings_before));
+            }
+            applied = edits.applied;
+            if applied > 0 {
+                body = edits.body;
+            } else if let Some(whole) = &edits.refused_whole {
+                discarded = json!(if fits(whole) {
+                    "MORE_REPEATED_PHRASES"
+                } else {
+                    "LENGTH_OUT_OF_RANGE"
+                });
             }
             // RP-1: repeats signing F1-5 counts that the rewrite left (its
             // edit refused, say) are rewritten once more, alone.
@@ -4301,32 +4328,21 @@ fn run_chapter_production_inner(
                     rewrite_error.get_or_insert(error);
                     json!({"edits":[]})
                 });
-                let (revised, count) = apply_unique_edits(&body, &retry, &additions);
-                let revised = crate::chapter_craft::normalize_typography(revised.trim());
-                if count > 0
-                    && (length_range.min..=length_range.ceiling())
-                        .contains(&character_count(&revised))
-                    && duplicate_in_chapter(&revised).is_none()
-                    && repeated_chars(&revised) < repeated_chars(&body)
-                {
-                    body = revised;
-                    applied += count;
+                let repeats_before = repeated_chars(&body);
+                let edits = apply_edits_that_fit(&body, &retry, &additions, |text| {
+                    fits(text)
+                        && duplicate_in_chapter(text).is_none()
+                        && repeated_chars(text) < repeats_before
+                });
+                if edits.applied > 0 {
+                    body = edits.body;
+                    applied += edits.applied;
                     // The chapter now holds a rewrite in range with fewer
                     // repeats, whatever became of the first one.
-                    in_range = true;
-                    repeats_grew = false;
+                    discarded = Value::Null;
                 }
             }
         }
-        let mut discarded = if applied == 0 {
-            Value::Null
-        } else if !in_range {
-            json!("LENGTH_OUT_OF_RANGE")
-        } else if repeats_grew {
-            json!("MORE_REPEATED_PHRASES")
-        } else {
-            Value::Null
-        };
         // A rewritten chapter is checked again; one the rewrite left as it
         // was still has what the first check found.
         let mut rewritten = body != checked_body;
@@ -4428,20 +4444,15 @@ fn run_chapter_production_inner(
                 None,
             )? {
                 Ok(rewrite) => {
-                    sent_to_rewrite.extend(quotes_of(&narrative_left));
-                    let (revised, count) = apply_unique_edits(&body, &rewrite, &[]);
-                    let revised = crate::chapter_craft::normalize_typography(revised.trim());
-                    if count > 0
-                        && length_range.accepts(character_count(&revised))
-                        && duplicate_in_chapter(&revised).is_none()
-                        && crate::chapter_craft::repeated_character_count(
-                            &chapter_history.bodies,
-                            &revised,
-                        ) <= crate::chapter_craft::repeated_character_count(
-                            &chapter_history.bodies,
-                            &body,
-                        )
-                    {
+                    let repeats_before = repeated_chars(&body);
+                    let edits = apply_edits_that_fit(&body, &rewrite, &[], |text| {
+                        fits(text)
+                            && duplicate_in_chapter(text).is_none()
+                            && repeated_chars(text) <= repeats_before
+                    });
+                    sent_to_rewrite.extend(edits.passages_tried(&narrative_left));
+                    let (revised, count) = (edits.body, edits.applied);
+                    if count > 0 {
                         let errors_before = continuity_errors.len();
                         let revised_history = recall_history(&revised).unwrap_or_else(|error| {
                             continuity_errors.push(error);
@@ -8197,11 +8208,93 @@ fn whitespace_insensitive_unique_span(body: &[char], quote: &str) -> Option<(usi
     Some((positions[offset], positions[offset + needle.len() - 1] + 1))
 }
 
+/// What a rewrite's edits did to a chapter.
+struct FittedEdits {
+    body: String,
+    applied: usize,
+    /// The passages of edits that are not in `body`.
+    refused: Vec<String>,
+    /// The chapter with every edit, when that was not acceptable.
+    refused_whole: Option<String>,
+}
+
+impl FittedEdits {
+    /// The quotes of `findings` the rewrite was given and whose edit, if it
+    /// made one, was applied.
+    fn passages_tried<'a>(&'a self, findings: &'a [Value]) -> impl Iterator<Item = String> + 'a {
+        findings
+            .iter()
+            .filter_map(|finding| finding["quote"].as_str())
+            .filter(|quote| {
+                !self.refused.iter().any(|refused| {
+                    crate::chapter_craft::overlapping_continuity_quote(refused, quote)
+                })
+            })
+            .map(ToOwned::to_owned)
+    }
+}
+
+/// The rewrite's edits together when the result is `acceptable`, else one by
+/// one, leaving out those that make it unacceptable (real run 2026-11-25: 20
+/// characters over the limit threw away every edit of the chapter). An edit
+/// left out is tried again once the others have made room.
+fn apply_edits_that_fit(
+    body: &str,
+    rewrite: &Value,
+    additions: &[String],
+    acceptable: impl Fn(&str) -> bool,
+) -> FittedEdits {
+    let apply = |body: &str, edits: &[Value]| {
+        let (revised, applied) = apply_unique_edits(body, &json!({"edits":edits}), additions);
+        let revised = crate::chapter_craft::normalize_typography(revised.trim());
+        (applied > 0).then_some((revised, applied))
+    };
+    let edits = rewrite["edits"].as_array().map_or(&[][..], Vec::as_slice);
+    let mut fitted = FittedEdits {
+        body: body.to_string(),
+        applied: 0,
+        refused: Vec::new(),
+        refused_whole: None,
+    };
+    match apply(body, edits) {
+        Some((revised, applied)) if acceptable(&revised) => {
+            fitted.body = revised;
+            fitted.applied = applied;
+        }
+        Some((revised, _)) => {
+            fitted.refused_whole = Some(revised);
+            let mut pending = edits.iter().take(MAX_EDITS).collect::<Vec<_>>();
+            for _ in 0..2 {
+                pending.retain(|edit| {
+                    let fits = apply(&fitted.body, std::slice::from_ref(edit))
+                        .filter(|(text, _)| acceptable(text));
+                    let left_out = fits.is_none();
+                    if let Some((revised, _)) = fits {
+                        fitted.body = revised;
+                        fitted.applied += 1;
+                    }
+                    left_out
+                });
+            }
+        }
+        None => {}
+    }
+    fitted.refused = edits
+        .iter()
+        .filter_map(|edit| edit["quote"].as_str())
+        .filter(|quote| locate_unique_quote(&fitted.body, quote).is_some())
+        .map(ToOwned::to_owned)
+        .collect();
+    fitted
+}
+
+/// How many of a rewrite's edits are applied.
+const MAX_EDITS: usize = 8;
+
 /// Applies the rewrite's `edits` whose passage occurs once in `body` and
-/// whose replacement adds no model habit, each spliced at its own span;
-/// returns the new body and how many applied.
-/// Applies the rewrite's edits whose quote occurs once; an edit of a quote
-/// in `additions` may add what the habit check would refuse.
+/// whose replacement adds no model habit (an edit of a quote in `additions`
+/// may), each spliced at its own span; returns the new body and how many
+/// applied.
 fn apply_unique_edits(body: &str, rewrite: &Value, additions: &[String]) -> (String, usize) {
     let mut revised = body.to_string();
     let mut applied = 0;
@@ -8210,7 +8303,7 @@ fn apply_unique_edits(body: &str, rewrite: &Value, additions: &[String]) -> (Str
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .take(8)
+        .take(MAX_EDITS)
     {
         let (Some(quote), Some(replacement)) = (
             edit.get("quote").and_then(Value::as_str),
@@ -10054,6 +10147,61 @@ mod tests {
             }}),
         };
         assert!(reusable_continuity_sources(&checkpoint, true).is_none());
+    }
+
+    #[test]
+    fn edits_that_make_the_chapter_too_long_are_left_out_one_by_one() {
+        let body = "甲句在这里。乙句在这里。丙句在这里。";
+        let rewrite = json!({"edits":[
+            {"quote":"甲句在这里。","replacement":"甲句改好了。"},
+            {"quote":"乙句在这里。","replacement":"乙句改得太长太长太长太长太长了。"},
+            {"quote":"丙句在这里。","replacement":"丙句改好了。"}
+        ]});
+        let fitted = apply_edits_that_fit(body, &rewrite, &[], |text| text.chars().count() <= 20);
+        assert_eq!(fitted.body, "甲句改好了。乙句在这里。丙句改好了。");
+        assert_eq!(fitted.applied, 2);
+        let findings = [
+            json!({"quote":"甲句在这里。"}),
+            json!({"quote":"乙句在这里。"}),
+        ];
+        assert_eq!(
+            fitted.passages_tried(&findings).collect::<Vec<_>>(),
+            ["甲句在这里。"]
+        );
+    }
+
+    #[test]
+    fn an_edit_left_out_is_applied_once_the_others_made_room_and_only_once() {
+        let body = "甲句在这里。乙句写得又长又啰嗦。丙句。";
+        let rewrite = json!({"edits":[
+            {"quote":"甲句在这里。","replacement":"甲句在这里。补上一句。"},
+            {"quote":"乙句写得又长又啰嗦。","replacement":"乙句短。"},
+            {"quote":"丙句。","replacement":"丙句改得太长太长太长太长太长太长了。"}
+        ]});
+        let fitted = apply_edits_that_fit(body, &rewrite, &[], |text| text.chars().count() <= 20);
+        assert_eq!(fitted.body, "甲句在这里。补上一句。乙句短。丙句。");
+        assert_eq!(fitted.applied, 2);
+    }
+
+    #[test]
+    fn a_replan_is_not_given_back_the_goal_or_ending_it_was_rejected_for() {
+        let plan = json!({"chapterGoal":"再试一次端口","chapterRole":"普通",
+            "craft":{"endHook":"在B-4下划一道竖线","scenes":[]},"horizonPreview":[]});
+        let hook = previous_plan(
+            &plan,
+            &json!({"problems":["章末钩子和第 4 章的太接近（…）"]}),
+        )
+        .unwrap();
+        assert!(hook["craft"].get("endHook").is_none());
+        assert_eq!(hook["chapterGoal"], "再试一次端口");
+        assert!(previous_plan(
+            &plan,
+            &json!({"problems":["本章目标和第 4 章的太接近（…）"]})
+        )
+        .is_none());
+        assert!(previous_plan(&plan, &json!({"rejectedFor":"B08_PLAN_GOAL_REPEATED"})).is_none());
+        let kept = previous_plan(&plan, &json!({"problems":["第 1 场没有人物"]})).unwrap();
+        assert_eq!(kept["craft"], plan["craft"]);
     }
 
     /// Real run 2026-11-25: chapters planned in three tries had used 6 of 16

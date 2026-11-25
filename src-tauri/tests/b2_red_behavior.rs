@@ -2608,7 +2608,7 @@ fn an_empty_follow_up_audit_does_not_wipe_the_facts_the_first_one_found() {
 }
 
 #[test]
-fn a_chapter_plan_sees_the_next_steps_not_the_whole_route() {
+fn a_chapter_plan_sees_the_current_step_not_the_route() {
     // Real run round 25: 26 step tasks and every other route task went into
     // chapter 4's context, over the hard budget.
     let (state, _temp, gateway) = state_with(true, false);
@@ -2662,8 +2662,8 @@ fn a_chapter_plan_sees_the_next_steps_not_the_whole_route() {
         .filter(|task| task["contract"]["class"] == "REQUIRED")
         .filter_map(|task| task["taskRef"].as_str())
         .collect::<Vec<_>>();
-    // Nine steps and the book goal are required; the chapter sees the next few.
-    assert_eq!(required.len(), 4, "{required:?}");
+    // Nine steps and the book goal are required; the chapter sees the first.
+    assert_eq!(required.len(), 1, "{required:?}");
     assert!(required[0].ends_with(":step:1:1:1"), "{required:?}");
 }
 

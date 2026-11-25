@@ -312,7 +312,7 @@ fn ld4_a_chapter_too_long_is_cut_by_the_sentences_the_writer_chooses() {
     let cut = gateway.inputs("CUT_CHAPTER");
     assert_eq!(cut.len(), 1);
     assert_eq!(cut[0]["currentChars"], 3400);
-    assert_eq!(cut[0]["cutChars"], 100);
+    assert_eq!(cut[0]["cutChars"], 400);
     assert_eq!(cut[0]["sentences"][0]["n"], 0);
     assert!(cut[0]["sentences"][0]["chars"].as_i64().unwrap() > 0);
     assert!(gateway.inputs("ADJUST_CHAPTER_LENGTH").is_empty());

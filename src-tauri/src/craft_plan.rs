@@ -454,6 +454,21 @@ fn shared_goal_passage(earlier: &str, current: &str) -> Option<String> {
         })
 }
 
+/// How the problems of a repeated goal or ending start.
+const GOAL_LIKE: &str = "本章目标和第";
+const GOAL_ACTION_LIKE: &str = "本章目标可能重复第";
+const HOOK_LIKE: &str = "章末钩子和";
+
+/// Whether a plan problem says the goal repeats an earlier chapter's.
+pub(crate) fn is_repeated_goal(problem: &str) -> bool {
+    problem.starts_with(GOAL_LIKE) || problem.starts_with(GOAL_ACTION_LIKE)
+}
+
+/// Whether a plan problem says the ending repeats an earlier chapter's.
+pub(crate) fn is_repeated_hook(problem: &str) -> bool {
+    problem.starts_with(HOOK_LIKE)
+}
+
 /// The deterministic checks of an r2 plan (CRAFT_V3_DESIGN §4.2). Returns
 /// every problem found, in Chinese, so the planner can fix them in one pass.
 pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) -> Vec<String> {
@@ -561,18 +576,18 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
         let earlier = text(&ending["goal"]);
         if goals_overlap(earlier, &goal) {
             problems.push(format!(
-                "本章目标和第 {} 章的目标几乎一样（{}）：从最近一章的结尾往前推，写这一阶段还没做到的事，前几章已经做到阶段目标时写它的段末转折",
+                "{GOAL_LIKE} {} 章的目标几乎一样（{}）：从最近一章的结尾往前推，写这一阶段还没做到的事，前几章已经做到阶段目标时写它的段末转折",
                 ending["chapter"],
                 earlier
             ));
         } else if let Some(phrase) = shared_goal_passage(earlier, goal_text) {
             problems.push(format!(
-                "本章目标可能重复第 {} 章的动作「{phrase}」。核对该章已提交的正文，承接已经发生的结果；若确有必要再次行动，写清状态怎样改变以及这次的不同后果",
+                "{GOAL_ACTION_LIKE} {} 章的动作「{phrase}」。核对该章已提交的正文，承接已经发生的结果；若确有必要再次行动，写清状态怎样改变以及这次的不同后果",
                 ending["chapter"],
             ));
         } else if near.contains(ending) && nearly_repeats(earlier, &goal) {
             problems.push(format!(
-                "本章目标和第 {} 章的太接近（{earlier}）：那一章做到的当作已经发生，这一章写它带来的后果或下一步，不再做一次同类的试探、确认或取证",
+                "{GOAL_LIKE} {} 章的太接近（{earlier}）：那一章做到的当作已经发生，这一章写它带来的后果或下一步，不再做一次同类的试探、确认或取证",
                 ending["chapter"],
             ));
         }
@@ -583,7 +598,7 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
         let earlier = text(&ending["endHook"]);
         if earlier != hook_text && nearly_repeats(earlier, &hook) {
             problems.push(format!(
-                "章末钩子和第 {} 章的太接近（{earlier}）：换一个动作、物件和画面，落在这一章新发生的事上",
+                "{HOOK_LIKE}第 {} 章的太接近（{earlier}）：换一个动作、物件和画面，落在这一章新发生的事上",
                 ending["chapter"],
             ));
         }
@@ -593,7 +608,7 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
             problems.push("本章结束的局面和之前某章完全相同，需要新的局面".into());
         }
         if text(&ending["endHook"]) == text(&craft["endHook"]) {
-            problems.push("章末钩子和之前某章完全相同".into());
+            problems.push(format!("{HOOK_LIKE}之前某章完全相同"));
         }
     }
     // Owner decision (2026-10-24): walk-ons outside the bible may appear;
