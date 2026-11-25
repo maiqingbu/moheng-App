@@ -423,7 +423,10 @@ pub fn draft_setup_change(
     bible: &Value,
     output: &Value,
 ) -> Result<Option<Value>, String> {
-    let changes = output["changes"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let changes = output["changes"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
     if output["applies"] != json!(true) || changes.is_empty() {
         return Ok(None);
     }
@@ -502,7 +505,9 @@ fn person_named_by(bible: &Value, path: &str) -> Option<String> {
         "cast" => &bible["cast"][parts.next()?.parse::<usize>().ok()?]["name"],
         _ => return None,
     };
-    name.as_str().filter(|name| !name.is_empty()).map(ToOwned::to_owned)
+    name.as_str()
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 /// Debt from P3: the sentences of written `chapters` that name the person a
@@ -548,7 +553,9 @@ pub fn with_judged_conflicts(items: &Value, candidates: &[Value], judged: &Value
         let path = pick["path"].as_str().unwrap_or_default();
         let Some(candidate) = candidates.iter().find(|candidate| {
             candidate["id"] == pick["id"]
-                && candidate["paths"].as_array().is_some_and(|paths| paths.iter().any(|p| p == path))
+                && candidate["paths"]
+                    .as_array()
+                    .is_some_and(|paths| paths.iter().any(|p| p == path))
         }) else {
             continue;
         };
@@ -561,9 +568,13 @@ pub fn with_judged_conflicts(items: &Value, candidates: &[Value], judged: &Value
             continue;
         };
         let conflict = json!({"chapterNo":candidate["chapterNo"],"quote":candidate["quote"]});
-        let listed = item["writtenConflicts"].as_array().cloned().unwrap_or_default();
+        let listed = item["writtenConflicts"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         if !listed.contains(&conflict) && listed.len() < WRITTEN_CONFLICTS_SHOWN {
-            item["writtenConflicts"] = json!(listed.into_iter().chain([conflict]).collect::<Vec<_>>());
+            item["writtenConflicts"] =
+                json!(listed.into_iter().chain([conflict]).collect::<Vec<_>>());
         }
     }
     items
@@ -792,7 +803,10 @@ mod tests {
             {"path":"cast.1.speechStyle","before":"满嘴俗语","after":"说话慢"}
         ]);
         let chapters = vec![
-            (4, "彭三把借据拍在桌上。打手堵住了门。林满没说话。".to_string()),
+            (
+                4,
+                "彭三把借据拍在桌上。打手堵住了门。林满没说话。".to_string(),
+            ),
             (5, "雨下了一夜，面馆照常开门。".to_string()),
             (6, "老董又来赊账，满嘴俗语地说着软话。".to_string()),
         ];
@@ -839,13 +853,23 @@ mod tests {
             &candidates,
             &json!({"conflicts":[{"path":"cast.1.speechStyle","id":1},{"path":"antagonist.method","id":0},{"path":"antagonist.method","id":7}]}),
         );
-        assert_eq!(merged[0]["writtenConflicts"], json!([{"chapterNo":4,"quote":"彭三笑着递过一张欠条。"}]));
-        assert_eq!(merged[1]["writtenConflicts"], json!([{"chapterNo":6,"quote":"老董张口就是乡下俗话。"}]));
+        assert_eq!(
+            merged[0]["writtenConflicts"],
+            json!([{"chapterNo":4,"quote":"彭三笑着递过一张欠条。"}])
+        );
+        assert_eq!(
+            merged[1]["writtenConflicts"],
+            json!([{"chapterNo":6,"quote":"老董张口就是乡下俗话。"}])
+        );
     }
 
     #[test]
     fn a_request_that_is_not_about_the_story_bible_has_no_draft() {
-        let none = draft_setup_change("story-bible:p3", &bible(), &json!({"applies":false,"changes":[]}));
+        let none = draft_setup_change(
+            "story-bible:p3",
+            &bible(),
+            &json!({"applies":false,"changes":[]}),
+        );
         assert_eq!(none, Ok(None));
     }
 
@@ -859,7 +883,10 @@ mod tests {
                 &json!({"applies":true,"changes":[{"path":path,"after":"x"}]}),
             )
             .unwrap_err();
-            assert!(error.starts_with("SETUP_DRAFT_PATH_INVALID"), "{path}: {error}");
+            assert!(
+                error.starts_with("SETUP_DRAFT_PATH_INVALID"),
+                "{path}: {error}"
+            );
         }
         // A quoted line in a speech style is refused, as in a new bible.
         let error = draft_setup_change(

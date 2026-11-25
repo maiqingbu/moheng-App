@@ -1103,7 +1103,9 @@ pub fn continuity_details(audit: &Value, body: &str) -> Vec<Value> {
                         .collect();
                     if !following.is_empty() {
                         detail.insert_str(0, "审计引用的状态（可能早于章末）：");
-                        detail.push_str("；引文后续原文（忽略空白，最多160字，可能有省略；未确认章末状态）：");
+                        detail.push_str(
+                            "；引文后续原文（忽略空白，最多160字，可能有省略；未确认章末状态）：",
+                        );
                         detail.push_str(&following);
                     }
                 }

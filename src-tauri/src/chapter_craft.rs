@@ -267,7 +267,8 @@ pub fn check_plan(
 /// broken into paragraphs (real run round 22: one paragraph; round 26: four
 /// of 400 to 600 characters, where a chapter's run 40 to 150).
 pub fn is_unbroken(body: &str) -> bool {
-    body.lines().any(|paragraph| paragraph.chars().count() > 300)
+    body.lines()
+        .any(|paragraph| paragraph.chars().count() > 300)
 }
 
 /// Real run round 32: Markdown the writer leaves in the prose, which the
@@ -278,7 +279,10 @@ fn strip_markdown(body: &str) -> String {
         .lines()
         .filter(|line| {
             let line = line.trim();
-            line.is_empty() || !line.chars().all(|c| matches!(c, '*' | '-' | '_' | '＊' | ' '))
+            line.is_empty()
+                || !line
+                    .chars()
+                    .all(|c| matches!(c, '*' | '-' | '_' | '＊' | ' '))
         })
         .map(|line| {
             let indent = &line[..line.len() - line.trim_start().len()];
@@ -1637,26 +1641,29 @@ mod tests {
     fn markdown_left_in_the_prose_is_taken_out_before_signing_reads_it() {
         // Real run round 32: "* * *" scene breaks failed signing (F1-2,
         // leftover Markdown) and no model evaluation ran.
-        let body = "他抬头看。\n\n* * *\n\n残渣里有光。\n\n---\n\n## 第二幕\n**阿公**没回头。\n- 一\n* 二";
+        let body =
+            "他抬头看。\n\n* * *\n\n残渣里有光。\n\n---\n\n## 第二幕\n**阿公**没回头。\n- 一\n* 二";
         assert_eq!(
             normalize_typography(body),
             "他抬头看。\n\n残渣里有光。\n\n第二幕\n阿公没回头。\n一\n二"
         );
     }
 
-
     #[test]
     fn every_chapter_plan_weighs_the_protagonists_agency_and_the_readers_desire() {
         // Owner decision 2026-11-03: S38 goes into chapter planning, as no
         // check reports a passive protagonist for it to be chosen by.
-        let skills = guidance_skill_ids(&guidance("chapter_plan", &planning_signals(Some(5), &[])).unwrap());
+        let skills =
+            guidance_skill_ids(&guidance("chapter_plan", &planning_signals(Some(5), &[])).unwrap());
         assert!(skills.contains(&"S38".to_string()), "{skills:?}");
         // The planning residents all still fit the budget.
         for resident in ["S14", "S25", "S26", "S36", "S39"] {
-            assert!(skills.contains(&resident.to_string()), "{resident}: {skills:?}");
+            assert!(
+                skills.contains(&resident.to_string()),
+                "{resident}: {skills:?}"
+            );
         }
     }
-
 
     #[test]
     fn every_skill_can_be_selected_by_some_step() {
@@ -1677,14 +1684,21 @@ mod tests {
         assert!(never.is_empty(), "never selected: {never:?}");
     }
 
-
     #[test]
     fn a_chapter_with_a_paragraph_over_300_characters_is_unbroken() {
         // LD-2 (real run round 22): chapter 1 came back as one paragraph;
         // round 26: as four of 400 to 600 characters.
         assert!(is_unbroken(&"正".repeat(401)));
-        assert!(is_unbroken(&format!("{}\n{}", "正".repeat(100), "正".repeat(301))));
-        assert!(!is_unbroken(&format!("{}\n{}", "正".repeat(300), "正".repeat(300))));
+        assert!(is_unbroken(&format!(
+            "{}\n{}",
+            "正".repeat(100),
+            "正".repeat(301)
+        )));
+        assert!(!is_unbroken(&format!(
+            "{}\n{}",
+            "正".repeat(300),
+            "正".repeat(300)
+        )));
     }
 
     #[test]

@@ -299,9 +299,14 @@ impl ProductionModelGateway for BehaviorGateway {
                 let continuity_candidates = if !self.threads.load(Ordering::SeqCst) {
                     Vec::new()
                 } else if chapter_no == 1 {
-                    vec![json!({"disposition":"ADVANCE","description":"账本缺的那一页去了哪里","evidence":evidence,"fulfillmentObject":"缺页","promotionSignals":{"foreshadowRecoveryResponsibility":self.thread_foreshadows.load(Ordering::SeqCst)}})]
+                    vec![
+                        json!({"disposition":"ADVANCE","description":"账本缺的那一页去了哪里","evidence":evidence,"fulfillmentObject":"缺页","promotionSignals":{"foreshadowRecoveryResponsibility":self.thread_foreshadows.load(Ordering::SeqCst)}}),
+                    ]
                 } else {
-                    self.open_threads_seen.lock().unwrap().push(input["openThreads"].clone());
+                    self.open_threads_seen
+                        .lock()
+                        .unwrap()
+                        .push(input["openThreads"].clone());
                     input["openThreads"][0]["threadRef"]
                         .as_str()
                         .map(|thread| {
@@ -1214,9 +1219,11 @@ fn p1_an_opening_records_its_events_and_relations() {
     let connection = state.manager.open(&project_id, "", NOW).unwrap();
     let count = |table: &str| -> i64 {
         connection
-            .query_row(&format!("SELECT COUNT(*) FROM {table} WHERE project_id=?1"), [&project_id], |row| {
-                row.get(0)
-            })
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE project_id=?1"),
+                [&project_id],
+                |row| row.get(0),
+            )
             .unwrap()
     };
     assert!(count("canon_events") > 0, "an event-typed fact is an event");
@@ -1243,7 +1250,10 @@ fn p1_a_proposed_thread_later_chapters_take_up_is_advanced_then_resolved() {
     gateway.threads.store(true, Ordering::SeqCst);
     let (project_id, _) = create_approved_book_plan(&state);
     let seen = gateway.open_threads_seen.lock().unwrap().clone();
-    assert_eq!(seen[0][0]["description"], "账本缺的那一页去了哪里", "{seen:?}");
+    assert_eq!(
+        seen[0][0]["description"], "账本缺的那一页去了哪里",
+        "{seen:?}"
+    );
     let connection = state.manager.open(&project_id, "", NOW).unwrap();
     let lifecycle: String = connection
         .query_row(
@@ -1270,7 +1280,10 @@ fn p1_a_hint_a_chapter_plants_is_a_foreshadow_until_a_later_chapter_recovers_it(
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!((status.as_str(), intent.as_str(), payoff.as_deref()), ("RECOVERED", "账本缺的那一页去了哪里", Some("缺页")));
+    assert_eq!(
+        (status.as_str(), intent.as_str(), payoff.as_deref()),
+        ("RECOVERED", "账本缺的那一页去了哪里", Some("缺页"))
+    );
 }
 
 #[test]
@@ -1285,20 +1298,37 @@ fn p1_the_approved_book_plan_records_each_mystery_layer() {
         .unwrap();
     let mysteries = statement
         .query_map([&project_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
         })
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(
         mysteries,
-        [("mystery:book:1".to_owned(), "APPROVED".to_owned(), "第 1 层：缺页记的是谁的债".to_owned())]
+        [(
+            "mystery:book:1".to_owned(),
+            "APPROVED".to_owned(),
+            "第 1 层：缺页记的是谁的债".to_owned()
+        )]
     );
     // A chapter may answer it without its plan naming it.
     use ai_novel_production_system_core::repositories::narrative::NarrativeRepository;
     let open = NarrativeRepository::open_candidate_threads(&connection, &project_id, 8).unwrap();
-    assert!(open.iter().any(|thread| thread["threadRef"] == "thread:mystery:book:1"), "{open:?}");
-    assert!(NarrativeRepository::is_open_candidate_thread(&connection, &project_id, "mystery:book:1").unwrap());
+    assert!(
+        open.iter()
+            .any(|thread| thread["threadRef"] == "thread:mystery:book:1"),
+        "{open:?}"
+    );
+    assert!(NarrativeRepository::is_open_candidate_thread(
+        &connection,
+        &project_id,
+        "mystery:book:1"
+    )
+    .unwrap());
 }
 
 #[test]
@@ -1350,7 +1380,10 @@ fn an_empty_follow_up_audit_does_not_wipe_the_facts_the_first_one_found() {
             |row| row.get(0),
         )
         .unwrap();
-    assert!(chapter_one_facts > 0, "chapter 1 keeps the facts its first audit found");
+    assert!(
+        chapter_one_facts > 0,
+        "chapter 1 keeps the facts its first audit found"
+    );
     let unregistered: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM canon_facts WHERE project_id=?1 AND predicate='has_unregistered_mood'",
@@ -1358,7 +1391,10 @@ fn an_empty_follow_up_audit_does_not_wipe_the_facts_the_first_one_found() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(unregistered, 0, "the fact the ledger cannot take is held back");
+    assert_eq!(
+        unregistered, 0,
+        "the fact the ledger cannot take is held back"
+    );
 }
 
 #[test]
@@ -1369,12 +1405,21 @@ fn a_chapter_plan_sees_the_next_steps_not_the_whole_route() {
     let (project_id, _) = create_approved_book_plan(&state);
     let volumes = query_volume_list_impl(&state, json!({"projectId":project_id,"pageSize":20}))
         .expect("volume list after approval");
-    let volume_id = volumes["items"][0]["id"].as_str().expect("volume id").to_owned();
+    let volume_id = volumes["items"][0]["id"]
+        .as_str()
+        .expect("volume id")
+        .to_owned();
     for (step, command_type) in [
         ("volume-intent", "planning_create_volume_intent"),
         ("volume-plan", "planning_create_volume_plan"),
     ] {
-        command(&state, &project_id, &format!("ctx:{step}"), command_type, json!({"volumeId":volume_id}));
+        command(
+            &state,
+            &project_id,
+            &format!("ctx:{step}"),
+            command_type,
+            json!({"volumeId":volume_id}),
+        );
     }
     let prepared = command(
         &state,
@@ -1383,7 +1428,10 @@ fn a_chapter_plan_sees_the_next_steps_not_the_whole_route() {
         "planning_prepare_next_chapter",
         json!({"volumeId":volume_id}),
     );
-    let chapter_id = prepared["chapter"]["chapterId"].as_str().unwrap().to_owned();
+    let chapter_id = prepared["chapter"]["chapterId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     command(
         &state,
         &project_id,
@@ -1418,12 +1466,21 @@ fn after_a_step_is_done_the_next_chapter_works_on_the_next_step() {
     let (project_id, _) = create_approved_book_plan(&state);
     let volumes = query_volume_list_impl(&state, json!({"projectId":project_id,"pageSize":20}))
         .expect("volume list after approval");
-    let volume_id = volumes["items"][0]["id"].as_str().expect("volume id").to_owned();
+    let volume_id = volumes["items"][0]["id"]
+        .as_str()
+        .expect("volume id")
+        .to_owned();
     for (step, command_type) in [
         ("volume-intent", "planning_create_volume_intent"),
         ("volume-plan", "planning_create_volume_plan"),
     ] {
-        command(&state, &project_id, &format!("next:{step}"), command_type, json!({"volumeId":volume_id}));
+        command(
+            &state,
+            &project_id,
+            &format!("next:{step}"),
+            command_type,
+            json!({"volumeId":volume_id}),
+        );
     }
     let route = query_plan_route_impl(&state, json!({"projectId":project_id,"volumeId":volume_id}))
         .expect("volume route");
@@ -1437,7 +1494,11 @@ fn after_a_step_is_done_the_next_chapter_works_on_the_next_step() {
     {
         let connection = state.manager.open(&project_id, "", NOW).unwrap();
         let chapter_three: String = connection
-            .query_row("SELECT chapter_id FROM chapters WHERE project_id=?1 AND chapter_no=3", [&project_id], |row| row.get(0))
+            .query_row(
+                "SELECT chapter_id FROM chapters WHERE project_id=?1 AND chapter_no=3",
+                [&project_id],
+                |row| row.get(0),
+            )
             .unwrap();
         connection
             .execute(
@@ -1459,7 +1520,10 @@ fn after_a_step_is_done_the_next_chapter_works_on_the_next_step() {
         "planning_prepare_next_chapter",
         json!({"volumeId":volume_id}),
     );
-    let chapter_id = prepared["chapter"]["chapterId"].as_str().unwrap().to_owned();
+    let chapter_id = prepared["chapter"]["chapterId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     command(
         &state,
         &project_id,
@@ -1479,7 +1543,10 @@ fn after_a_step_is_done_the_next_chapter_works_on_the_next_step() {
         ((), (), serde_json::from_str::<Value>(&raw).unwrap())
     };
     let active = plan["activeTaskRefs"].as_array().unwrap();
-    assert!(active.iter().any(|task| task == &json!(steps[1])), "{active:?}");
+    assert!(
+        active.iter().any(|task| task == &json!(steps[1])),
+        "{active:?}"
+    );
 }
 
 #[test]
@@ -1509,7 +1576,10 @@ fn a_fallback_event_description_is_a_bounded_excerpt_of_its_evidence() {
         "SELECT json_extract(e.payload_json,'$.event.description'), json_extract(e.payload_json,'$.evidenceRange.quote'), json_extract(e.payload_json,'$.event.eventTypeSource') FROM canon_events e JOIN chapters c ON c.chapter_id=e.chapter_id WHERE e.project_id=?1 AND c.chapter_no=1",
         [&project_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
     ).unwrap();
-    assert!(!description.is_empty() && evidence.starts_with(&description), "fallback descriptions must be copied from their evidence");
+    assert!(
+        !description.is_empty() && evidence.starts_with(&description),
+        "fallback descriptions must be copied from their evidence"
+    );
     assert!(description.chars().count() <= 160);
     assert_eq!(origin, "fallback_fact");
 }
@@ -1559,7 +1629,11 @@ fn the_owner_rewrites_and_abandons_a_foreshadow_and_a_finished_one_stays() {
     assert_eq!(edited["finalStatus"], "committed");
     assert_eq!(
         foreshadow(&state),
-        ("账本缺的那一页记着谁的债".to_owned(), Some("缺页上的名字".to_owned()), "PLANTED".to_owned())
+        (
+            "账本缺的那一页记着谁的债".to_owned(),
+            Some("缺页上的名字".to_owned()),
+            "PLANTED".to_owned()
+        )
     );
     command(
         &state,

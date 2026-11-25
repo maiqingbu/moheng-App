@@ -2700,7 +2700,10 @@ fn insert_story_bible(state: &KernelState, project_id: &str) {
         "../../contracts/fixtures/valid/narrative-story-bible-r1.json"
     ))
     .expect("story bible fixture");
-    let handle = state.manager.open(project_id, "", NOW).expect("open project");
+    let handle = state
+        .manager
+        .open(project_id, "", NOW)
+        .expect("open project");
     insert_committed_artifact(
         &handle,
         project_id,
@@ -2764,7 +2767,10 @@ fn p3_an_approved_setup_change_is_applied_by_the_craft_setup_owner() {
     assert_eq!(result["result"]["authorityOwner"], "B11::CraftSetupOwner");
     let (version, payload, provenance) = story_bible_head(&state, "p-p3-bible");
     assert_eq!(version, 2);
-    assert_eq!(payload["antagonist"]["method"], "借据、打手，再加上收买码头的账房");
+    assert_eq!(
+        payload["antagonist"]["method"],
+        "借据、打手，再加上收买码头的账房"
+    );
     assert!(provenance.contains("B11::CraftSetupOwner"));
 }
 
@@ -2827,7 +2833,10 @@ fn p3_a_setup_change_is_not_applied_before_the_owner_approves_it() {
         json!({"changeRequestId":"change:p3:unapproved"}),
     )
     .expect("preflight");
-    let digest = preflight["result"]["impactDigest"].as_str().unwrap().to_owned();
+    let digest = preflight["result"]["impactDigest"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     assert!(command(
         &state,
         "p-p3-unapproved",
@@ -2852,8 +2861,20 @@ fn an_approved_change_to_the_book_plan_keeps_its_mysteries_in_step() {
     plan["majorMysteryGoals"] =
         json!([{"id":"mystery:book:1","volumeNo":1,"description":"第 1 层：缺页去哪了"}]);
     {
-        let handle = state.manager.open(project_id, "", NOW).expect("open project");
-        insert_committed_artifact(&handle, project_id, "BookPlan", "plan:book:mysteries", "PROJECT", json!({"level":"PROJECT"}), plan, true);
+        let handle = state
+            .manager
+            .open(project_id, "", NOW)
+            .expect("open project");
+        insert_committed_artifact(
+            &handle,
+            project_id,
+            "BookPlan",
+            "plan:book:mysteries",
+            "PROJECT",
+            json!({"level":"PROJECT"}),
+            plan,
+            true,
+        );
         handle
             .execute(
                 "INSERT INTO narrative_obligations(obligation_id,project_id,scope,obligation_type,authority_level,source_artifact_id,source_version,description,prerequisites_json,resume_condition_json,lifecycle,created_at,updated_at) VALUES ('mystery:book:1',?1,'BOOK','MYSTERY','B','plan:book:mysteries',1,'第 1 层：缺页去哪了','[]','{\"kind\":\"AFTER_CHAPTER\",\"value\":0}','APPROVED',?2,?2)",

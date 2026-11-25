@@ -464,7 +464,10 @@ fn ld8_a_chapter_shaped_like_the_two_before_it_is_written_with_a_plan_reminder()
                 "executionMode":"OPENING_BOOTSTRAP","entityIds":[],"references":[],"skillsEnabled":false
             }),
         );
-        assert_eq!(result["finalStatus"], "committed", "chapter {chapter}: {result}");
+        assert_eq!(
+            result["finalStatus"], "committed",
+            "chapter {chapter}: {result}"
+        );
     }
     let inputs = gateway.plan_inputs.lock().unwrap();
     assert!(

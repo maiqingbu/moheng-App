@@ -1017,7 +1017,10 @@ fn vd1h_a_stage_with_steps_becomes_one_required_task_per_step() {
         .collect::<Vec<_>>();
     // Stage 1 (8 chapters) over three steps: 3, 3 and 2, each a task named
     // as its step, toward the stage's goal.
-    assert_eq!(required[0]["taskId"], "task:required:goal:vol:steps:1:step:1:1:1");
+    assert_eq!(
+        required[0]["taskId"],
+        "task:required:goal:vol:steps:1:step:1:1:1"
+    );
     assert_eq!(
         required[0]["completionPredicate"]["value"]["goalId"],
         "goal:vol:steps:1:stage:1:1"

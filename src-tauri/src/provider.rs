@@ -341,7 +341,10 @@ impl OpenAiCompatibleProvider {
     /// P4: the provider's model list, next to its chat endpoint.
     pub(crate) fn models_url(configured: &str) -> Result<String, ProviderError> {
         let chat = Self::endpoint(configured)?;
-        Ok(format!("{}/models", chat.trim_end_matches("/chat/completions")))
+        Ok(format!(
+            "{}/models",
+            chat.trim_end_matches("/chat/completions")
+        ))
     }
 
     /// P4: the model ids the provider lists (`GET …/models`).
@@ -958,22 +961,44 @@ mod tests {
             timeout_ms: 1000,
             thinking,
         };
-        let on = || Some(super::Thinking { enabled: true, effort: Some("max".into()) });
-        let off = || Some(super::Thinking { enabled: false, effort: Some("max".into()) });
-        let deepseek = OpenAiCompatibleProvider::request_payload("https://api.deepseek.com/v1", &request(on()));
+        let on = || {
+            Some(super::Thinking {
+                enabled: true,
+                effort: Some("max".into()),
+            })
+        };
+        let off = || {
+            Some(super::Thinking {
+                enabled: false,
+                effort: Some("max".into()),
+            })
+        };
+        let deepseek = OpenAiCompatibleProvider::request_payload(
+            "https://api.deepseek.com/v1",
+            &request(on()),
+        );
         assert_eq!(deepseek["thinking"]["type"], "enabled");
         assert_eq!(deepseek["reasoning_effort"], "max");
         // Real run round 31: thinking took all 16384 output tokens and the
         // chapter came back empty; thinking needs room besides the reply.
         assert_eq!(deepseek["max_tokens"], 65_536);
-        let deepseek = OpenAiCompatibleProvider::request_payload("https://api.deepseek.com/v1", &request(off()));
+        let deepseek = OpenAiCompatibleProvider::request_payload(
+            "https://api.deepseek.com/v1",
+            &request(off()),
+        );
         assert_eq!(deepseek["thinking"]["type"], "disabled");
         assert!(deepseek.get("reasoning_effort").is_none());
         // Not set: as before, nothing is sent.
-        let deepseek = OpenAiCompatibleProvider::request_payload("https://api.deepseek.com/v1", &request(None));
+        let deepseek = OpenAiCompatibleProvider::request_payload(
+            "https://api.deepseek.com/v1",
+            &request(None),
+        );
         assert!(deepseek.get("thinking").is_none());
         assert!(deepseek.get("max_tokens").is_none());
-        let xiaomi = OpenAiCompatibleProvider::request_payload("https://api.xiaomimimo.com/v1", &request(on()));
+        let xiaomi = OpenAiCompatibleProvider::request_payload(
+            "https://api.xiaomimimo.com/v1",
+            &request(on()),
+        );
         assert_eq!(xiaomi["thinking"]["type"], "enabled");
         assert_eq!(xiaomi["max_completion_tokens"], 32_768);
         assert_eq!(xiaomi["reasoning_effort"], "max");
@@ -1383,7 +1408,8 @@ mod tests {
         // Real run round 26: 184 facts, not one marked as an event.
         assert!(prompt.contains("at least one canonCandidate carries eventType"));
         assert!(prompt.contains("objectJson.objectId must be the entityId of a person"));
-        assert!(prompt.contains("its evidence.sentence must be a sentence that names that other person"));
+        assert!(prompt
+            .contains("its evidence.sentence must be a sentence that names that other person"));
     }
 
     #[test]
@@ -1396,7 +1422,10 @@ mod tests {
             "PLAN_VOLUME_DIRECTION",
         ] {
             let prompt = OpenAiCompatibleProvider::structured_prompt(capability);
-            assert!(prompt.contains("craftGuidance holds the selected story methods"), "{capability}");
+            assert!(
+                prompt.contains("craftGuidance holds the selected story methods"),
+                "{capability}"
+            );
         }
     }
 

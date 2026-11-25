@@ -207,7 +207,13 @@ fn run_assistant_model(
         .open(project_id, "", now)
         .map_err(|error| error.to_string())?;
     let result = execute_production_model_with_profile(
-        &connection, gateway, &profile, &spec, capability, input, now,
+        &connection,
+        gateway,
+        &profile,
+        &spec,
+        capability,
+        input,
+        now,
     )?;
     let parsed = result.parsed.ok_or("ASSISTANT_MODEL_OUTPUT_MISSING")?;
     Ok((parsed, model_run_id))
@@ -317,8 +323,7 @@ pub fn draft_setup_change(
                     .map_err(|error| {
                         crate::project_db::ManagerError::ProjectCommand(error.to_string())
                     })
-                })
-;
+                });
             match chapters {
                 Ok(chapters) => {
                     draft["items"] =
@@ -407,10 +412,21 @@ mod tests {
             .intents()
             .iter()
             .any(|(intent, _)| *intent == "REMEMBER"));
-        for question in ["以后顾清不要再叫林舟师兄", "记住：林舟说话从不带脏字", "别再让柳漪哭了"] {
-            assert_eq!(AssistantEntry::Change.keyword_intent(question), "REMEMBER", "{question}");
+        for question in [
+            "以后顾清不要再叫林舟师兄",
+            "记住：林舟说话从不带脏字",
+            "别再让柳漪哭了",
+        ] {
+            assert_eq!(
+                AssistantEntry::Change.keyword_intent(question),
+                "REMEMBER",
+                "{question}"
+            );
         }
-        assert_eq!(AssistantEntry::Change.keyword_intent("林舟其实没有死"), "RETCON");
+        assert_eq!(
+            AssistantEntry::Change.keyword_intent("林舟其实没有死"),
+            "RETCON"
+        );
     }
 
     #[test]

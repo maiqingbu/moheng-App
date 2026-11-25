@@ -418,7 +418,10 @@ fn adjust_foreshadow(
     foreshadow: &crate::repositories::narrative::ForeshadowAuthorityRecord,
     payload: &serde_json::Map<String, Value>,
 ) -> Result<Value, String> {
-    if !matches!(foreshadow.status.as_str(), "PLANTED" | "REINFORCED" | "STALE") {
+    if !matches!(
+        foreshadow.status.as_str(),
+        "PLANTED" | "REINFORCED" | "STALE"
+    ) {
         return Err("B08_FORESHADOW_NOT_ACTIVE".into());
     }
     let text = |key: &str| {
@@ -443,8 +446,14 @@ fn adjust_foreshadow(
             };
             let intent = text("intent").map(ToOwned::to_owned);
             let payoff = text("fulfillmentObject").and_then(crate::production::payoff_ref);
-            if intent.is_none() && payoff.is_none() && !payload.contains_key("recoverWindowEndChapter") {
-                return Err("IPC_INVALID:EDIT needs intent, fulfillmentObject or recoverWindowEndChapter".into());
+            if intent.is_none()
+                && payoff.is_none()
+                && !payload.contains_key("recoverWindowEndChapter")
+            {
+                return Err(
+                    "IPC_INVALID:EDIT needs intent, fulfillmentObject or recoverWindowEndChapter"
+                        .into(),
+                );
             }
             (
                 intent.unwrap_or_else(|| foreshadow.intent.clone()),
@@ -461,8 +470,9 @@ fn adjust_foreshadow(
         ),
         _ => return Err("IPC_INVALID:action".into()),
     };
-    let version = crate::repositories::artifacts::ArtifactRepository::next_version(connection, artifact_id)
-        .map_err(|error| error.to_string())?;
+    let version =
+        crate::repositories::artifacts::ArtifactRepository::next_version(connection, artifact_id)
+            .map_err(|error| error.to_string())?;
     let snapshot_payload = json!({
         "payloadSchema":"foreshadow-adjustment.r1",
         "foreshadowId":foreshadow_id,"threadRef":thread_ref,"action":action,

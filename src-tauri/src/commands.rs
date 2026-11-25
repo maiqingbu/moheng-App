@@ -837,7 +837,9 @@ pub fn draft_setup_change_impl(state: &KernelState, request: Value) -> Result<Va
         .get("requestedAt")
         .and_then(Value::as_str)
         .unwrap_or("2026-01-01T00:00:00Z");
-    Ok(crate::assistant_intent::draft_setup_change(state, project_id, question, now))
+    Ok(crate::assistant_intent::draft_setup_change(
+        state, project_id, question, now,
+    ))
 }
 
 /// B08 production projection.  This is a bounded read projection assembled
@@ -3360,7 +3362,12 @@ pub(crate) fn context_input_from_authority(
         .iter()
         .filter(|_| default_selection)
         .filter_map(|task_ref| route_task_contracts.get(task_ref))
-        .flat_map(|task| task["dependsOnTaskIds"].as_array().cloned().unwrap_or_default())
+        .flat_map(|task| {
+            task["dependsOnTaskIds"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
         .filter_map(|dependency| dependency.as_str().map(ToOwned::to_owned))
         .filter(|dependency| !plan_task_refs.contains(dependency))
         .collect::<BTreeSet<_>>();
@@ -6904,8 +6911,13 @@ pub fn direct_volume(
     .map_err(|e| e.to_string())?;
     let hash = sha256_canonical(&book_plan).map_err(|e| e.to_string())?;
     // The rewritten book plan keeps its mysteries in step.
-    let mysteries =
-        crate::planning::book_mystery_deltas_for(&handle, project_id, &book_plan, &artifact_id, version)?;
+    let mysteries = crate::planning::book_mystery_deltas_for(
+        &handle,
+        project_id,
+        &book_plan,
+        &artifact_id,
+        version,
+    )?;
     let artifact: ArtifactEnvelope = serde_json::from_value(json!({"artifactId":artifact_id,"projectId":project_id,"artifactType":"BookPlan","scope":{"level":"PROJECT"},"version":version,"schemaVersion":"m0a.artifact.v1","artifactStatus":"CANDIDATE","payload":book_plan,"payloadHash":hash,"dependencyRefs":[current],"provenance":{"createdBy":"B07::PlanningOwner","commandId":commit_id,"modelRunId":planned.model_run_id},"createdAt":requested_at})).map_err(|e| e.to_string())?;
     let bundle: CommitBundle = serde_json::from_value(json!({"commitId":format!("commit:{commit_id}"),"projectId":project_id,"commandId":commit_id,"idempotencyKey":format!("{idempotency_key}:volume-direction"),"expectedProjectRevision":revision(&handle)?,"contractVersion":"m0a.v1","createdAt":requested_at,"artifacts":[artifact],"headUpdates":[{"artifactType":"BookPlan","scope":{"level":"PROJECT"},"artifactId":artifact_id,"version":version,"payloadHash":hash}],"obligationDelta":(!mysteries.is_empty()).then_some(mysteries)})).map_err(|e| e.to_string())?;
     let mut expected = CommitService::commit(&handle, &bundle, requested_at)
@@ -8451,7 +8463,13 @@ fn execute_planning_command_with_observer(
     let artifact: ArtifactEnvelope = serde_json::from_value(json!({"artifactId":artifact_id,"projectId":project_id,"artifactType":artifact_type,"scope":scope,"version":version,"schemaVersion":"m0a.artifact.v1","artifactStatus":"CANDIDATE","payload":payload,"payloadHash":hash,"dependencyRefs":book_plan_dependencies,"provenance":{"createdBy":"B07::PlanningOwner","commandId":command_id,"modelRunId":model_run_id},"createdAt":requested_at})).map_err(|e| e.to_string())?;
     // P1: an approved book plan keeps its mysteries in step.
     let mysteries = if artifact_type == "BookPlan" {
-        crate::planning::book_mystery_deltas_for(&handle, project_id, &payload, &artifact_id, version)?
+        crate::planning::book_mystery_deltas_for(
+            &handle,
+            project_id,
+            &payload,
+            &artifact_id,
+            version,
+        )?
     } else {
         Vec::new()
     };
@@ -10454,7 +10472,13 @@ fn provider_secret(settings: &Value, provider_id: &str) -> Result<String, String
 /// read, and the settings page falls back to typing the model name.
 fn provider_list_models_sync(settings: Value) -> Value {
     // No model is needed yet: the list is how one is chosen.
-    let text = |key: &str| settings.get(key).and_then(Value::as_str).unwrap_or_default().trim();
+    let text = |key: &str| {
+        settings
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+    };
     let listed = if text("providerId").is_empty() || text("endpoint").is_empty() {
         Err("P01_PROVIDER_NOT_CONFIGURED".to_string())
     } else {
@@ -10693,7 +10717,8 @@ mod rv17_provider_test_response_tests {
     #[test]
     fn p4_an_unconfigured_provider_lists_no_models_and_says_why() {
         // The settings page then lets the owner type the model name.
-        let listed = provider_list_models_sync(serde_json::json!({"providerId":"x","endpoint":" "}));
+        let listed =
+            provider_list_models_sync(serde_json::json!({"providerId":"x","endpoint":" "}));
         assert_eq!(listed["models"], serde_json::json!([]));
         assert_eq!(listed["reason"], "P01_PROVIDER_NOT_CONFIGURED");
     }

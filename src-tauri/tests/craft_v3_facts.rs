@@ -41,7 +41,10 @@ fn a_place_detail_keeps_the_following_text_when_its_state_changes_later() {
         "辰时将近，坛沿浊黄水光已漫到最高处，鼓着，颤着，就是不溢。表面霜纹凝滞，像被什么压住。"
     )]});
     let kept = continuity_details(&audit, body);
-    assert!(kept[0]["detail"].as_str().unwrap().contains("浊黄水光向上拱起一寸，漫过沿口"));
+    assert!(kept[0]["detail"]
+        .as_str()
+        .unwrap()
+        .contains("浊黄水光向上拱起一寸，漫过沿口"));
 }
 
 #[test]

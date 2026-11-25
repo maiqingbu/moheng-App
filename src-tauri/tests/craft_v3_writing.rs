@@ -412,15 +412,23 @@ fn a_place_s_following_text_reaches_the_next_chapter_through_the_receipt() {
     // 那么回执中保留的后续原文应作为未确认材料进入两次模型输入。
     let (_temp, state, gateway, project_id) = project_ready_to_write_with(
         "place-following",
-        CraftGateway { place_state: true, ..CraftGateway::default() },
+        CraftGateway {
+            place_state: true,
+            ..CraftGateway::default()
+        },
     );
     write_next_chapter(&state, &project_id, "place-following:production:1");
     write_next_chapter(&state, &project_id, "place-following:production:2");
     let calls = gateway.calls.lock().unwrap();
     for capability in ["PLAN_CHAPTER_CRAFT", "RENDER_CHAPTER_CRAFT"] {
         let calls = inputs(&calls, capability);
-        let facts = calls.last().unwrap()["establishedFacts"].as_array().unwrap();
-        let place = facts.iter().find(|fact| fact["subject"] == "废丹坛").unwrap();
+        let facts = calls.last().unwrap()["establishedFacts"]
+            .as_array()
+            .unwrap();
+        let place = facts
+            .iter()
+            .find(|fact| fact["subject"] == "废丹坛")
+            .unwrap();
         assert!(place["detail"].as_str().unwrap().contains(PLACE_FOLLOWING));
         assert!(place["detail"].as_str().unwrap().contains("未确认章末状态"));
     }

@@ -396,7 +396,9 @@ impl NarrativeRepository {
         let mut statement = connection.prepare(
             "SELECT obligation_id,lifecycle,description FROM narrative_obligations WHERE project_id=?1 AND obligation_type='MYSTERY' ORDER BY obligation_id",
         )?;
-        let rows = statement.query_map([project_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        let rows = statement.query_map([project_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -409,9 +411,15 @@ impl NarrativeRepository {
         let mut statement = connection.prepare(
             "SELECT c.chapter_no,json_extract(p.payload_json,'$.body') FROM canonical_heads h JOIN artifacts a ON a.project_id=h.project_id AND a.artifact_id=h.artifact_id AND a.version=h.version AND a.artifact_type='FinalChapter' AND a.artifact_status='COMMITTED' JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version JOIN chapters c ON c.project_id=h.project_id AND c.chapter_id=json_extract(p.payload_json,'$.chapterId') WHERE h.project_id=?1 AND h.artifact_type='FinalChapter' ORDER BY c.chapter_no LIMIT ?2",
         )?;
-        let rows = statement.query_map(libsql_rusqlite::params![project_id, limit.clamp(1, 10_000)], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?.unwrap_or_default()))
-        })?;
+        let rows = statement.query_map(
+            libsql_rusqlite::params![project_id, limit.clamp(1, 10_000)],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                ))
+            },
+        )?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -3144,8 +3152,9 @@ impl NarrativeRepository {
         project_id: &str,
         limit: usize,
     ) -> Result<Vec<Value>, NarrativeRepositoryError> {
-        let mut statement = connection
-            .prepare(&format!("{OPEN_CANDIDATE_THREADS} ORDER BY 3 DESC, 1 DESC LIMIT ?2"))?;
+        let mut statement = connection.prepare(&format!(
+            "{OPEN_CANDIDATE_THREADS} ORDER BY 3 DESC, 1 DESC LIMIT ?2"
+        ))?;
         let rows = statement.query_map(libsql_rusqlite::params![project_id, limit as i64], |row| {
             Ok(json!({"threadRef":format!("thread:{}", row.get::<_, String>(0)?),"description":row.get::<_, String>(1)?}))
         })?;
@@ -3161,7 +3170,9 @@ impl NarrativeRepository {
     ) -> Result<bool, NarrativeRepositoryError> {
         connection
             .query_row(
-                &format!("SELECT EXISTS(SELECT 1 FROM ({OPEN_CANDIDATE_THREADS}) WHERE thread_id=?2)"),
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM ({OPEN_CANDIDATE_THREADS}) WHERE thread_id=?2)"
+                ),
                 libsql_rusqlite::params![project_id, thread_id],
                 |row| row.get(0),
             )

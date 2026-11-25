@@ -313,7 +313,12 @@ pub fn book_mystery_deltas_for(
         connection, project_id,
     )
     .map_err(|error| error.to_string())?;
-    Ok(book_mystery_deltas(book_plan, artifact_id, version, &recorded))
+    Ok(book_mystery_deltas(
+        book_plan,
+        artifact_id,
+        version,
+        &recorded,
+    ))
 }
 
 /// What writing `book_plan` (artifact `artifact_id`, `version`) changes in
@@ -331,7 +336,10 @@ pub fn book_mystery_deltas(
     let planned = book_mystery_obligations(book_plan, artifact_id, version);
     let mut deltas = Vec::new();
     for mut mystery in planned.iter().cloned() {
-        match recorded.iter().find(|(id, _, _)| mystery["obligationId"] == id.as_str()) {
+        match recorded
+            .iter()
+            .find(|(id, _, _)| mystery["obligationId"] == id.as_str())
+        {
             None => deltas.push(mystery),
             Some((_, lifecycle, description))
                 if open(lifecycle) && mystery["description"] != description.as_str() =>
@@ -343,7 +351,11 @@ pub fn book_mystery_deltas(
         }
     }
     for (id, lifecycle, description) in recorded {
-        if open(lifecycle) && !planned.iter().any(|mystery| mystery["obligationId"] == id.as_str()) {
+        if open(lifecycle)
+            && !planned
+                .iter()
+                .any(|mystery| mystery["obligationId"] == id.as_str())
+        {
             deltas.push(json!({
                 "obligationId":id,"scope":"BOOK","obligationType":"MYSTERY","authorityLevel":"B",
                 "lifecycle":"ABANDONED","description":description,"prerequisites":[],
@@ -1396,13 +1408,19 @@ pub fn compile_volume_plan_from_authority(
                 .iter()
                 .filter_map(|step| {
                     let stage_id = stage?["id"].as_str()?;
-                    let step_goal = format!("{}{}", goal_id.strip_suffix(stage_id)?, step["id"].as_str()?);
+                    let step_goal = format!(
+                        "{}{}",
+                        goal_id.strip_suffix(stage_id)?,
+                        step["id"].as_str()?
+                    );
                     Some((step_goal, step["goal"].clone()))
                 })
                 .collect::<Vec<_>>(),
             _ => vec![(
                 goal_id.to_owned(),
-                goal.get("description").cloned().unwrap_or_else(|| json!("完成卷目标")),
+                goal.get("description")
+                    .cloned()
+                    .unwrap_or_else(|| json!("完成卷目标")),
             )],
         };
         for (unit_goal, objective) in units {
@@ -3398,9 +3416,21 @@ mod tests {
             {"id":"mystery:book:3","volumeNo":2,"description":"第 3 层：谁改了租约"}
         ]});
         let recorded = vec![
-            ("mystery:book:1".to_owned(), "PROGRESSING".to_owned(), "第 1 层：缺页去哪了".to_owned()),
-            ("mystery:book:2".to_owned(), "APPROVED".to_owned(), "第 2 层：师父怎么死的".to_owned()),
-            ("mystery:book:9".to_owned(), "RESOLVED".to_owned(), "已揭开的一层".to_owned()),
+            (
+                "mystery:book:1".to_owned(),
+                "PROGRESSING".to_owned(),
+                "第 1 层：缺页去哪了".to_owned(),
+            ),
+            (
+                "mystery:book:2".to_owned(),
+                "APPROVED".to_owned(),
+                "第 2 层：师父怎么死的".to_owned(),
+            ),
+            (
+                "mystery:book:9".to_owned(),
+                "RESOLVED".to_owned(),
+                "已揭开的一层".to_owned(),
+            ),
         ];
         let deltas = book_mystery_deltas(&plan, "plan:book:x", 2, &recorded);
         let lifecycle = |id: &str| {
@@ -3410,7 +3440,10 @@ mod tests {
                 .map(|delta| (delta["lifecycle"].clone(), delta["description"].clone()))
         };
         // Reworded: the new wording, its progress kept.
-        assert_eq!(lifecycle("mystery:book:1"), Some((json!("PROGRESSING"), json!("第 1 层：缺页记着谁的债"))));
+        assert_eq!(
+            lifecycle("mystery:book:1"),
+            Some((json!("PROGRESSING"), json!("第 1 层：缺页记着谁的债")))
+        );
         // No longer planned: withdrawn.
         assert_eq!(lifecycle("mystery:book:2").unwrap().0, json!("ABANDONED"));
         // Newly planned: opened.
@@ -3419,8 +3452,18 @@ mod tests {
         assert_eq!(lifecycle("mystery:book:9"), None);
         assert_eq!(deltas.len(), 3);
         // Nothing changed: nothing to write.
-        let same = vec![("mystery:book:1".to_owned(), "APPROVED".to_owned(), "第 1 层：缺页记着谁的债".to_owned()),
-            ("mystery:book:3".to_owned(), "APPROVED".to_owned(), "第 3 层：谁改了租约".to_owned())];
+        let same = vec![
+            (
+                "mystery:book:1".to_owned(),
+                "APPROVED".to_owned(),
+                "第 1 层：缺页记着谁的债".to_owned(),
+            ),
+            (
+                "mystery:book:3".to_owned(),
+                "APPROVED".to_owned(),
+                "第 3 层：谁改了租约".to_owned(),
+            ),
+        ];
         assert!(book_mystery_deltas(&plan, "plan:book:x", 2, &same).is_empty());
     }
 

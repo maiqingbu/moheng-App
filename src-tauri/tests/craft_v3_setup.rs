@@ -260,7 +260,13 @@ fn generating_story_bible_commits_three_candidates_without_a_head() {
     drop(connection);
     let recorded: Value = serde_json::from_str(&recorded).unwrap();
     assert_eq!(recorded["stage"], "story_setup");
-    assert!(recorded["skillIds"].as_array().unwrap().contains(&json!("S01")), "{recorded}");
+    assert!(
+        recorded["skillIds"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("S01")),
+        "{recorded}"
+    );
     // P2: the story bible is planned with the story setup skills.
     assert_eq!(inputs[0]["input"]["craftGuidance"]["stage"], "story_setup");
     assert!(inputs[0]["input"]["craftGuidance"]["skills"]
@@ -603,13 +609,19 @@ fn p3_the_assistant_drafts_a_story_bible_change_from_the_owners_words() {
         json!({"candidateId":candidate["id"],"bible":candidate}),
     )
     .unwrap();
-    let revision = fixture.manager.project_revision(&fixture.project_id).unwrap();
+    let revision = fixture
+        .manager
+        .project_revision(&fixture.project_id)
+        .unwrap();
     let draft = draft_setup_change_impl(
         &fixture,
         json!({"projectId":fixture.project_id,"question":"把彭三的手段改成收买码头的账房","requestedAt":NOW}),
     )
     .unwrap();
-    assert_eq!(draft["draft"]["targetAuthority"]["artifactType"], "StoryBible");
+    assert_eq!(
+        draft["draft"]["targetAuthority"]["artifactType"],
+        "StoryBible"
+    );
     assert_eq!(
         draft["draft"]["items"][0],
         json!({"path":"antagonist.method","before":"借据和打手","after":"收买码头的账房","writtenConflicts":[]})
@@ -618,5 +630,11 @@ fn p3_the_assistant_drafts_a_story_bible_change_from_the_owners_words() {
     assert_eq!(inputs[0]["request"], "把彭三的手段改成收买码头的账房");
     assert_eq!(inputs[0]["storyBible"]["antagonist"]["name"], "彭三");
     // A draft writes nothing.
-    assert_eq!(fixture.manager.project_revision(&fixture.project_id).unwrap(), revision);
+    assert_eq!(
+        fixture
+            .manager
+            .project_revision(&fixture.project_id)
+            .unwrap(),
+        revision
+    );
 }

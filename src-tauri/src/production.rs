@@ -245,7 +245,10 @@ pub fn model_step(capability: &str) -> &'static str {
     match capability {
         // Real run round 30: every call on the writing model, so its
         // thinking reaches the craft writer too.
-        "RENDER_CHAPTER" | "RENDER_CHAPTER_CRAFT" | "ADJUST_CHAPTER_LENGTH" | "CUT_CHAPTER"
+        "RENDER_CHAPTER"
+        | "RENDER_CHAPTER_CRAFT"
+        | "ADJUST_CHAPTER_LENGTH"
+        | "CUT_CHAPTER"
         | "REWRITE_PASSAGES" => "render",
         // Owner decision (2026-10-24): r2 plans use the audit model.
         "AUDIT_EXTRACT"
@@ -3073,8 +3076,13 @@ fn run_chapter_production_inner(
                 "rejectedFor":"正文分段太少：有超过 300 字的段落",
                 "instruction":"上一次的正文段落太长，几百字连成一段。重写这一章，按场景、动作和对话分段，每段一般不超过 150 字，段与段之间用换行（\\n）隔开。"
             });
-            let (model_run_id, result) =
-                craft_call("render-paragraphs", render_capability, &render_profile, 2, input)?;
+            let (model_run_id, result) = craft_call(
+                "render-paragraphs",
+                render_capability,
+                &render_profile,
+                2,
+                input,
+            )?;
             (model_run_id, rendered_body(&result)?)
         } else {
             (model_run_id, body)
@@ -4531,14 +4539,20 @@ fn run_chapter_production_inner(
             "evidence":item.evidence.to_json()
         })
     }));
-    reality.extend(extraction.continuity_candidates.iter().filter(|item| effective_continuity_refs.contains(&item.thread_ref)).map(|item| {
-        json!({
-            "kind":"CONTINUITY",
-            "threadRef":item.thread_ref,
-            "actualObserved":item.disposition,
-            "evidence":item.evidence.as_ref().map(EvidenceSpan::to_json)
-        })
-    }));
+    reality.extend(
+        extraction
+            .continuity_candidates
+            .iter()
+            .filter(|item| effective_continuity_refs.contains(&item.thread_ref))
+            .map(|item| {
+                json!({
+                    "kind":"CONTINUITY",
+                    "threadRef":item.thread_ref,
+                    "actualObserved":item.disposition,
+                    "evidence":item.evidence.as_ref().map(EvidenceSpan::to_json)
+                })
+            }),
+    );
     let mut model_run_refs = vec![render_run_id.clone(), audit_run_id.clone()];
     model_run_refs.extend(prose_run_ids.iter().cloned());
     let mut receipt_payload = json!({"payloadSchema":"production-receipt.r1","executionMode":execution_mode,"projectId":project_id,"chapterId":chapter_id,"jobId":job_id,"contextManifestRef":context_ref,"chapterPlanRef":plan_ref.clone(),"gatePolicyRef":policy_ref.clone(),"canonSemanticPolicyVersion":gate_policy_payload.pointer("/canonSemantics/policyVersion").and_then(Value::as_str),"threadPromotionRuleVersion":crate::narrative::THREAD_PROMOTION_RULE_VERSION,"candidateRef":candidate_ref.clone(),"finalChapterRef":reference(&final_artifact),"auditRef":reference(&audit),"qualityReportRef":Value::Null,"tasteProfileRef":Value::Null,"creativeEnrichment":Value::Null,"modelRunRefs":model_run_refs,"reconciliation":reconciliation,"reality":reality,"threadPromotionDecisions":thread_promotion_decisions,"craftSkills":craft_skills});
@@ -5568,18 +5582,35 @@ pub(crate) fn entity_kind(entity_type: &str) -> &'static str {
 /// A foreshadow's payoff as its ref, an OpaqueId: no whitespace, 1 to 200
 /// characters.
 pub(crate) fn payoff_ref(payoff: &str) -> Option<String> {
-    Some(payoff.split_whitespace().collect::<Vec<_>>().join("_").chars().take(200).collect::<String>())
-        .filter(|payoff| !payoff.is_empty())
+    Some(
+        payoff
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join("_")
+            .chars()
+            .take(200)
+            .collect::<String>(),
+    )
+    .filter(|payoff| !payoff.is_empty())
 }
 
 /// What a new thread is about: its description, else the payoff it waits
 /// for, else the quote it was found in (real run round 29: quotes read as
 /// no description at all).
 fn thread_description(item: &ContinuityCandidate) -> String {
-    let given = |text: Option<&str>| text.filter(|text| !text.trim().is_empty()).map(ToOwned::to_owned);
+    let given = |text: Option<&str>| {
+        text.filter(|text| !text.trim().is_empty())
+            .map(ToOwned::to_owned)
+    };
     given(item.description.as_deref())
-        .or_else(|| given(item.fulfillment_object.as_deref()).map(|payoff| format!("待兑现：{payoff}")))
-        .or_else(|| item.evidence.as_ref().map(|evidence| evidence.quote.clone()))
+        .or_else(|| {
+            given(item.fulfillment_object.as_deref()).map(|payoff| format!("待兑现：{payoff}"))
+        })
+        .or_else(|| {
+            item.evidence
+                .as_ref()
+                .map(|evidence| evidence.quote.clone())
+        })
         .unwrap_or_else(|| item.thread_ref.clone())
 }
 
@@ -5601,7 +5632,10 @@ fn is_foreshadow(
 /// (`objectJson.objectId`): its own relation id, or one derived from who
 /// and whom, so a later change of how they stand updates the same relation.
 fn candidate_relation_id(candidate: &CanonCandidate) -> Option<String> {
-    let object = candidate.object_json.get("objectId").and_then(Value::as_str)?;
+    let object = candidate
+        .object_json
+        .get("objectId")
+        .and_then(Value::as_str)?;
     candidate
         .relation_id
         .clone()
@@ -7144,7 +7178,11 @@ mod tests {
         // would not have kept it either.
         let body = "周砚舟把拓片推过桌面。纸边硌着胳膊，他按了按。阿沅在门口等着。";
         let mut audit = relation_audit("周砚舟", "信任", 1);
-        assert_eq!(bind_cited_evidence(&mut audit, body).len(), 0, "the sentence before names him");
+        assert_eq!(
+            bind_cited_evidence(&mut audit, body).len(),
+            0,
+            "the sentence before names him"
+        );
         let body = "雨下了一夜。纸边硌着胳膊，他按了按。药炉还没熄。";
         let mut audit = relation_audit("周砚舟", "信任", 1);
         assert_eq!(bind_cited_evidence(&mut audit, body).len(), 1);
@@ -7165,18 +7203,25 @@ mod tests {
     #[test]
     fn a_thread_without_a_description_is_named_by_its_payoff_before_its_quote() {
         // Real run round 29: foreshadows read "柳莺的目光已经钉在他手上……".
-        let candidate = |json: Value| -> ContinuityCandidate { serde_json::from_value(json).unwrap() };
+        let candidate =
+            |json: Value| -> ContinuityCandidate { serde_json::from_value(json).unwrap() };
         let evidence = json!({"start":0,"end":4,"quote":"他按了按"});
         assert_eq!(
-            thread_description(&candidate(json!({"threadRef":"t","disposition":"ADVANCE","description":"暗格里藏着什么","fulfillmentObject":"暗格","evidence":evidence}))),
+            thread_description(&candidate(
+                json!({"threadRef":"t","disposition":"ADVANCE","description":"暗格里藏着什么","fulfillmentObject":"暗格","evidence":evidence})
+            )),
             "暗格里藏着什么"
         );
         assert_eq!(
-            thread_description(&candidate(json!({"threadRef":"t","disposition":"ADVANCE","fulfillmentObject":"地窖暗格","evidence":evidence}))),
+            thread_description(&candidate(
+                json!({"threadRef":"t","disposition":"ADVANCE","fulfillmentObject":"地窖暗格","evidence":evidence})
+            )),
             "待兑现：地窖暗格"
         );
         assert_eq!(
-            thread_description(&candidate(json!({"threadRef":"t","disposition":"ADVANCE","description":" ","evidence":evidence}))),
+            thread_description(&candidate(
+                json!({"threadRef":"t","disposition":"ADVANCE","description":" ","evidence":evidence})
+            )),
             "他按了按"
         );
     }

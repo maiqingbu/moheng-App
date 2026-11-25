@@ -350,10 +350,7 @@ fn fx18_long_form_production_uses_the_range_saved_when_its_plan_was_compiled() {
 
 #[test]
 fn fx18_opening_retry_keeps_the_range_chosen_for_the_chapter() {
-    let gateway = Arc::new(LengthGateway::new(
-        &[1200, 1300, 1000],
-        &[600, 600, 3500],
-    ));
+    let gateway = Arc::new(LengthGateway::new(&[1200, 1300, 1000], &[600, 600, 3500]));
     let project_id = "p-fx18-retry-range";
     let (_temp, state, chapter_id, result) = start(
         gateway.clone(),

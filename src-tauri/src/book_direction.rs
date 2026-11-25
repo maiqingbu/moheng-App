@@ -109,7 +109,11 @@ fn known_names(bible: &Value) -> Vec<&str> {
     [&bible["protagonist"]["name"], &bible["antagonist"]["name"]]
         .into_iter()
         .map(text)
-        .chain(items(bible, "cast").iter().map(|member| text(&member["name"])))
+        .chain(
+            items(bible, "cast")
+                .iter()
+                .map(|member| text(&member["name"])),
+        )
         .filter(|name| !name.is_empty())
         .collect()
 }
@@ -1328,14 +1332,18 @@ mod tests {
         // VD-1i (real run round 21): three directions of 7 stages, the last
         // blank, estimated at 39 or 44 of 33 chapters, kept the template.
         let mut direction = direction();
-        let stages = direction["volumeIntentSeeds"][0]["stages"].as_array_mut().unwrap();
+        let stages = direction["volumeIntentSeeds"][0]["stages"]
+            .as_array_mut()
+            .unwrap();
         stages.push(json!({"goal":"","pressure":"","cast":[],"turn":"","steps":[]}));
         for (stage, chapters) in stages.iter_mut().zip([12, 14, 13]) {
             stage["estimatedChapters"] = json!(chapters);
         }
         let input = direction_input();
         tidy(&mut direction, &input);
-        let stages = direction["volumeIntentSeeds"][0]["stages"].as_array().unwrap();
+        let stages = direction["volumeIntentSeeds"][0]["stages"]
+            .as_array()
+            .unwrap();
         assert_eq!(stages.len(), 3);
         let total = stages
             .iter()
@@ -1349,15 +1357,23 @@ mod tests {
     fn seven_stages_fit_a_long_volume_and_the_input_names_the_chapter_range() {
         let mut direction = direction();
         let stage = direction["volumeIntentSeeds"][0]["stages"][0].clone();
-        let stages = direction["volumeIntentSeeds"][0]["stages"].as_array_mut().unwrap();
+        let stages = direction["volumeIntentSeeds"][0]["stages"]
+            .as_array_mut()
+            .unwrap();
         while stages.len() < 7 {
             stages.push(stage.clone());
         }
         for stage in stages.iter_mut() {
             stage["estimatedChapters"] = json!(4);
         }
-        assert_eq!(problems(&direction, &direction_input()), Vec::<String>::new());
-        assert_eq!(direction_input()["firstVolume"]["stageChapters"], json!({"min":17,"max":33}));
+        assert_eq!(
+            problems(&direction, &direction_input()),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            direction_input()["firstVolume"]["stageChapters"],
+            json!({"min":17,"max":33})
+        );
     }
 
     #[test]
@@ -1544,7 +1560,10 @@ mod tests {
         let stage = &direction["volumeIntentSeeds"][0]["stages"][1];
         assert_eq!(stage["cast"], json!(["柳漪"]));
         assert_eq!(stage["newCast"], json!(["沈掌柜"]));
-        assert_eq!(problems(&direction, &direction_input()), Vec::<String>::new());
+        assert_eq!(
+            problems(&direction, &direction_input()),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

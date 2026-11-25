@@ -8773,7 +8773,10 @@ fn b08_a_long_form_chapter_keeps_its_facts_when_the_audit_follow_up_comes_back_e
     )
     .unwrap();
     assert_eq!(result["finalStatus"], "committed");
-    let connection = state.manager.open(project_id, "B08 empty follow-up", NOW).unwrap();
+    let connection = state
+        .manager
+        .open(project_id, "B08 empty follow-up", NOW)
+        .unwrap();
     let facts: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM canon_facts WHERE project_id=?1 AND valid_from_chapter_id=?2",

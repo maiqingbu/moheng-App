@@ -419,15 +419,18 @@ pub(crate) fn apply_all(
     if let Some(items) = obligations {
         for item in items {
             obligation_count += apply_obligation(connection, item, fallback_artifact, now)
-                .map_err(|error| in_delta(error, || format!("obligation {}", item.obligation_id)))?;
+                .map_err(|error| {
+                    in_delta(error, || format!("obligation {}", item.obligation_id))
+                })?;
         }
     }
     counts.insert("obligation".into(), obligation_count);
     let mut foreshadow_count = 0;
     if let Some(items) = foreshadows {
         for item in items {
-            foreshadow_count += apply_foreshadow(connection, item, now)
-                .map_err(|error| in_delta(error, || format!("foreshadow {}", item.foreshadow_id)))?;
+            foreshadow_count += apply_foreshadow(connection, item, now).map_err(|error| {
+                in_delta(error, || format!("foreshadow {}", item.foreshadow_id))
+            })?;
         }
     }
     counts.insert("foreshadow".into(), foreshadow_count);
@@ -450,8 +453,11 @@ pub(crate) fn apply_all(
     let mut dependency_count = 0;
     if let Some(items) = dependencies {
         for item in items {
-            dependency_count += apply_dependency(connection, item, now)
-                .map_err(|error| in_delta(error, || format!("dependency {}->{}", item.source_ref, item.target_ref)))?;
+            dependency_count += apply_dependency(connection, item, now).map_err(|error| {
+                in_delta(error, || {
+                    format!("dependency {}->{}", item.source_ref, item.target_ref)
+                })
+            })?;
         }
     }
     counts.insert("dependency".into(), dependency_count);
