@@ -2591,6 +2591,21 @@ pub(crate) fn ground_continuity_confirmation(
     }
 }
 
+/// Real run 2026-11-25: a chapter was held for describing a lasting mark
+/// again. A state described again only holds the chapter when the rewrite was
+/// given that passage and left it.
+pub(crate) fn release_restated_states(blockers: &mut Vec<Value>, sent_to_rewrite: &[String]) {
+    blockers.retain(|finding| {
+        let proof = &finding["evidence"]["hardEvidence"];
+        let quote = finding["quote"].as_str().unwrap_or_default();
+        proof["relation"] != "COMPLETED_OUTCOME_REPLAYED"
+            || proof["replays"] != "STATE"
+            || sent_to_rewrite
+                .iter()
+                .any(|sent| overlapping_continuity_quote(sent, quote))
+    });
+}
+
 fn prior_chapter_number(evidence: &Value) -> Option<&Value> {
     evidence
         .get("priorChapter")
@@ -3292,6 +3307,27 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_state_described_again_holds_the_chapter_only_after_the_rewrite_left_it() {
+        let finding = |relation: &str, replays: &str| {
+            json!({"quote":"灰斑爬到第一指节。",
+                "evidence":{"hardEvidence":{"relation":relation,"replays":replays}}})
+        };
+        let held = |sent: &[&str]| {
+            let mut blockers = vec![
+                finding("COMPLETED_OUTCOME_REPLAYED", "STATE"),
+                finding("COMPLETED_OUTCOME_REPLAYED", "ACTION"),
+                finding("INCOMPATIBLE_STATES", "STATE"),
+            ];
+            let sent = sent.iter().map(ToString::to_string).collect::<Vec<_>>();
+            release_restated_states(&mut blockers, &sent);
+            blockers.len()
+        };
+        assert_eq!(held(&[]), 2);
+        assert_eq!(held(&["另一句。"]), 2);
+        assert_eq!(held(&["小指垂着。灰斑爬到第一指节。"]), 3);
+    }
 
     const RANGE: ChapterLengthRange = ChapterLengthRange {
         min: 2000,

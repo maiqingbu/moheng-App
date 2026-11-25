@@ -73,6 +73,13 @@
                   "INCOMPATIBLE_STATES"
                 ]
               },
+              "replays": {
+                "enum": [
+                  "ACTION",
+                  "DISCLOSURE",
+                  "STATE"
+                ]
+              },
               "priorOutcome": {
                 "type": "string",
                 "minLength": 4,

@@ -164,7 +164,9 @@ impl ProductionModelGateway for CraftGateway {
                 self.inject.get(renders).map_or("", String::as_str)
             );
             let body = format!("{}{motif}", response.output["body"].as_str().unwrap());
-            let filler = length.saturating_sub(body.chars().count() + 1);
+            let filler = length.saturating_sub(
+                ai_novel_production_system_core::chapter_length::character_count(&body) as usize,
+            );
             let filler = if self.unbroken_filler {
                 varied_prose(filler).replace('\n', "丁")
             } else {
@@ -343,8 +345,8 @@ fn ld4_a_cut_that_leaves_the_chapter_too_long_is_followed_by_one_more() {
     result.unwrap();
     let cut = gateway.inputs("CUT_CHAPTER");
     assert_eq!(cut.len(), 2);
-    // Ten sentences of 18 characters and the nine line breaks between them.
-    assert_eq!(cut[1]["currentChars"], 3411);
+    // Ten sentences of 18 characters.
+    assert_eq!(cut[1]["currentChars"], 3420);
     let committed = committed_word_count(&state, project_id, &chapter_id);
     assert!((2000..=3300).contains(&committed), "{committed}");
 }

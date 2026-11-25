@@ -511,7 +511,7 @@ impl CommitService {
                             .payload
                             .get("body")
                             .and_then(|value| value.as_str())
-                            .map(|body| body.chars().count() as i64)
+                            .map(crate::chapter_length::character_count)
                     })
                     .unwrap_or(0);
                 let updated = connection.execute(

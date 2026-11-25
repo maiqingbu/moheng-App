@@ -29,23 +29,22 @@ use std::thread;
 const NOW: &str = "2026-08-30T12:00:00Z";
 
 /// `length` characters of filler prose with no repeated phrase, so the
-/// writer's repetition check never fires on test bodies.
-/// Prose of `length` characters, none repeated, in paragraphs of 150
-/// (LD-2 rewrites a chapter with a paragraph over 300).
+/// writer's repetition check never fires on test bodies, in paragraphs of
+/// 150 (LD-2 rewrites a chapter with a paragraph over 300); line breaks are
+/// not counted.
 fn varied_prose(length: usize) -> String {
     (0..length)
-        .map(|n| {
-            if n % 150 == 149 {
-                '\n'
-            } else {
-                char::from_u32(0x4E00 + n as u32).unwrap()
-            }
+        .flat_map(|n| {
+            (n % 150 == 149)
+                .then_some('\n')
+                .into_iter()
+                .chain(char::from_u32(0x4E00 + n as u32))
         })
         .collect()
 }
 
 /// A scripted expansion for the provider fixtures. Each insertion starts
-/// after a numbered line and contributes two paragraph-break characters.
+/// after a numbered line.
 fn fixture_length_insertions(input: &Value, next_length: usize) -> Value {
     let current = input["currentChars"].as_u64().unwrap() as usize;
     let gap = next_length.saturating_sub(current).min(1800);
@@ -55,7 +54,7 @@ fn fixture_length_insertions(input: &Value, next_length: usize) -> Value {
     let mut cursor = current;
     let insertions = (0..gap.div_ceil(600))
         .map(|number| {
-            let length = (gap - number * 600).min(600).saturating_sub(2);
+            let length = (gap - number * 600).min(600);
             let text = (cursor..cursor + length)
                 .map(|offset| char::from_u32(0x4E00 + offset as u32).unwrap())
                 .collect::<String>();

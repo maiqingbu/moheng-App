@@ -568,3 +568,47 @@ fn vd1e_a_goal_close_to_a_recent_chapters_goal_is_sent_back() {
     let problems = plan_problems(&fresh, 6, &bible(), &ledger);
     assert!(!has(&problems, "目标几乎一样"), "{problems:?}");
 }
+
+/// Real run 2026-11-25: chapter 5 planned the port probe and the line drawn
+/// under B-4 that chapter 4 had just written.
+#[test]
+fn a_plan_near_the_last_two_chapters_goal_or_ending_is_sent_back() {
+    let mut earlier = plan()["craft"].clone();
+    earlier["chapterGoal"] = json!("沈砚用铜书签刮擦A7扫描仪读卡槽金属边缘，复现14.2Hz共振频率使设备短暂脱网，诱使林砚声端口暴露未覆写握手包，并确认该端口具备物理服务器直连权限；同时左手小指彻底失去形态，仅余灰斑轮廓在灯下泛银光。");
+    earlier["situationChange"]["after"] = json!("端口的物理直连权限被确认");
+    earlier["endHook"] = json!("沈砚把便签纸从口袋里掏出来，他用中指指尖在‘B-4’下方划了一道横线，青灰底色在灯下泛起一点银光，像档案袋封口");
+    let mut repeated = plan();
+    repeated["chapterGoal"] = json!("沈砚将旧MP4播放器接入A7扫描仪USB口，用铜书签锈蚀层刮下的铜绿作为导电介质伪造生物识别信号，成功触发林砚声端口的物理直连响应并捕获REDUNDANT-1指令哈希值；同时左手小指灰斑彻底固化为不可逆的银色金属质感，失去全部形态与触感；林砚声端口已两次响应其试探，清除协议的物理执行路径正式暴露。");
+    repeated["craft"]["endHook"] = json!("沈砚把便签纸摊在膝盖上，用中指在‘B-4’下方划了一道竖线。这一次，青灰底色没泛银光——因为他的中指指尖，刚刚开始出现第一道透明带。");
+    let latest = creation_ledger(&[(4, earlier.clone())], &bible());
+    let problems = plan_problems(&repeated, 5, &bible(), &latest);
+    assert!(has(&problems, "本章目标和第 4 章的太接近"), "{problems:?}");
+    assert!(has(&problems, "章末钩子和第 4 章的太接近"), "{problems:?}");
+
+    // Two chapters later the same ground may be covered again.
+    let mut between = plan()["craft"].clone();
+    between["chapterGoal"] = json!("周稚烧掉值班表");
+    between["situationChange"]["after"] = json!("值班表没了");
+    between["endHook"] = json!("周稚站在雨里等最后一班公交");
+    let mut second = between.clone();
+    second["chapterGoal"] = json!("陈默搬走硬盘");
+    second["situationChange"]["after"] = json!("硬盘搬走了");
+    second["endHook"] = json!("陈默锁上面馆的铁门");
+    let older = creation_ledger(&[(4, earlier), (5, between), (6, second)], &bible());
+    let problems = plan_problems(&repeated, 7, &bible(), &older);
+    assert!(!has(&problems, "太接近"), "{problems:?}");
+}
+
+/// People's names alone do not make two goals the same.
+#[test]
+fn goals_that_share_only_their_people_are_not_near() {
+    let mut earlier = plan()["craft"].clone();
+    earlier["chapterGoal"] = json!("陆照求陈师伯放行");
+    earlier["situationChange"]["after"] = json!("师伯点头");
+    earlier["endHook"] = json!("山门的铜铃响了");
+    let mut fresh = plan();
+    fresh["chapterGoal"] = json!("陆照替陈师伯守夜");
+    let ledger = creation_ledger(&[(4, earlier)], &bible());
+    let problems = plan_problems(&fresh, 5, &bible(), &ledger);
+    assert!(!has(&problems, "太接近"), "{problems:?}");
+}

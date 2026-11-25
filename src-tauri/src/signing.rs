@@ -778,11 +778,11 @@ fn deterministic_results(
             .all(|(index, chapter)| chapter.chapter_no == index as i64 + 1);
     let length_metrics = chapters
         .iter()
-        .map(|chapter| json!({"chapterNo":chapter.chapter_no,"titlePresent":!chapter.title.trim().is_empty(),"characters":chapter.body.chars().count()}))
+        .map(|chapter| json!({"chapterNo":chapter.chapter_no,"titlePresent":!chapter.title.trim().is_empty(),"characters":crate::chapter_length::character_count(&chapter.body)}))
         .collect::<Vec<_>>();
     let length_fail = !complete_chapters
         || chapters.iter().any(|chapter| {
-            let count = chapter.body.chars().count();
+            let count = crate::chapter_length::character_count(&chapter.body) as usize;
             chapter.title.trim().is_empty()
                 || !(min_characters..=OPENING_CHAPTER_MAX_CHARACTERS).contains(&count)
         });
@@ -1773,8 +1773,8 @@ pub fn execute_opening_evaluation_with_observer(
     let core_verdict = core_status(&items);
     let word_count = chapters
         .iter()
-        .map(|chapter| chapter.body.chars().count())
-        .sum::<usize>();
+        .map(|chapter| crate::chapter_length::character_count(&chapter.body))
+        .sum::<i64>() as usize;
     let matrix = platform_matrix(&items, &profiles, core_verdict, word_count);
     let overall = if missing_committed_canon {
         "NOT_VERIFIED"

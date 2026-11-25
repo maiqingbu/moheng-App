@@ -6,6 +6,7 @@
 //! fall inside it, allowing up to 10% above the maximum.
 
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChapterLengthRange {
@@ -152,18 +153,45 @@ pub fn work_platform(
     )
 }
 
-/// The count shown to the user as the chapter's word count.
+/// The count shown to the user as the chapter's word count: every character
+/// but line breaks and spaces (owner decision 2026-11-25).
 pub fn character_count(text: &str) -> i64 {
-    text.chars().count() as i64
+    text.chars()
+        .filter(|character| !character.is_whitespace())
+        .count() as i64
 }
+
+/// The telling pairs of each event in the plan's scenes, but for those of
+/// the names of the people there.
+pub(crate) fn planned_events(plan: &Value) -> Vec<BTreeSet<(char, char)>> {
+    use crate::chapter_craft::telling_pairs;
+    let craft = &plan["craft"];
+    let names = crate::craft_plan::scene_people(craft)
+        .filter_map(|person| person["name"].as_str())
+        .flat_map(telling_pairs)
+        .collect::<BTreeSet<_>>();
+    crate::craft_plan::scenes(craft)
+        .iter()
+        .filter_map(|scene| scene["events"].as_array())
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|event| &telling_pairs(event) - &names)
+        .collect()
+}
+
+/// How many telling pairs a sentence shares with a planned event it writes.
+const EVENT_PAIRS: usize = 3;
 
 /// LD-4: `body` shortened by deleting its sentences (numbered as in
 /// `chapter_craft::sentence_spans`) in the order `cut` names them, until
 /// it fits the accepted range. A cut is skipped when it would take
-/// the chapter below the minimum, when it is the last sentence (the
-/// planned ending), when it carries dialogue or connects nearby dialogue,
-/// or when the next sentence in the same paragraph refers back to its actor.
-pub fn cut_sentences(body: &str, cut: &[usize], range: ChapterLengthRange) -> String {
+/// the chapter below the minimum, or `can_cut_sentence` refuses it.
+pub(crate) fn cut_sentences(
+    body: &str,
+    cut: &[usize],
+    range: ChapterLengthRange,
+    events: &[BTreeSet<(char, char)>],
+) -> String {
     let spans = crate::chapter_craft::sentence_spans(body);
     let mut removed = vec![false; spans.len()];
     let mut shortened = body.to_string();
@@ -171,7 +199,7 @@ pub fn cut_sentences(body: &str, cut: &[usize], range: ChapterLengthRange) -> St
         if range.accepts(character_count(&shortened)) {
             break;
         }
-        if !can_cut_sentence(body, &spans, number) || removed[number] {
+        if !can_cut_sentence(body, &spans, number, events) || removed[number] {
             continue;
         }
         removed[number] = true;
@@ -185,17 +213,29 @@ pub fn cut_sentences(body: &str, cut: &[usize], range: ChapterLengthRange) -> St
     shortened
 }
 
-pub(crate) fn can_cut_sentence(body: &str, spans: &[(usize, usize)], number: usize) -> bool {
+/// Not the last sentence (the planned ending), not half of a line of
+/// dialogue, not one that writes a planned event, and not the opener that
+/// names who the next sentence's 他/她/它 is.
+pub(crate) fn can_cut_sentence(
+    body: &str,
+    spans: &[(usize, usize)],
+    number: usize,
+    events: &[BTreeSet<(char, char)>],
+) -> bool {
     let Some(&[(start, end), (next_start, next_end)]) =
         spans.get(number..).and_then(<[_]>::first_chunk::<2>)
     else {
         return false;
     };
     let sentence = &body[start..end];
-    let contains_dialogue = |&(start, end): &(usize, usize)| body[start..end].contains(['“', '”']);
-    let bridges_dialogue = spans[..number].iter().rev().take(2).any(contains_dialogue)
-        && spans[number + 1..].iter().take(2).any(contains_dialogue);
-    if sentence.contains(['“', '”']) || bridges_dialogue {
+    if sentence.matches('“').count() != sentence.matches('”').count() {
+        return false;
+    }
+    let pairs = crate::chapter_craft::telling_pairs(sentence);
+    if events
+        .iter()
+        .any(|event| event.intersection(&pairs).count() >= EVENT_PAIRS)
+    {
         return false;
     }
     let same_paragraph = !body[end..next_start].contains('\n');
@@ -270,7 +310,7 @@ mod tests {
     #[test]
     fn ld4_a_long_chapter_loses_the_chosen_sentences_in_order_until_it_fits_the_accepted_range() {
         let range = ChapterLengthRange { min: 50, max: 70 };
-        let cut = cut_sentences(&lines_of_ten(10), &[2, 5, 7, 0, 1, 3], range);
+        let cut = cut_sentences(&lines_of_ten(10), &[2, 5, 7, 0, 1, 3], range, &[]);
         assert_eq!(
             cut,
             "第00句话写在这里。\n第01句话写在这里。\n第03句话写在这里。\n第04句话写在这里。\n第06句话写在这里。\n第08句话写在这里。\n第09句话写在这里。"
@@ -287,7 +327,7 @@ mod tests {
         let max = length * 10 / 11;
         let range = ChapterLengthRange { min: max - 30, max };
         assert!(length > range.ceiling());
-        let shortened = cut_sentences(&body, &[0, 10], range);
+        let shortened = cut_sentences(&body, &[0, 10], range, &[]);
         assert!(range.accepts(character_count(&shortened)));
         assert!(shortened.contains("一枚青丸滚出来"), "{shortened}");
     }
@@ -297,12 +337,12 @@ mod tests {
         let body = "第00句话写在这里。\n“你先走。我留下。”\n第02句话写在这里。";
         let range = ChapterLengthRange { min: 5, max: 10 };
         assert_eq!(
-            cut_sentences(body, &[3, 1, 2, 0], range),
+            cut_sentences(body, &[3, 1, 2, 0], range, &[]),
             "“你先走。我留下。”\n第02句话写在这里。"
         );
         let range = ChapterLengthRange { min: 100, max: 105 };
         assert_eq!(
-            cut_sentences(&lines_of_ten(10), &[0, 1], range),
+            cut_sentences(&lines_of_ten(10), &[0, 1], range, &[]),
             lines_of_ten(10)
         );
     }
@@ -312,7 +352,7 @@ mod tests {
         let body = "第00句话写在这里。\n\n第01句话写在这里。\n\n第02句话写在这里。";
         let range = ChapterLengthRange { min: 5, max: 10 };
         assert_eq!(
-            cut_sentences(body, &[1], range),
+            cut_sentences(body, &[1], range, &[]),
             "第00句话写在这里。\n\n第02句话写在这里。"
         );
     }
@@ -320,21 +360,32 @@ mod tests {
     #[test]
     fn a_cut_keeps_the_scene_opener_that_identifies_the_next_sentences_actor() {
         let body = "山脚豆腐坊的檐下挂着竹帘，陈婆正把一板豆干从屉里起出来，热气腾腾。她看见陆照，没说话。\n\n檐下的水慢慢滴了下来。\n\n陆照接过碟子。";
-        let range = ChapterLengthRange { min: 20, max: 58 };
-        let shortened = cut_sentences(body, &[0, 2], range);
+        let range = ChapterLengthRange { min: 20, max: 54 };
+        let shortened = cut_sentences(body, &[0, 2], range, &[]);
         assert!(shortened.starts_with("山脚豆腐坊"), "{shortened}");
         assert!(!shortened.contains("水慢慢滴"), "{shortened}");
     }
 
+    /// Real run 2026-11-25: with dialogue protected, only actions could be
+    /// cut, and the chapter lost the scene its own dialogue speaks of.
     #[test]
-    fn round56_a_cut_preserves_the_question_answer_and_speaker_transition() {
-        let body = "柳医修问：“你今年多大？”\n\n陆照没答。\n\n“阿沅。”\n\n“嗯。”\n\n檐下的雪慢慢化了。\n\n陆照合上断杵。";
-        let range = ChapterLengthRange { min: 5, max: 12 };
-        let shortened = cut_sentences(body, &[0, 1, 2, 3, 4], range);
-        assert!(shortened.contains("你今年多大？"));
-        assert!(shortened.contains("陆照没答。"));
-        assert!(shortened.contains("“阿沅。”\n\n“嗯。”"));
-        assert!(!shortened.contains("檐下的雪慢慢化了。"));
+    fn a_cut_keeps_the_planned_event_and_may_take_spare_dialogue() {
+        let body =
+            "“沈哥，早。”\n“早。”\n书签尖端沿纹路向左疾速刮擦。\n“A7掉线了。”\n“那是你刚才刮的。”";
+        let range = ChapterLengthRange { min: 5, max: 30 };
+        let events = planned_events(&json!({"craft":{"scenes":[
+            {"events":["沈砚手腕下压，书签尖端沿纹路向左疾速刮擦读卡槽"]}
+        ]}}));
+        let shortened = cut_sentences(body, &[2, 0, 1], range, &events);
+        assert_eq!(
+            shortened,
+            "书签尖端沿纹路向左疾速刮擦。\n“A7掉线了。”\n“那是你刚才刮的。”"
+        );
+    }
+
+    #[test]
+    fn a_chapters_length_leaves_out_line_breaks_and_spaces() {
+        assert_eq!(character_count("第一句。\n\n　　第二句。 "), 8);
     }
 
     #[test]
@@ -443,7 +494,7 @@ mod tests {
         assert!(range.accepts(2000));
         assert!(range.accepts(3300));
         assert!(!range.accepts(3301));
-        assert_eq!(character_count("林舟\n推门"), 5);
+        assert_eq!(character_count("林舟\n推门"), 4);
     }
 
     #[test]

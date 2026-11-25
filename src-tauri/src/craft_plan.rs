@@ -275,11 +275,11 @@ pub(crate) fn event_count(scene: &Value) -> usize {
     scene["events"].as_array().map_or(0, Vec::len)
 }
 
-fn scenes(craft: &Value) -> &[Value] {
+pub(crate) fn scenes(craft: &Value) -> &[Value] {
     craft["scenes"].as_array().map(Vec::as_slice).unwrap_or(&[])
 }
 
-fn scene_people(craft: &Value) -> impl Iterator<Item = &Value> {
+pub(crate) fn scene_people(craft: &Value) -> impl Iterator<Item = &Value> {
     scenes(craft)
         .iter()
         .flat_map(|scene| scene["people"].as_array().into_iter().flatten())
@@ -428,6 +428,20 @@ pub(crate) fn goals_overlap(earlier: &str, goal: &BTreeSet<(char, char)>) -> boo
     crate::chapter_craft::pairs_overlap(&crate::chapter_craft::telling_pairs(earlier), goal, 6)
 }
 
+/// How many of the latest chapters a plan may not nearly repeat.
+const NEAR_CHAPTERS: usize = 2;
+/// How many telling pairs two passages share before their overlap counts, so
+/// the same names alone never do.
+const NEAR_PAIRS: usize = 8;
+
+/// Whether `current` covers much the same ground as `earlier`: 3 in 10 of the
+/// telling pairs of the shorter one, and at least `NEAR_PAIRS` of them.
+fn nearly_repeats(earlier: &str, current: &BTreeSet<(char, char)>) -> bool {
+    let earlier = crate::chapter_craft::telling_pairs(earlier);
+    earlier.intersection(current).count() >= NEAR_PAIRS
+        && crate::chapter_craft::pairs_overlap(&earlier, current, 3)
+}
+
 /// A full goal can look different after the planner appends a second beat.
 fn shared_goal_passage(earlier: &str, current: &str) -> Option<String> {
     let chars = earlier.chars().collect::<Vec<_>>();
@@ -542,6 +556,7 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
         .unwrap_or(&[]);
     let goal_text = text(&plan["chapterGoal"]);
     let goal = crate::chapter_craft::telling_pairs(goal_text);
+    let near = &endings[endings.len().saturating_sub(NEAR_CHAPTERS)..];
     for ending in &endings[endings.len().saturating_sub(RECENT_GOALS)..] {
         let earlier = text(&ending["goal"]);
         if goals_overlap(earlier, &goal) {
@@ -553,6 +568,22 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
         } else if let Some(phrase) = shared_goal_passage(earlier, goal_text) {
             problems.push(format!(
                 "本章目标可能重复第 {} 章的动作「{phrase}」。核对该章已提交的正文，承接已经发生的结果；若确有必要再次行动，写清状态怎样改变以及这次的不同后果",
+                ending["chapter"],
+            ));
+        } else if near.contains(ending) && nearly_repeats(earlier, &goal) {
+            problems.push(format!(
+                "本章目标和第 {} 章的太接近（{earlier}）：那一章做到的当作已经发生，这一章写它带来的后果或下一步，不再做一次同类的试探、确认或取证",
+                ending["chapter"],
+            ));
+        }
+    }
+    let hook_text = text(&craft["endHook"]);
+    let hook = crate::chapter_craft::telling_pairs(hook_text);
+    for ending in near {
+        let earlier = text(&ending["endHook"]);
+        if earlier != hook_text && nearly_repeats(earlier, &hook) {
+            problems.push(format!(
+                "章末钩子和第 {} 章的太接近（{earlier}）：换一个动作、物件和画面，落在这一章新发生的事上",
                 ending["chapter"],
             ));
         }

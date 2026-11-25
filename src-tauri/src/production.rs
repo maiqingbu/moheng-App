@@ -1099,6 +1099,33 @@ fn fits_before_final_evidence(used: i64, limit: i64, reserved: i64, proposed: i6
     limit.saturating_sub(used) >= reserved + proposed * RUNS_PER_REVIEW_STEP
 }
 
+/// The runs kept for the required steps after each point of a chapter, one
+/// each (2026-11-25: two each left the rewrite no room in any chapter).
+struct ReservedRuns {
+    /// Picking the main event.
+    event: i64,
+    /// That, and verifying the active stage step.
+    outcome: i64,
+    /// Those, and the audit (an opening's also answers its feedback).
+    submission: i64,
+    /// Those, and confirming what the rewrite left.
+    polish: i64,
+}
+
+impl ReservedRuns {
+    fn new(has_stage_step: bool, opening: bool) -> Self {
+        let event = 1;
+        let outcome = event + i64::from(has_stage_step);
+        let submission = outcome + 1 + i64::from(opening);
+        Self {
+            event,
+            outcome,
+            submission,
+            polish: submission + 1,
+        }
+    }
+}
+
 /// Craft rule (2026-10-17): a plan rejected for a reason the planner can fix
 /// (see `chapter_craft::plan_feedback`) is planned again with the reason, up
 /// to `PLAN_FEEDBACK_ROUNDS` times (owner decision 2026-10-25); the rejected
@@ -3389,14 +3416,7 @@ fn run_chapter_production_inner(
             connection, gateway, profile, &spec, capability, input, &now,
         )
     };
-    // Main event selection has at most two attempts. Keep its allowance
-    // and the active step's first validated reply ahead of optional work.
-    let event_runs = RUNS_PER_REVIEW_STEP;
-    let outcome_runs = event_runs + RUNS_PER_REVIEW_STEP * i64::from(stage_step.is_some());
-    let submission_runs = outcome_runs
-        + RUNS_PER_REVIEW_STEP
-        + RUNS_PER_REVIEW_STEP * i64::from(execution_mode == "OPENING_BOOTSTRAP");
-    let final_runs = submission_runs + RUNS_PER_REVIEW_STEP;
+    let reserved = ReservedRuns::new(stage_step.is_some(), execution_mode == "OPENING_BOOTSTRAP");
     let has_review_room = |reserved, proposed| {
         if !gateway.selects_main_event() {
             return Ok(true);
@@ -3416,7 +3436,7 @@ fn run_chapter_production_inner(
         if rechecking_saved_prose {
             Ok(false)
         } else {
-            has_review_room(final_runs, proposed)
+            has_review_room(reserved.polish, proposed)
         }
     };
     use crate::chapter_length::character_count;
@@ -3745,6 +3765,7 @@ fn run_chapter_production_inner(
                 return Err("B08_RENDER_REPEATED_PHRASES".into());
             }
         } else {
+            let events = crate::chapter_length::planned_events(&plan_payload);
             // LD-4 (real run 2026-11-01): asked to compress, the writer cut
             // 0-10% of chapters a third too long; it now only chooses the
             // sentences, and they are cut here until the length is accepted.
@@ -3759,8 +3780,8 @@ fn run_chapter_production_inner(
                 let sentences = spans.iter()
                     .enumerate()
                     .map(|(number, &(from, to))| json!({
-                        "n":number,"chars":body[from..to].chars().count(),"text":&body[from..to],
-                        "canCut":crate::chapter_length::can_cut_sentence(&body, &spans, number)
+                        "n":number,"chars":character_count(&body[from..to]),"text":&body[from..to],
+                        "canCut":crate::chapter_length::can_cut_sentence(&body, &spans, number, &events)
                     }))
                     .collect::<Vec<_>>();
                 let (run_id, outcome) = craft_call(
@@ -3786,7 +3807,7 @@ fn run_chapter_production_inner(
                     .filter_map(Value::as_u64)
                     .map(|number| number as usize)
                     .collect::<Vec<_>>();
-                body = crate::chapter_length::cut_sentences(&body, &cut, length_range);
+                body = crate::chapter_length::cut_sentences(&body, &cut, length_range, &events);
                 if duplicate_in_chapter(&body).is_none() {
                     save_prose("RENDER", &body, &prose_run_ids, &craft_skills)?;
                 }
@@ -3803,7 +3824,7 @@ fn run_chapter_production_inner(
     // the final check and up to two confirmations before reopening that work.
     let review_due = gateway.reviews_chapter_prose() && !review_resumed;
     let review_has_room =
-        !rechecking_saved_prose || (review_due && has_review_room(submission_runs, 3)?);
+        !rechecking_saved_prose || (review_due && has_review_room(reserved.submission, 3)?);
     if review_due && review_has_room {
         let mut checked_bodies = BTreeMap::new();
         let mut craft_step = |suffix: &str,
@@ -4110,6 +4131,12 @@ fn run_chapter_production_inner(
             }
             findings
         };
+        let quotes_of = |findings: &[Value]| {
+            findings
+                .iter()
+                .filter_map(|finding| finding["quote"].as_str().map(ToOwned::to_owned))
+                .collect::<Vec<_>>()
+        };
         let narrative_findings_before =
             narrative_findings(&narrative_issues, &body, &evidence_history);
         // A sentence the check flagged is fixed for that reason first; a
@@ -4216,6 +4243,7 @@ fn run_chapter_production_inner(
         let mut in_range = true;
         let mut repeats_grew = false;
         let mut rewrite_error = None;
+        let mut sent_to_rewrite = Vec::new();
         if (!to_fix.is_empty() || !repeated.is_empty()) && room_for_polish(2)? {
             craft_signals.findings = to_fix
                 .iter()
@@ -4242,6 +4270,9 @@ fn run_chapter_production_inner(
                 rewrite_error = Some(error);
                 json!({"edits":[]})
             });
+            if rewrite_error.is_none() {
+                sent_to_rewrite.extend(quotes_of(&narrative_findings_before));
+            }
             let (revised, count) = apply_unique_edits(&body, &rewrite, &additions);
             let revised = crate::chapter_craft::normalize_typography(revised.trim());
             let length = character_count(&revised);
@@ -4397,6 +4428,7 @@ fn run_chapter_production_inner(
                 None,
             )? {
                 Ok(rewrite) => {
+                    sent_to_rewrite.extend(quotes_of(&narrative_left));
                     let (revised, count) = apply_unique_edits(&body, &rewrite, &[]);
                     let revised = crate::chapter_craft::normalize_typography(revised.trim());
                     if count > 0
@@ -4490,6 +4522,20 @@ fn run_chapter_production_inner(
                     input["stageStep"] = stage.input();
                 }
                 let profile = gateway.resolve_step_profile("CONFIRM_NARRATIVE_CONTINUITY")?;
+                let ground = |review: &Value, candidates: &[Value]| {
+                    let mut confirmation = crate::chapter_craft::ground_continuity_confirmation(
+                        review,
+                        candidates,
+                        &evidence_history,
+                        &body,
+                        chapter_number,
+                    );
+                    crate::chapter_craft::release_restated_states(
+                        &mut confirmation.blockers,
+                        &sent_to_rewrite,
+                    );
+                    confirmation
+                };
                 match craft_step(
                     "continuity-confirm",
                     "CONFIRM_NARRATIVE_CONTINUITY",
@@ -4498,17 +4544,11 @@ fn run_chapter_production_inner(
                     None,
                 )? {
                     Ok(review) => {
-                        let mut confirmation = crate::chapter_craft::ground_continuity_confirmation(
-                            &review,
-                            &candidates,
-                            &evidence_history,
-                            &body,
-                            chapter_number,
-                        );
+                        let mut confirmation = ground(&review, &candidates);
                         if confirmation.blockers.is_empty()
                             && !confirmation.needs_evidence.is_empty()
                         {
-                            if has_review_room(submission_runs, 1)? {
+                            if has_review_room(reserved.submission, 1)? {
                                 let retry_candidates = candidates
                                     .iter()
                                     .filter(|candidate| {
@@ -4530,14 +4570,7 @@ fn run_chapter_production_inner(
                                     None,
                                 )? {
                                     Ok(rechecked) => {
-                                        let corrected =
-                                            crate::chapter_craft::ground_continuity_confirmation(
-                                                &rechecked,
-                                                &retry_candidates,
-                                                &evidence_history,
-                                                &body,
-                                                chapter_number,
-                                            );
+                                        let corrected = ground(&rechecked, &retry_candidates);
                                         confirmation.blockers = corrected.blockers;
                                         confirmation.dismissals.extend(corrected.dismissals);
                                     }
@@ -4920,7 +4953,8 @@ fn run_chapter_production_inner(
                     | "B08_RELATION_IDENTITY_CONFLICT"
             ) || error.starts_with("B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS")
         });
-    let audit_feedback_deferred = audit_feedback_requested && !has_review_room(outcome_runs, 1)?;
+    let audit_feedback_deferred =
+        audit_feedback_requested && !has_review_room(reserved.outcome, 1)?;
     let checked = match checked {
         Err(error) if audit_feedback_requested && !audit_feedback_deferred => {
             let rerun_id = StableIdentityFactory::from_command(
@@ -5106,7 +5140,8 @@ fn run_chapter_production_inner(
         .into_iter()
         .enumerate()
         {
-            if index > 0 && !has_review_room(if needs_main_event { event_runs } else { 0 }, 1)? {
+            if index > 0 && !has_review_room(if needs_main_event { reserved.event } else { 0 }, 1)?
+            {
                 hold_back(
                     &mut audit_payload,
                     [json!({
@@ -5846,7 +5881,7 @@ fn run_chapter_production_inner(
             }));
         }
     }
-    let final_payload = json!({"payloadSchema":"final-chapter.r1","chapterId":chapter_id,"body":candidate.payload["body"],"bodyDigest":candidate.payload["bodyDigest"],"candidateRef":candidate_ref.clone(),"chapterPlanRef":plan_ref.clone(),"contextManifestRef":context_ref.clone(),"auditRef":reference(&audit),"qualityReportRef":Value::Null,"tasteProfileRef":Value::Null,"wordCount":candidate.payload["body"].as_str().map(|s| s.chars().count()).unwrap_or(0),"stateDigest":state_digest,"validatedEvidence":evidence_records,"validatedObligationEvidence":obligation_evidence_records,"newResponsibilityEvidence":new_responsibility_evidence});
+    let final_payload = json!({"payloadSchema":"final-chapter.r1","chapterId":chapter_id,"body":candidate.payload["body"],"bodyDigest":candidate.payload["bodyDigest"],"candidateRef":candidate_ref.clone(),"chapterPlanRef":plan_ref.clone(),"contextManifestRef":context_ref.clone(),"auditRef":reference(&audit),"qualityReportRef":Value::Null,"tasteProfileRef":Value::Null,"wordCount":candidate.payload["body"].as_str().map_or(0, crate::chapter_length::character_count),"stateDigest":state_digest,"validatedEvidence":evidence_records,"validatedObligationEvidence":obligation_evidence_records,"newResponsibilityEvidence":new_responsibility_evidence});
     let mut proof_sources = BTreeMap::new();
     if let Some(result) = &verified_step {
         for source in result
@@ -10021,12 +10056,39 @@ mod tests {
         assert!(reusable_continuity_sources(&checkpoint, true).is_none());
     }
 
+    /// Real run 2026-11-25: chapters planned in three tries had used 6 of 16
+    /// runs when the rewrite came up, and it never ran.
     #[test]
-    fn optional_polish_leaves_attempts_for_its_recheck_and_final_evidence() {
-        assert!(!fits_before_final_evidence(5, 16, 8, 2));
-        assert!(fits_before_final_evidence(4, 16, 8, 2));
-        assert!(!fits_before_final_evidence(11, 16, 4, 1));
-        assert!(fits_before_final_evidence(10, 16, 4, 1));
+    fn a_chapter_planned_in_three_tries_still_gets_its_rewrite() {
+        for (stage_step, opening) in [(true, false), (false, true)] {
+            let reserved = ReservedRuns::new(stage_step, opening);
+            assert!(fits_before_final_evidence(6, 16, reserved.polish, 2));
+            assert!(!fits_before_final_evidence(9, 16, reserved.polish, 2));
+        }
+    }
+
+    #[test]
+    fn a_step_keeps_one_run_for_every_required_step_after_it() {
+        let long_form = ReservedRuns::new(true, false);
+        assert_eq!(
+            (
+                long_form.event,
+                long_form.outcome,
+                long_form.submission,
+                long_form.polish
+            ),
+            (1, 2, 3, 4)
+        );
+        let opening = ReservedRuns::new(false, true);
+        assert_eq!(
+            (
+                opening.event,
+                opening.outcome,
+                opening.submission,
+                opening.polish
+            ),
+            (1, 1, 3, 4)
+        );
     }
 
     #[test]

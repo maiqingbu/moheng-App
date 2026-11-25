@@ -65,7 +65,9 @@ impl ProductionModelGateway for LengthGateway {
                 return Ok(response);
             }
             let body = response.output["body"].as_str().unwrap().to_string();
-            let filler = length.saturating_sub(body.chars().count() + 1);
+            let filler = length.saturating_sub(
+                ai_novel_production_system_core::chapter_length::character_count(&body) as usize,
+            );
             response.output["body"] = json!(format!("{body}\n{}", varied_prose(filler)));
         }
         Ok(response)

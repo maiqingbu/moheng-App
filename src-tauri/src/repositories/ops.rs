@@ -1929,7 +1929,9 @@ impl ChapterHistory {
             .iter()
             .zip(&self.bodies)
             .map(|(chapter, body)| {
-                let excerpt = body.chars().take(MAX_BODY_CHARS).collect::<String>();
+                // The end is what the next chapter continues from.
+                let dropped = body.chars().count().saturating_sub(MAX_BODY_CHARS);
+                let excerpt = body.chars().skip(dropped).collect::<String>();
                 json!({"chapterNo":chapter["chapterNo"],"body":excerpt,
                        "truncated":excerpt.len() < body.len()})
             })

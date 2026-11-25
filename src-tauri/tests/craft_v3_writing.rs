@@ -102,6 +102,18 @@ fn long_body(chapter: usize) -> String {
     lines.join("\n")
 }
 
+/// The start of `text` holding `length` characters, line breaks not counted.
+fn counted(text: &str, length: usize) -> String {
+    let mut left = length;
+    text.chars()
+        .take_while(|character| {
+            let keep = left > 0;
+            left -= usize::from(keep && !character.is_whitespace());
+            keep
+        })
+        .collect()
+}
+
 impl ProductionModelGateway for CraftGateway {
     fn selects_main_event(&self) -> bool {
         self.selects_event
@@ -490,7 +502,7 @@ const R65_DUPLICATED_SPAN: &str = "他继续向上，每一步踏响都比前一
 #[test]
 fn second_length_adjustment_with_signing_length_repeat_never_reaches_audit() {
     let chapters = long_body(1);
-    let short = chapters.chars().take(1450).collect::<String>();
+    let short = counted(&chapters, 1450);
     let first = format!("{short}\n{R65_DUPLICATED_SPAN}。");
     let second = json!({"insertions":[
         {"afterSentence":0,"text":format!("{R65_DUPLICATED_SPAN}；他忽然开口。")}
@@ -546,11 +558,7 @@ fn a_clean_second_adjustment_uses_the_original_body_after_a_duplicate_reply() {
 fn an_opening_patch_keeps_independent_insertions_when_one_repeats_a_long_span() {
     let base = format!(
         "{R65_DUPLICATED_SPAN}。\n{}",
-        long_body(1)
-            .chars()
-            .take(1400)
-            .collect::<String>()
-            .trim_end()
+        counted(&long_body(1), 1400).trim_end()
     );
     let first = "巷口的自行车铃响了两声。掌柜拿起账封对着黄灯，印鉴右下角有一道细缺。他从柜脚抽出铺契，叫账房比对落款。";
     let second = "吴嫂在隔壁灶台找到还热的铜钥匙。她绕过拴狗的柱子，把钥匙藏进装豆子的布袋，沿河堤送给守船的少年。";
@@ -755,7 +763,7 @@ fn check_opening_expansion_does_not_add_a_copy(original_uses: usize) {
     let repeat = "粉笔灰簌簌落在酱渍上，那点褐色竟微微发亮，仿佛被唤醒的微弱回响。";
     let draft = format!(
         "{}\n{}林满锁上铺门。",
-        long_body(1).chars().take(1490).collect::<String>(),
+        counted(&long_body(1), 1490),
         format!("{repeat}\n").repeat(original_uses)
     );
     let clean = concat!(
@@ -830,13 +838,8 @@ fn check_opening_expansion_does_not_add_a_copy(original_uses: usize) {
 
 #[test]
 fn an_opening_retry_chain_reuses_the_plan_and_inserts_only_the_missing_prose() {
-    let draft = long_body(1)
-        .chars()
-        .take(1743)
-        .collect::<String>()
-        .trim_end()
-        .to_owned();
-    let draft_chars = draft.chars().count();
+    let draft_chars = 1743;
+    let draft = counted(&long_body(1), draft_chars).trim_end().to_owned();
     let expected_error = format!("B08_RENDER_LENGTH_OUT_OF_RANGE:{draft_chars}:1800-2200");
     let addition = "林满用袖口遮住桌沿的账册，把压在册底的欠条推到掌柜面前。掌柜伸手想拿，他按住欠条一角，指着下面那道墨印，等着对方当众解释这笔账。";
     let unusable = json!({"insertions":[{"afterSentence":99999,"text":addition}]});
@@ -929,8 +932,7 @@ fn an_opening_retry_chain_reuses_the_plan_and_inserts_only_the_missing_prose() {
 
 #[test]
 fn a_292_character_gap_is_filled_without_rewriting_the_saved_story() {
-    let draft = long_body(1).chars().take(1508).collect::<String>();
-    assert_eq!(draft.chars().count(), 1508);
+    let draft = counted(&long_body(1), 1508);
     let first = "掌柜伸手想拿货单，林满先把木尺横在纸上。他把仓门钥匙和交接册一并推到桌边，请旁边的账房看两处签记。账房捻起页角，发现刻在钥匙柄上的花纹在交接册里也有一份。他没再问仓门是谁开的，转身去叫那天当值的人。林满收起木尺，把空出来的那把椅子往桌前拖了一步。";
     let second = "老董擦了擦茶碗上的水，端起来又放下。他说那晚天黑得早，码头的人收摊之前，他在屋檐下等了半个时辰。林满没有追问名字，先请他指出交货的人从哪边过来。老董抬起手，指向关得严严的侧门。账房伸手一摸门横木，从沟里捻出一截还沾着浆糊的封纸。";
     let third = "掌柜把手伸回袖子，说愿意去后院取存根。林满给他让出过道，自己留在桌边，叫账房看着留下的两件东西。等掌柜掀帘出去，他才把那截封纸压在册子下面。封纸上有一处印泥没干透，他用空白的纸角轻轻沾了一下，把印出来的形状留给账房看。";
@@ -1634,7 +1636,7 @@ fn round61_confirmation_does_not_spend_the_reserved_submission_allowance() {
         .unwrap();
     connection
         .execute(
-            "UPDATE chapter_production_budgets SET hard_max_model_runs=10 WHERE project_id=?1
+            "UPDATE chapter_production_budgets SET hard_max_model_runs=9 WHERE project_id=?1
          AND chapter_id=?2",
             libsql_rusqlite::params![project_id, chapter_id],
         )
