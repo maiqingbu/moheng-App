@@ -1639,7 +1639,7 @@ pub fn execute_opening_evaluation_with_observer(
         let mut first_checked = Vec::new();
         let (outcome, accepted_run_id) = crate::production::resend_once_on_invalid_json(
             &spec,
-            |spec, off_spec| {
+            |spec, resend| {
                 if spec.attempt_no > 1 {
                     DurableJobService::reopen_b02_phase_job_for_resend(
                         &handle,
@@ -1651,7 +1651,7 @@ pub fn execute_opening_evaluation_with_observer(
                     .map_err(|error| error.to_string())?;
                 }
                 let mut input = input.clone();
-                if let Some(error) = off_spec {
+                if let crate::production::Resend::OffSpec(error) = resend {
                     let instruction = match error.split_once(ITEM_RESULTS_ERROR) {
                     Some((_, items)) => format!(
                         "上一次回复里这些评估项缺失、重复或原文不可核验：{items}。逐项检查完整编号清单，每项刚好一次。引用使用所选章节实际给出的句子编号，返回完整回复。"

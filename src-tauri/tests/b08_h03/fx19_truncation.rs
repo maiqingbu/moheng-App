@@ -5,11 +5,16 @@ use super::*;
 #[derive(Default)]
 struct TruncatedOnceAuditGateway {
     audits: AtomicUsize,
+    audit_inputs: std::sync::Mutex<Vec<Value>>,
 }
 
 impl ProductionModelGateway for TruncatedOnceAuditGateway {
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
-        if capability == "AUDIT_EXTRACT" && self.audits.fetch_add(1, Ordering::SeqCst) == 0 {
+        let first_audit = capability == "AUDIT_EXTRACT" && {
+            self.audit_inputs.lock().unwrap().push(input.clone());
+            self.audits.fetch_add(1, Ordering::SeqCst) == 0
+        };
+        if first_audit {
             return Ok(ProductionModelResponse {
                 output: Value::Null,
                 raw_response: Some(
@@ -39,6 +44,15 @@ fn fx19_reply_cut_off_mid_json_is_resent_once_and_the_chapter_commits() {
     }))
     .unwrap();
     assert_eq!(gateway.audits.load(Ordering::SeqCst), 2);
+    // Real run round 12: resent as it was, a reply cut off at the output
+    // limit was cut off again five times; the resend now says why.
+    let inputs = gateway.audit_inputs.lock().unwrap();
+    assert!(inputs[0].get("outputFeedback").is_none());
+    assert!(inputs[1]["outputFeedback"]["instruction"]
+        .as_str()
+        .unwrap()
+        .contains("截断"));
+    drop(inputs);
     let connection = state.manager.open(project_id, "FX19", NOW).unwrap();
     let statuses = connection
         .prepare("SELECT status FROM model_runs WHERE project_id=?1 AND capability='AUDIT_EXTRACT' ORDER BY attempt_no")

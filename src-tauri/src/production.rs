@@ -1037,13 +1037,23 @@ pub(crate) fn execute_production_model_with_profile_recorded(
     input: Value,
     now: &str,
 ) -> Result<(String, ModelRunOutcome), String> {
-    resend_once_on_invalid_json(spec, |spec, off_spec| {
+    resend_once_on_invalid_json(spec, |spec, resend| {
         let mut input = input.clone();
-        if let Some(error) = off_spec {
-            input["outputFeedback"] = json!({
-                "rejectedFor":error,
-                "instruction":"上一次回复不符合输出规范：按 rejectedFor 列出的问题修正，返回完整回复。"
-            });
+        let feedback = match resend {
+            Resend::OffSpec(error) => Some((
+                error,
+                "上一次回复不符合输出规范：按 rejectedFor 列出的问题修正，返回完整回复。",
+            )),
+            // Real run round 12: an audit listing one item a sentence was
+            // cut off at the output limit, resent as it was, and cut off again.
+            Resend::Unreadable => Some((
+                "P01_MODEL_JSON_INVALID",
+                "上一次回复不是完整的 JSON，多半是太长被截断了。重新返回完整回复：每个列表只留必需的条目，宁少勿多，不要一句正文对应一条。",
+            )),
+            Resend::First => None,
+        };
+        if let Some((rejected_for, instruction)) = feedback {
+            input["outputFeedback"] = json!({"rejectedFor":rejected_for,"instruction":instruction});
         }
         let outcome = execute_production_model_with_profile_once(
             connection, gateway, profile, spec, capability, input, now,
@@ -1052,20 +1062,31 @@ pub(crate) fn execute_production_model_with_profile_recorded(
     })
 }
 
+/// Which call of a step `resend_once_on_invalid_json` makes.
+pub(crate) enum Resend<'a> {
+    First,
+    /// The first reply was not valid JSON (cut off or malformed).
+    Unreadable,
+    /// The first reply was off its step's output spec, as this says.
+    OffSpec(&'a str),
+}
+
 /// Runs `run` with `spec`; a reply that is not valid JSON (FX-19) or not on
-/// its step's output spec (LD-1) is resent once as a new model run, the
-/// latter with what was off the spec; the bad run stays recorded as failed.
-pub fn resend_once_on_invalid_json<T>(
+/// its step's output spec (LD-1) is resent once as a new model run, told
+/// which; the bad run stays recorded as failed.
+pub(crate) fn resend_once_on_invalid_json<T>(
     spec: &ModelRunSpec,
-    mut run: impl FnMut(&ModelRunSpec, Option<&str>) -> Result<T, String>,
+    mut run: impl FnMut(&ModelRunSpec, Resend<'_>) -> Result<T, String>,
 ) -> Result<T, String> {
-    match run(spec, None) {
-        Err(error) if error.contains("P01_MODEL_JSON_INVALID:") => {
-            run(&follow_up_spec(spec, ":truncated-resend", 1)?, None)
-        }
-        Err(error) if error.contains(crate::model_output::OFF_SPEC) => {
-            run(&follow_up_spec(spec, ":off-spec-resend", 1)?, Some(&error))
-        }
+    match run(spec, Resend::First) {
+        Err(error) if error.contains("P01_MODEL_JSON_INVALID:") => run(
+            &follow_up_spec(spec, ":truncated-resend", 1)?,
+            Resend::Unreadable,
+        ),
+        Err(error) if error.contains(crate::model_output::OFF_SPEC) => run(
+            &follow_up_spec(spec, ":off-spec-resend", 1)?,
+            Resend::OffSpec(&error),
+        ),
         result => result,
     }
 }
@@ -5049,7 +5070,7 @@ fn run_chapter_production_inner(
                 "unlocatableQuotes":unlocatable_audit_quotes(&raw_audit, &body),
                 "unboundCitations":normalize_audit_model_output(raw_audit.clone(), &body)["normalization"]["unboundCitations"].take(),
                 "incompleteCandidates":incomplete_audit_candidates(&raw_audit),
-                "instruction":"上次提取不完整：unboundCitations 中的条目指认的句子（sentence）或引文和条目内容对不上，unlocatableQuotes 中的引文在正文中找不到，incompleteCandidates 中的条目缺少必填字段或 evidence。请只修正这些条目：补全缺的字段，evidence.sentence 改为 bodySentences 中真正写到这件事的那一句的序号；找不到这样一句的条目直接删掉。其余条目照上次返回，不要新增条目，canonCandidates 仍不超过 12 条。"
+                "instruction":"上次提取不完整：unboundCitations 中的条目指认的句子（sentence）或引文和条目内容对不上，unlocatableQuotes 中的引文在正文中找不到，incompleteCandidates 中的条目缺少必填字段或 evidence。请只修正这些条目：补全缺的字段，evidence.sentence 改为 bodySentences 中真正写到这件事的那一句的序号；找不到这样一句的条目直接删掉。其余条目照上次返回，不要新增条目，canonCandidates 和 knowledgeCandidates 各不超过 12 条。"
             });
             if error.starts_with("B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS") {
                 input["auditFeedback"]["registeredPredicates"] = json!(
