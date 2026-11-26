@@ -760,9 +760,10 @@ fn goal_location(stage_index: usize) -> String {
 pub(crate) fn drop_replayed_steps(direction: &mut Value, feedback: &Value) {
     let replayed = |stage_index: usize, index: usize| {
         let start = format!("{}「", step_location(stage_index, index as u64 + 1));
+        // A step that is only too long stays to be shortened in place.
         items(feedback, "problems")
             .iter()
-            .any(|problem| text(problem).starts_with(&start))
+            .any(|problem| text(problem).starts_with(&start) && !is_too_long_step(text(problem)))
     };
     let seeds = direction["volumeIntentSeeds"].as_array_mut();
     let first = seeds
@@ -2574,11 +2575,13 @@ mod tests {
             !found.iter().any(|p| p.starts_with("阶段 2 的第 2 步")),
             "{found:?}"
         );
+        // Real run round 12: taken out of the direction handed back, the
+        // long steps were not replaced, and the stages fell below three steps.
         let mut handed_back = direction.clone();
         drop_replayed_steps(&mut handed_back, &json!({"problems":found}));
         assert_eq!(
             handed_back["volumeIntentSeeds"][0]["stages"][1]["steps"],
-            json!(["陆照知道改约的人在执事堂里", "柳漪答应在会审上作证"])
+            direction["volumeIntentSeeds"][0]["stages"][1]["steps"]
         );
     }
 
