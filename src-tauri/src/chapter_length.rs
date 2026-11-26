@@ -167,22 +167,48 @@ pub fn character_count(text: &str) -> i64 {
         .count() as i64
 }
 
-/// The telling pairs of each event in the plan's scenes, but for those of
-/// the names of the people there.
-pub(crate) fn planned_events(plan: &Value) -> Vec<BTreeSet<(char, char)>> {
+/// What a cut must keep of the plan's events: the telling pairs of each
+/// (but for those of the names of the people there), and the numbers and
+/// codes they name, such as a date.
+#[derive(Default)]
+pub(crate) struct PlannedEvents {
+    pairs: Vec<BTreeSet<(char, char)>>,
+    codes: BTreeSet<String>,
+}
+
+/// How long a run of ASCII letters and digits is before it counts as a code.
+const CODE_CHARS: usize = 3;
+
+/// The runs of `CODE_CHARS` or more ASCII letters and digits in `text`.
+fn codes(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|run| run.len() >= CODE_CHARS)
+}
+
+pub(crate) fn planned_events(plan: &Value) -> PlannedEvents {
     use crate::chapter_craft::telling_pairs;
     let craft = &plan["craft"];
     let names = crate::craft_plan::scene_people(craft)
         .filter_map(|person| person["name"].as_str())
         .flat_map(telling_pairs)
         .collect::<BTreeSet<_>>();
-    crate::craft_plan::scenes(craft)
+    let events = crate::craft_plan::scenes(craft)
         .iter()
         .filter_map(|scene| scene["events"].as_array())
         .flatten()
         .filter_map(Value::as_str)
-        .map(|event| &telling_pairs(event) - &names)
-        .collect()
+        .collect::<Vec<_>>();
+    PlannedEvents {
+        pairs: events
+            .iter()
+            .map(|event| &telling_pairs(event) - &names)
+            .collect(),
+        codes: events
+            .iter()
+            .flat_map(|event| codes(event))
+            .map(ToOwned::to_owned)
+            .collect(),
+    }
 }
 
 /// How many telling pairs a sentence shares with a planned event it writes.
@@ -197,22 +223,29 @@ pub(crate) fn cut_sentences(
     body: &str,
     cut: &[usize],
     range: ChapterLengthRange,
-    events: &[BTreeSet<(char, char)>],
+    events: &PlannedEvents,
 ) -> String {
     let spans = crate::chapter_craft::sentence_spans(body);
+    let groups = exchanges(body, &spans);
+    let cuttable = cuttable_sentences(body, &spans, events);
     let mut removed = vec![false; spans.len()];
     let mut shortened = body.to_string();
     for &number in cut {
         if character_count(&shortened) <= range.max {
             break;
         }
-        if !can_cut_sentence(body, &spans, number, events) || removed[number] {
+        // Real run round 9: cutting single lines of an exchange left answers
+        // without their questions; an exchange goes whole or not at all.
+        let Some(group) = groups.get(number) else {
+            continue;
+        };
+        if !cuttable[number] || group.iter().any(|&n| removed[n]) {
             continue;
         }
-        removed[number] = true;
+        group.iter().for_each(|&n| removed[n] = true);
         let candidate = without_sentences(body, &spans, &removed);
         if character_count(&candidate) < range.min {
-            removed[number] = false;
+            group.iter().for_each(|&n| removed[n] = false);
         } else {
             shortened = candidate;
         }
@@ -220,14 +253,73 @@ pub(crate) fn cut_sentences(
     shortened
 }
 
+/// For each sentence, the sentences of the exchange it belongs to: those
+/// of the run of consecutive lines spoken in quotes around its line, or only
+/// itself when its line is not spoken.
+fn exchanges(body: &str, spans: &[(usize, usize)]) -> Vec<Vec<usize>> {
+    let lines = body.split('\n').collect::<Vec<_>>();
+    // The run of spoken lines each line is in, blank lines between kept.
+    let mut runs = vec![None; lines.len()];
+    let mut run = 0;
+    let mut open = false;
+    for (index, line) in lines.iter().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let spoken = line.trim_start().starts_with(['“', '「']);
+        if spoken {
+            if !open {
+                run += 1;
+            }
+            runs[index] = Some(run);
+        }
+        open = spoken;
+    }
+    let mut line = 0;
+    let mut at = 0;
+    let line_of = spans
+        .iter()
+        .map(|&(start, _)| {
+            line += body[at..start].matches('\n').count();
+            at = start;
+            line
+        })
+        .collect::<Vec<_>>();
+    (0..spans.len())
+        .map(|number| match runs[line_of[number]] {
+            Some(run) => (0..spans.len())
+                .filter(|&other| runs[line_of[other]] == Some(run))
+                .collect(),
+            None => vec![number],
+        })
+        .collect()
+}
+
+/// For each sentence of `body`, whether a cut may take it: it and every
+/// sentence of its exchange pass `can_cut_sentence`.
+pub(crate) fn cuttable_sentences(
+    body: &str,
+    spans: &[(usize, usize)],
+    events: &PlannedEvents,
+) -> Vec<bool> {
+    let single = (0..spans.len())
+        .map(|number| can_cut_sentence(body, spans, number, events))
+        .collect::<Vec<_>>();
+    exchanges(body, spans)
+        .iter()
+        .map(|group| group.iter().all(|&n| single[n]))
+        .collect()
+}
+
 /// Not the last sentence (the planned ending), not half of a line of
-/// dialogue, not one that writes a planned event, and not the opener that
-/// names who the next sentence's 他/她/它 is.
+/// dialogue, not one that
+/// writes a planned event or names its number or code, and not the opener
+/// that names who the next sentence's 他/她/它 is.
 pub(crate) fn can_cut_sentence(
     body: &str,
     spans: &[(usize, usize)],
     number: usize,
-    events: &[BTreeSet<(char, char)>],
+    events: &PlannedEvents,
 ) -> bool {
     let Some(&[(start, end), (next_start, next_end)]) =
         spans.get(number..).and_then(<[_]>::first_chunk::<2>)
@@ -240,8 +332,10 @@ pub(crate) fn can_cut_sentence(
     }
     let pairs = crate::chapter_craft::telling_pairs(sentence);
     if events
+        .pairs
         .iter()
         .any(|event| event.intersection(&pairs).count() >= EVENT_PAIRS)
+        || codes(sentence).any(|code| events.codes.contains(code))
     {
         return false;
     }
@@ -315,9 +409,29 @@ mod tests {
     }
 
     #[test]
+    fn round90_an_exchange_is_cut_whole_and_a_planned_date_is_kept() {
+        let body = "“写完要是褪了呢？”\n“那就说明我错了。”\n陈默低头，笔尖落下去。\n他先写2018，横折竖钩一笔一笔压着。\n走廊那头传来推车的声音，越来越近。\n最后一笔收住。";
+        let events = planned_events(&json!({"craft":{"scenes":[
+            {"people":[{"name":"陈默"}],"events":["陈默在自己手背写下2018.04.12"]}
+        ]}}));
+        let range = ChapterLengthRange { min: 10, max: 40 };
+        let shortened = cut_sentences(body, &[1, 3, 4], range, &events);
+        assert!(
+            !shortened.contains("那就说明我错了") && !shortened.contains("写完要是褪了呢"),
+            "{shortened}"
+        );
+        assert!(shortened.contains("他先写2018"), "{shortened}");
+    }
+
+    #[test]
     fn ld4_a_long_chapter_loses_the_chosen_sentences_in_order_until_it_fits_the_accepted_range() {
         let range = ChapterLengthRange { min: 50, max: 70 };
-        let cut = cut_sentences(&lines_of_ten(10), &[2, 5, 7, 0, 1, 3], range, &[]);
+        let cut = cut_sentences(
+            &lines_of_ten(10),
+            &[2, 5, 7, 0, 1, 3],
+            range,
+            &PlannedEvents::default(),
+        );
         assert_eq!(
             cut,
             "第00句话写在这里。\n第01句话写在这里。\n第03句话写在这里。\n第04句话写在这里。\n第06句话写在这里。\n第08句话写在这里。\n第09句话写在这里。"
@@ -334,7 +448,7 @@ mod tests {
         let max = length * 10 / 11;
         let range = ChapterLengthRange { min: max - 30, max };
         assert!(length > range.ceiling());
-        let shortened = cut_sentences(&body, &[0, 1, 10], range, &[]);
+        let shortened = cut_sentences(&body, &[0, 1, 10], range, &PlannedEvents::default());
         assert!(range.accepts(character_count(&shortened)));
         assert!(shortened.contains("一枚青丸滚出来"), "{shortened}");
     }
@@ -344,12 +458,12 @@ mod tests {
         let body = "第00句话写在这里。\n“你先走。我留下。”\n第02句话写在这里。";
         let range = ChapterLengthRange { min: 5, max: 10 };
         assert_eq!(
-            cut_sentences(body, &[3, 1, 2, 0], range, &[]),
+            cut_sentences(body, &[3, 1, 2, 0], range, &PlannedEvents::default()),
             "“你先走。我留下。”\n第02句话写在这里。"
         );
         let range = ChapterLengthRange { min: 100, max: 105 };
         assert_eq!(
-            cut_sentences(&lines_of_ten(10), &[0, 1], range, &[]),
+            cut_sentences(&lines_of_ten(10), &[0, 1], range, &PlannedEvents::default()),
             lines_of_ten(10)
         );
     }
@@ -359,7 +473,7 @@ mod tests {
         let body = "第00句话写在这里。\n\n第01句话写在这里。\n\n第02句话写在这里。";
         let range = ChapterLengthRange { min: 5, max: 10 };
         assert_eq!(
-            cut_sentences(body, &[1], range, &[]),
+            cut_sentences(body, &[1], range, &PlannedEvents::default()),
             "第00句话写在这里。\n\n第02句话写在这里。"
         );
     }
@@ -368,7 +482,7 @@ mod tests {
     fn a_cut_keeps_the_scene_opener_that_identifies_the_next_sentences_actor() {
         let body = "山脚豆腐坊的檐下挂着竹帘，陈婆正把一板豆干从屉里起出来，热气腾腾。她看见陆照，没说话。\n\n檐下的水慢慢滴了下来。\n\n陆照接过碟子。";
         let range = ChapterLengthRange { min: 20, max: 54 };
-        let shortened = cut_sentences(body, &[0, 2], range, &[]);
+        let shortened = cut_sentences(body, &[0, 2], range, &PlannedEvents::default());
         assert!(shortened.starts_with("山脚豆腐坊"), "{shortened}");
         assert!(!shortened.contains("水慢慢滴"), "{shortened}");
     }

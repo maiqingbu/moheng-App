@@ -474,6 +474,41 @@ pub(crate) fn is_scene_problem(problem: &str) -> bool {
     problem.starts_with(PLACES_LIKE) || problem.contains(ROOM_LIKE)
 }
 
+/// Characters of moves and phrasing that make a three-character run an
+/// action (抬起头, 推开门), not a thing; common words are left out too.
+const NOT_THING: &str = "地得起头开站来去走看拿放推抬说想回出进转身吧呢吗啊";
+
+/// The names of the people in `bible` and in the scenes of `craft`.
+fn story_names<'a>(bible: &'a Value, craft: &'a Value) -> Vec<&'a str> {
+    let mut names = bible_people(bible);
+    names.extend(scene_people(craft).filter_map(|person| person["name"].as_str()));
+    names.into_iter().filter(|name| !name.is_empty()).collect()
+}
+
+/// A thing (three Chinese characters, no one's name and no phrase words)
+/// that both `earlier` and `current` name.
+pub(crate) fn shared_thing(earlier: &str, current: &str, names: &[&str]) -> Option<String> {
+    let chars = current.chars().collect::<Vec<_>>();
+    chars
+        .windows(3)
+        .filter(|window| {
+            window.iter().all(|&c| {
+                crate::chapter_craft::is_han(c)
+                    && !crate::chapter_craft::is_common(c)
+                    && !NOT_THING.contains(c)
+            })
+        })
+        .map(|window| window.iter().collect::<String>())
+        .find(|thing| {
+            // A run holding most of a name is about that person, not a thing.
+            earlier.contains(thing.as_str())
+                && !names.iter().any(|name| {
+                    name.chars().filter(|c| thing.contains(*c)).count()
+                        >= name.chars().count().min(2)
+                })
+        })
+}
+
 /// Whether a plan problem says the ending repeats an earlier chapter's.
 pub(crate) fn is_repeated_hook(problem: &str) -> bool {
     problem.starts_with(HOOK_LIKE)
@@ -604,13 +639,29 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
     }
     let hook_text = text(&craft["endHook"]);
     let hook = crate::chapter_craft::telling_pairs(hook_text);
+    let mut hook_repeats = BTreeSet::new();
     for ending in near {
         let earlier = text(&ending["endHook"]);
         if earlier != hook_text && nearly_repeats(earlier, &hook) {
+            hook_repeats.insert(ending["chapter"].to_string());
             problems.push(format!(
                 "{HOOK_LIKE}第 {} 章的太接近（{earlier}）：换一个动作、物件和画面，落在这一章新发生的事上",
                 ending["chapter"],
             ));
+        }
+    }
+    // Real run round 9: six chapters ended on the same notice board, each
+    // hook otherwise different.
+    let names = story_names(bible, craft);
+    for ending in &endings[endings.len().saturating_sub(RECENT_GOALS)..] {
+        let earlier = text(&ending["endHook"]);
+        if earlier != hook_text && !hook_repeats.contains(&ending["chapter"].to_string()) {
+            if let Some(thing) = shared_thing(earlier, hook_text, &names) {
+                problems.push(format!(
+                    "{HOOK_LIKE}第 {} 章的结尾用了同一个物件或画面「{thing}」：换一个动作、物件和画面，落在这一章新发生的事上",
+                    ending["chapter"],
+                ));
+            }
         }
     }
     for ending in endings {
@@ -1207,4 +1258,27 @@ pub fn continuity_details(audit: &Value, body: &str) -> Vec<Value> {
             json!({"subject":text(&item["subject"]),"kind":text(&item["kind"]),"detail":detail})
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round90_endings_on_the_same_thing_repeat_even_when_worded_differently() {
+        let names = ["沈砚", "陈默"];
+        let third = "沈砚站在B区旧库房通道口，把那截蓝丝带缠上左手小指。远处社区公告栏方向，陈默正踩着凳子贴新纸，喷漆枪又一次晃了。";
+        let fourth = "沈砚把缠满蓝丝带的左手按在消防栓锈面上，七道浅痕与刮擦痕严丝合缝。远处公告栏方向，喷漆枪又晃了一下。";
+        assert_eq!(
+            shared_thing(third, fourth, &names).as_deref(),
+            Some("蓝丝带")
+        );
+        let other = "沈砚把U盘塞回口袋，抽出单子对着灯光，签字栏铝痕微微发亮。";
+        assert_eq!(shared_thing(third, other, &names), None);
+        assert_eq!(shared_thing("陈默正在门口", "陈默正在门口", &names), None);
+        assert_eq!(
+            shared_thing("他抬起头，推开门", "她抬起头，推开门", &names),
+            None
+        );
+    }
 }

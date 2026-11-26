@@ -80,7 +80,9 @@ pub fn craft_plan(input: &Value, chapter: i64, vague: bool) -> Value {
             "situationChange":{"before":format!("第{chapter}章开头只管记账"),"after":format!("第{chapter}章结尾被彭三盯上")},
             "scenes":[scene(places[(chapter - 1) as usize][0]),scene(places[(chapter - 1) as usize][1])],
             "newLosses":[format!("第{chapter}章失去一天的记忆")],
-            "endHook":format!("第{chapter}章面馆门板上贴了一张新的借据")
+            // Each chapter ends on its own picture (real run round 9: the
+            // same object at the end of chapter after chapter is a repeat).
+            "endHook":format!("第{chapter}章{}", ["面馆门板上贴了一张新的借据", "码头栈桥下漂来半截船桨", "当铺柜台里多了一只铜秤砣", "祠堂供桌上的香灰被人划开", "渡口石阶上留着湿脚印"][((chapter - 1) % 5) as usize])
         }
     });
     // QC-1.2: chapter 1 names the danger closing in on the protagonist.

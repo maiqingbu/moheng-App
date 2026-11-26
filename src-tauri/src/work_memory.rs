@@ -53,6 +53,10 @@ const PERSONAL_KINDS: [&str; 4] = ["HABIT", "APPEARANCE", "PREFERENCE", "RELATIO
 /// as what the chapter brings back.
 const RELEVANT_PAIRS: usize = 2;
 
+/// How many telling pairs (beside the person's name) two looks share to be
+/// the same look recorded twice.
+const SAME_LOOK_PAIRS: usize = 3;
+
 /// At most `limit` of `memories` for the chapter `query` describes, as
 /// `{chapter, subject, kind, detail}`, each detail once at its newest:
 /// first what the people of the chapter (on stage or named in the plan)
@@ -74,7 +78,11 @@ pub fn recall(memories: &[Memory], query: &RecallQuery<'_>, limit: usize) -> Vec
     };
     let mut newest_first = memories.iter().collect::<Vec<_>>();
     newest_first.sort_by_key(|memory| std::cmp::Reverse(memory.chapter));
+    // Real run round 9: a look recorded again each chapter (a ribbon on a
+    // finger, bleeding) was recalled as many facts and written every chapter;
+    // a look like a newer one of the same person is left out.
     let mut seen = BTreeSet::new();
+    let mut looks: Vec<(&str, BTreeSet<(char, char)>)> = Vec::new();
     let mut ranked = newest_first
         .into_iter()
         .filter(|memory| {
@@ -83,6 +91,20 @@ pub fn recall(memories: &[Memory], query: &RecallQuery<'_>, limit: usize) -> Vec
                 memory.kind.as_str(),
                 memory.detail.as_str(),
             ))
+        })
+        .filter(|memory| {
+            if memory.kind != "APPEARANCE" {
+                return true;
+            }
+            let pairs = &crate::chapter_craft::telling_pairs(&memory.detail)
+                - &crate::chapter_craft::telling_pairs(&memory.subject);
+            let like_newer = looks.iter().any(|(subject, newer)| {
+                *subject == memory.subject && newer.intersection(&pairs).count() >= SAME_LOOK_PAIRS
+            });
+            if !like_newer {
+                looks.push((&memory.subject, pairs));
+            }
+            !like_newer
         })
         .filter_map(|memory| {
             let tier = if in_chapter(&memory.subject) {
@@ -113,4 +135,53 @@ pub fn recall(memories: &[Memory], query: &RecallQuery<'_>, limit: usize) -> Vec
             json!({"chapter":memory.chapter,"subject":memory.subject,"kind":memory.kind,"detail":memory.detail})
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn memory(chapter: i64, kind: &str, detail: &str) -> Memory {
+        Memory {
+            chapter,
+            subject: "沈砚".into(),
+            kind: kind.into(),
+            detail: detail.into(),
+        }
+    }
+
+    #[test]
+    fn round90_a_state_recorded_every_chapter_is_recalled_once_at_its_newest() {
+        let memories = [
+            memory(
+                4,
+                "APPEARANCE",
+                "左小指缠着七圈蓝丝带，根部有一道细而深的新痕",
+            ),
+            memory(5, "APPEARANCE", "左手小指缠着蓝丝带，旧痕被辣油染成暗红色"),
+            memory(7, "APPEARANCE", "左手小指缠着蓝丝带，末端洇出暗红血迹"),
+            memory(1, "APPEARANCE", "戴眼镜，镜片会被蒸汽糊住"),
+            memory(1, "HABIT", "习惯把帆布包挂在椅背"),
+            memory(1, "HABIT", "习惯把铅笔别在耳后"),
+        ];
+        let on_stage = ["沈砚".to_string()];
+        let query = RecallQuery {
+            on_stage: &on_stage,
+            people: &on_stage,
+            text: "",
+        };
+        let recalled = recall(&memories, &query, 40)
+            .into_iter()
+            .map(|item| item["detail"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            recalled,
+            [
+                "左手小指缠着蓝丝带，末端洇出暗红血迹",
+                "戴眼镜，镜片会被蒸汽糊住",
+                "习惯把帆布包挂在椅背",
+                "习惯把铅笔别在耳后"
+            ]
+        );
+    }
 }

@@ -915,6 +915,76 @@ pub fn repeated_phrases(texts: &[String]) -> Vec<String> {
     phrases_used(texts, 0, 2)
 }
 
+/// How long a whole spoken line may be to count as a short one.
+const SHORT_LINE_CHARS: usize = 6;
+
+/// A short line without its closing punctuation, so 记着。 and 记着！ are one.
+fn line_key(line: &str) -> &str {
+    line.trim_end_matches(['。', '！', '？', '…', '，', '.', '!', '?'])
+}
+
+/// The whole short lines in quotes (such as “记着。”) of `text`: two to
+/// `SHORT_LINE_CHARS` characters, and not only common words, so 好 or 是的
+/// never count.
+fn short_lines(text: &str) -> BTreeSet<&str> {
+    text.split('“')
+        .skip(1)
+        .filter_map(|rest| rest.split_once('”').map(|(line, _)| line.trim()))
+        .filter(|line| {
+            let key = line_key(line);
+            (2..=SHORT_LINE_CHARS).contains(&key.chars().count())
+                && key
+                    .chars()
+                    .any(|c| is_han(c) && !COMMON_CHARACTERS.contains(c))
+        })
+        .collect()
+}
+
+/// The short lines both of the two latest chapters of `history` (newest
+/// first) spoke (real run round 9: the same two-word exchange closed scene
+/// after scene, below the length the phrase checks look at).
+pub fn repeated_short_lines(history: &[String]) -> Vec<String> {
+    let Some([latest, before]) = history.get(..2) else {
+        return Vec::new();
+    };
+    let earlier = short_lines(before)
+        .into_iter()
+        .map(line_key)
+        .collect::<BTreeSet<_>>();
+    short_lines(latest)
+        .into_iter()
+        .filter(|line| earlier.contains(line_key(line)))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// A finding for each sentence of `body` that speaks one of the short
+/// `lines` the two latest chapters both spoke, the third chapter in a row.
+pub(crate) fn short_line_findings(lines: &[String], body: &str) -> Vec<Value> {
+    let keys = lines
+        .iter()
+        .map(|line| line_key(line))
+        .collect::<BTreeSet<_>>();
+    let spans = sentence_spans(body);
+    spans
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &(start, end))| {
+            let line = short_lines(&body[start..end])
+                .into_iter()
+                .find(|line| keys.contains(line_key(line)))?;
+            let quote = unique_quote_ending_at(body, &spans, index)?;
+            Some(rule_finding(
+                "word_repetition",
+                "MEDIUM",
+                quote,
+                format!("「{line}」前两章都说过，这一章又说"),
+                "换一句这个场面才有的话，或删掉这一问一答",
+            ))
+        })
+        .collect()
+}
+
 /// Phrases of `text` whose third (or later) use, counting `history`, would
 /// fail the signing repetition check (F1-5).
 pub fn overused_phrases(history: &[String], text: &str) -> Vec<String> {
@@ -1051,6 +1121,11 @@ pub fn opening_threat_finding(plan: &Value, body: &str) -> Option<Value> {
 /// A Chinese character of the common block.
 pub(crate) fn is_han(c: char) -> bool {
     ('\u{4e00}'..='\u{9fff}').contains(&c)
+}
+
+/// Whether `c` is too common a character to tie a passage to a fact.
+pub(crate) fn is_common(c: char) -> bool {
+    COMMON_CHARACTERS.contains(c)
 }
 
 /// Characters too common to tie a passage to a fact.
@@ -3731,6 +3806,20 @@ mod tests {
             "第一段。\n\n第二段。"
         );
         assert_eq!(normalize_typography("——好吧……"), "——好吧……");
+    }
+
+    #[test]
+    fn round90_a_short_line_of_both_latest_chapters_is_avoided_then_rewritten() {
+        let history = [
+            "“你手。”\n“记着！”沈砚把丝带缠紧。“好。”".to_string(),
+            "陈默看着他。“记着。”他说。“好。”“走廊那头的推车是空的吗？”".to_string(),
+        ];
+        assert_eq!(repeated_short_lines(&history), ["记着！"]);
+        assert!(repeated_short_lines(&history[..1]).is_empty());
+        let body = "沈砚点头。\n“记着。”\n“好。”";
+        let findings = short_line_findings(&repeated_short_lines(&history), body);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0]["quote"], "“记着。”");
     }
 
     #[test]

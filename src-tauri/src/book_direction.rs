@@ -205,17 +205,22 @@ fn tidy_seed(seed: &mut Value, room: i64, bible: &Value) {
     }
 }
 
+/// Verbs of speech that end the clause before a quoted line.
+const SPEECH_VERBS: &[&str] = &[
+    "说", "问", "喊", "答", "指出", "说出", "念出", "喊出", "说道", "问道", "提醒", "补充", "嘀咕",
+    "低语",
+];
+
 /// Whether `step` quotes a line someone says (real run round 8: a step was
 /// a line said while handing over a cloth): a verb of speech right before a
 /// quote of a clause, not a quoted name such as 知道“丹房” or 名叫“青禾”.
 fn says_a_line(step: &str) -> bool {
     let chars = step.chars().collect::<Vec<_>>();
     chars.iter().enumerate().any(|(index, c)| {
-        let spoken = chars[..index]
-            .iter()
-            .rev()
-            .find(|c| !['：', ':', '，'].contains(c))
-            .is_some_and(|c| ['说', '问', '喊', '答'].contains(c));
+        let before = chars[..index].iter().collect::<String>();
+        // Real run round 9: 吴幼安立刻指出‘……’ was a step too.
+        let before = before.trim_end_matches(['：', ':', '，']);
+        let spoken = SPEECH_VERBS.iter().any(|verb| before.ends_with(verb));
         let line = chars[index + 1..]
             .iter()
             .take_while(|c| !crate::craft_setup::QUOTE_MARKS.contains(c) && **c != '’')
@@ -1575,15 +1580,19 @@ fn is_hidden_goal(goal_id: &str) -> bool {
     goal_id.starts_with("goal:book:") || goal_id.contains(":stage:")
 }
 
+/// The id of a route task (taskId) or of a context's plan task (taskRef).
+fn task_id(task: &Value) -> &str {
+    match text(&task["taskId"]) {
+        "" => text(&task["taskRef"]),
+        id => id,
+    }
+}
+
 /// Whether route task `task` is hidden from a chapter working on
 /// `current`: the climax, the volume's goal, and every stage or step but the
 /// current one.
 fn is_hidden_task(task: &Value, current: &str) -> bool {
-    // Route tasks carry taskId, the context's plan tasks taskRef.
-    let id = match text(&task["taskId"]) {
-        "" => text(&task["taskRef"]),
-        id => id,
-    };
+    let id = task_id(task);
     task["class"] == "CLIMAX"
         || id.starts_with(crate::planning::CLIMAX_TASK_PREFIX)
         || (id != current
@@ -1614,6 +1623,50 @@ pub(crate) fn hide_volume_end(input: &mut Value, current: &str) {
     if let Some(tasks) = input["volumePlanRoute"]["tasks"].as_array_mut() {
         tasks.retain(|task| !is_hidden_task(task, current));
     }
+    // Real run round 9: given the scene a relationship ends with, plans
+    // staged it in chapter after chapter.
+    for path in [
+        "/authorityContext/planTaskContexts",
+        "/volumePlanRoute/tasks",
+    ] {
+        if let Some(tasks) = input.pointer_mut(path).and_then(Value::as_array_mut) {
+            tasks.iter_mut().for_each(hide_relation_end);
+        }
+    }
+}
+
+/// Shortens a relationship task's objective to its direction.
+fn hide_relation_end(task: &mut Value) {
+    if !task_id(task).starts_with("task:optional:relation:") {
+        return;
+    }
+    for path in ["/objective", "/contract/objective"] {
+        if let Some(objective) = task.pointer_mut(path) {
+            if let Some(heading) = objective.as_str().map(relation_heading) {
+                *objective = json!(heading);
+            }
+        }
+    }
+}
+
+/// A relationship's direction without the scene it is to end with: the
+/// asides in brackets after its 走向 go.
+fn relation_heading(objective: &str) -> String {
+    let Some(at) = objective.find("走向") else {
+        return objective.to_string();
+    };
+    let (start, toward) = objective.split_at(at);
+    let mut kept = String::from(start);
+    let mut depth = 0;
+    for c in toward.chars() {
+        match c {
+            '（' | '(' => depth += 1,
+            '）' | ')' if depth > 0 => depth -= 1,
+            _ if depth == 0 => kept.push(c),
+            _ => {}
+        }
+    }
+    kept
 }
 
 /// The direction for planning `chapter_id` (chapter `chapter_no`), from the
@@ -2264,6 +2317,26 @@ mod tests {
     }
 
     #[test]
+    fn round90_a_chapter_sees_where_a_relationship_goes_but_not_its_last_scene() {
+        let objective = "沈砚与陈默：从脆弱同盟（共谋隐瞒检修盖异动）走向责任共担（陈默主动撕毁自己疫苗记录备份，换取沈砚暂缓调查其母病历）";
+        let mut input = json!({
+            "authorityContext":{"planTaskContexts":[
+                {"taskRef":"task:optional:relation:book:1","contract":{"objective":objective}}
+            ]},
+            "volumePlanRoute":{"tasks":[
+                {"taskId":"task:optional:relation:book:1","objective":objective}
+            ]}
+        });
+        hide_volume_end(&mut input, "task:required:goal:vol:1:step:1:1:1");
+        let heading = "沈砚与陈默：从脆弱同盟（共谋隐瞒检修盖异动）走向责任共担";
+        assert_eq!(input["volumePlanRoute"]["tasks"][0]["objective"], heading);
+        assert_eq!(
+            input["authorityContext"]["planTaskContexts"][0]["contract"]["objective"],
+            heading
+        );
+    }
+
+    #[test]
     fn round80_the_last_stage_sees_how_the_volume_peaks() {
         let (plan, route) = plan_and_route();
         let completed = (1..=2)
@@ -2421,7 +2494,12 @@ mod tests {
             !found.iter().any(|p| p.starts_with("阶段 2 的第 2 步")),
             "{found:?}"
         );
+        assert!(says_a_line(
+            "吴幼安立刻指出‘这枚铝的密度比琴弦高，会吃掉第三个泛音’"
+        ));
+        assert!(says_a_line("她说出‘你姐最后弹的是降E，不是C’"));
         for named in [
+            "铭牌露出‘云海观景台’四个字",
             "陆照知道“丹房”的秘密",
             "一个名叫“青禾”的组织",
             "陈伯问了一句“谁”",

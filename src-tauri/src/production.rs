@@ -3270,7 +3270,10 @@ fn run_chapter_production_inner(
     if let Some(stage) = &stage_step {
         render_input["stageStep"] = stage.input();
     }
-    let avoid_phrases = crate::chapter_craft::repeated_phrases(&chapter_history.bodies);
+    let mut avoid_phrases = crate::chapter_craft::repeated_phrases(&chapter_history.bodies);
+    avoid_phrases.extend(crate::chapter_craft::repeated_short_lines(
+        &chapter_history.bodies,
+    ));
     if !avoid_phrases.is_empty() {
         render_input["avoidPhrases"] = json!(avoid_phrases);
     }
@@ -3829,11 +3832,12 @@ fn run_chapter_production_inner(
                     break;
                 }
                 let spans = crate::chapter_craft::sentence_spans(&body);
+                let cuttable = crate::chapter_length::cuttable_sentences(&body, &spans, &events);
                 let sentences = spans.iter()
                     .enumerate()
                     .map(|(number, &(from, to))| json!({
                         "n":number,"chars":character_count(&body[from..to]),"text":&body[from..to],
-                        "canCut":crate::chapter_length::can_cut_sentence(&body, &spans, number, &events)
+                        "canCut":cuttable[number]
                     }))
                     .collect::<Vec<_>>();
                 let (run_id, outcome) = craft_call(
@@ -4258,7 +4262,14 @@ fn run_chapter_production_inner(
                 .iter()
                 .any(|finding| finding["quote"] == rule["quote"])
         });
-        for finding in crate::chapter_craft::repetition_findings(&repeated, &body) {
+        let short_lines = crate::chapter_craft::repeated_short_lines(&chapter_history.bodies);
+        for finding in crate::chapter_craft::repetition_findings(&repeated, &body)
+            .into_iter()
+            .chain(crate::chapter_craft::short_line_findings(
+                &short_lines,
+                &body,
+            ))
+        {
             if !leading_findings
                 .iter()
                 .chain(rules.iter())
