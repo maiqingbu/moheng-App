@@ -568,7 +568,13 @@ function costText(value: number | null | undefined) {
 
 <template>
   <div v-if="project && production" class="page">
-    <PageHeader title="创作" subtitle="从章节准备到正文候选、检查与正式确认，都从当前作品记录重新查询。" />
+    <PageHeader title="写作" subtitle="当前章写到哪一步、下一步做什么；费用和检查细节在页面底部的“生产详情”里。" />
+    <section v-if="production.nextChapter" class="production-hero" data-production-hero>
+      <span class="muted">{{ production.nextChapter.executionMode === 'OPENING_BOOTSTRAP' ? '开篇三章' : '正文' }}</span>
+      <h2>第 {{ production.nextChapter.number }} 章<template v-if="production.nextChapter.title"> · {{ production.nextChapter.title }}</template></h2>
+      <p v-if="production.chapterPlan?.chapterGoal">这一章的方向：{{ production.chapterPlan.chapterGoal }}</p>
+      <p v-else class="muted">开始写这一章时会先定好方向。</p>
+    </section>
     <RuntimeBanner :state="authoritativeRunState" :reason="project.blockReason" :step="activeStep">
       <button v-if="canStartProduction && productionStartState.confirmation !== 'pending'" class="btn primary large" :aria-busy="productionStartInFlight" @click="startProduction">{{ productionStartInFlight || productionIsActive ? '查看第' : (canRetryProduction ? (productionStatus === 'PAUSED' ? '继续生成' : '重新生成') : '开始') }}{{ productionStartInFlight || productionIsActive ? ` ${production.nextChapter?.number} 章进度` : `第 ${production.nextChapter?.number} 章` }}</button>
       <button v-if="productionIsActive" class="btn" @click="controlProduction('production_pause')">暂停</button>
@@ -589,52 +595,17 @@ function costText(value: number | null | undefined) {
     </div>
     <CommandFeedback :state="commandState" @confirm="store.confirmCommandResult(lastCommand)" />
     <div v-if="productionLoadError" class="banner warning" role="alert"><span>{{ productionLoadError }}</span><button class="btn" @click="loadProductionProjection">重新读取</button></div>
-    <NarrativeValidation :validation="production.validation" :advanced="store.advancedMode" />
+    <!-- Only a check that stops writing is shown up here; the full check is in 生产详情. -->
+    <NarrativeValidation v-if="production.validation && !production.validation.canExecute" :validation="production.validation" :advanced="store.advancedMode" />
 
-    <section v-if="production.costSummary" class="card pad section" data-cost-summary aria-label="模型成本与预算">
-      <div class="card-head"><div><h2 class="card-title">模型成本与预算</h2><p class="card-subtitle">预算按作品设置。已设置的上限会在发送前校验并预留预测成本。</p></div></div>
-      <div class="setting-grid">
-        <div class="task-row"><span>本章已用 / 预留</span><strong>{{ costText(production.costSummary.chapterUsed ?? 0) }}</strong></div>
-        <div class="task-row"><span>本章上限 / 剩余</span><strong>{{ costText(production.costSummary.chapterBudget) }}<template v-if="production.costSummary.chapterRemaining != null"> · 剩余 {{ costText(production.costSummary.chapterRemaining) }}</template></strong></div>
-        <div class="task-row"><span>本月已用 / 预留</span><strong>{{ costText(production.costSummary.monthUsed ?? 0) }}</strong></div>
-        <div class="task-row"><span>本月上限 / 剩余</span><strong>{{ costText(production.costSummary.monthlyBudget) }}<template v-if="production.costSummary.monthRemaining != null"> · 剩余 {{ costText(production.costSummary.monthRemaining) }}</template></strong></div>
-      </div>
-    </section>
 
-    <section v-if="production.gatePolicy" class="card pad section" data-gate-policy>
-      <div class="card-head">
-        <div>
-          <span class="eyebrow">一致性规则</span>
-          <h2 class="card-title" style="margin-top:6px">GatePolicy · 第 {{ production.gatePolicy.version }} 版</h2>
-          <p class="card-subtitle">规则版本与摘要会绑定到规划和正式检查记录。</p>
-        </div>
-        <span class="badge" :class="production.gatePolicy.needsUpgrade ? 'warning' : 'success'">{{ production.gatePolicy.needsUpgrade ? '需要升级' : '当前规则有效' }}</span>
-      </div>
-      <div v-if="production.gatePolicy.needsUpgrade" class="task-row" style="align-items:flex-start;flex-wrap:wrap">
-        <span>当前长篇规则仍是旧开篇策略。采用默认规则集会创建新的 GatePolicy 版本，并保留旧版本供查询。</span>
-        <button class="btn primary" :disabled="gatePolicyUpdateInFlight" @click="adoptDefaultGatePolicy">采用默认规则集</button>
-      </div>
-      <template v-else>
-        <p v-if="production.gatePolicy.resourceRef" class="muted">默认资源 {{ production.gatePolicy.resourceRef.version }} · 校验码 {{ production.gatePolicy.resourceRef.sha256 }}</p>
-        <div v-for="rule in production.gatePolicy.rules" :key="String(rule.predicate)" class="task-row" style="align-items:flex-start">
-          <code>{{ JSON.stringify(rule) }}</code>
-          <button class="btn" :disabled="gatePolicyUpdateInFlight" @click="disableGatePolicyRule(rule)">停用</button>
-        </div>
-        <label class="section" style="display:grid;gap:8px">
-          新增或修改谓词规则（JSON）
-          <textarea v-model="gatePolicyRuleDraft" rows="4" autocomplete="off" spellcheck="false" />
-        </label>
-        <p v-if="gatePolicyDraftError" class="banner warning" role="alert">{{ gatePolicyDraftError }}</p>
-        <button class="btn primary" :disabled="gatePolicyUpdateInFlight" @click="saveGatePolicyRule">保存规则新版本</button>
-      </template>
-    </section>
 
     <section class="card pad section opening-evaluation-panel" data-opening-evaluation>
       <div class="card-head">
         <div>
           <span class="eyebrow">开篇评估 · 模拟签约</span>
           <h2 class="card-title" style="margin-top:6px">开篇评估</h2>
-          <p class="card-subtitle">只读取三章已正式提交的正文、事实与证据；评估结果和签约回执来自后端正式记录。</p>
+          <p class="card-subtitle">只看已经入库的前三章正文和作品记录；结果以正式评估记录为准。</p>
         </div>
         <span class="badge" :class="signing?.status === 'PASS' ? 'success' : signing?.status === 'FAIL' || signing?.status === 'NOT_VERIFIED' || signing?.status === 'STALE' || signing?.status === 'REVISE' || signing?.status === 'REJECTED' ? 'warning' : 'info'">{{ evaluationStatusLabel() }}</span>
       </div>
@@ -800,16 +771,14 @@ function costText(value: number | null | undefined) {
           <h2 class="card-title">当前章节规划</h2>
           <template v-if="production.chapterPlan">
             <p><strong>{{ production.chapterPlan.chapterGoal }}</strong></p>
-            <small class="muted">当前规划已与作品版本绑定</small>
-            <p class="muted">依据范围：当前任务所需的作品记录</p>
             <p class="muted">规划状态：{{ planValidityLabel }}<span v-if="production.stale?.reason"> · {{ productErrorMessage(production.stale.reason, '当前规划需要重新确认。') }}</span></p>
             <div v-for="item in production.triggeredContinuity" :key="item.threadRef" class="task-row"><strong>相关剧情线</strong><small>{{ detailLabel(item.bridge, '这条剧情线需要继续核对。') }}</small></div>
           </template>
-          <p v-else class="muted">当前没有可执行章节计划。未规划、被阻断或已完结时可以为空；开篇无需先创建全卷计划。</p>
+          <p v-else-if="production.nextChapter" class="muted">这一章还没有计划。开始写时会先定好这一章的方向。</p>
+          <p v-else class="muted">当前没有要写的章节。</p>
         </section>
         <section class="card pad">
-          <h2 class="card-title">创作步骤与结果</h2>
-          <div v-for="run in production.modelRuns" :key="run.modelRunId" class="task-row"><strong>{{ capabilityLabel(run.capability) }}</strong><small class="muted">上次尝试：{{ run.model }} · {{ statusLabel(run.status) }}</small></div>
+          <h2 class="card-title">这一章的稿子</h2>
           <details v-if="production.heldDraft">
             <summary>查看待复核草稿</summary>
             <ul>
@@ -823,50 +792,7 @@ function costText(value: number | null | undefined) {
       </aside>
     </div>
 
-    <section v-if="store.advancedMode" class="card pad section">
-      <h2 class="card-title">规划与签约来源</h2>
-      <dl class="pitch-kv">
-        <div><dt>执行模式</dt><dd>{{ production.nextChapter?.executionMode ?? '无当前执行章' }}</dd></div>
-        <div><dt>规划依据的作品版本 / 状态摘要</dt><dd>{{ production.chapterPlan?.compiledFromProjectRevision ?? '未提供' }} / {{ production.chapterPlan?.compiledFromStateDigest ?? '未提供' }}</dd></div>
-        <div><dt>写作上下文清单</dt><dd>{{ production.chapterPlan?.contextManifestRef?.artifactId ?? '未提供' }} · v{{ production.chapterPlan?.contextManifestRef?.version ?? '—' }}</dd></div>
-        <div><dt>签约受评章节摘要</dt><dd>{{ signing?.receipt?.chapterHashes?.join('、') || '未提供' }}</dd></div>
-        <div><dt>开篇合同 / 评估规则版本</dt><dd>{{ signing?.receipt?.openingContractVersion ?? '未提供' }} / {{ signing?.receipt?.platformPolicyVersion ?? '未提供' }}</dd></div>
-        <div><dt>签约证据引用</dt><dd>{{ signing?.signingEvidenceRefs?.join('、') || '未提供' }}</dd></div>
-      </dl>
-    </section>
 
-    <section v-if="production.creativeSkills || production.quality" class="card pad section">
-      <div class="card-head">
-        <div><h2 class="card-title">创作建议与叙事质量</h2><p class="card-subtitle">建议用于改善正文表现；正式准入仍以作品记录和结构化检查为准。</p></div>
-        <span class="muted">{{ production.quality?.softOnly ? '辅助质量评估' : '等待质量评估' }}</span>
-      </div>
-      <div v-if="production.creativeSkills" class="metric-grid">
-        <MetricCard label="创作建议状态" value="已加载" note="使用当前作品的受限建议" />
-        <MetricCard label="主要建议" :value="production.creativeSkills.selection?.primary?.nameZh || '无'" note="辅助参考" />
-        <MetricCard label="补充建议数" :value="String(production.creativeSkills.selection?.support?.length || 0)" note="只展示当前任务需要的内容" />
-        <MetricCard label="方法注入" :value="String(production.creativeSkills.methodInjectionProvenance?.length || 0)" note="已关联正文生成记录" />
-      </div>
-      <div v-if="production.creativeSkills" class="task-row">
-        <strong>当前作品版本 {{ production.creativeSkills.context?.projectRevision ?? '-' }}</strong>
-        <small class="muted">已选择 {{ production.creativeSkills.context?.boundedRefs?.length || 0 }} 项必要记录 · 本次使用 {{ production.creativeSkills.context?.budget?.modelCalls || 0 }} 次创作调用</small>
-      </div>
-      <div v-if="production.quality" class="quality-grid">
-        <div v-for="([dimension, item]) in qualityDimensions" :key="dimension" class="task-row">
-          <strong>{{ dimensionLabel(dimension) }}</strong><span>{{ item.score }} 分 · {{ item.severity === 'risk' ? '需重点关注' : item.severity === 'attention' ? '建议关注' : '稳定' }}</span>
-        </div>
-      </div>
-      <div v-if="production.quality" class="task-row">
-        <strong>读者期待：{{ production.quality.softAssessment?.readerDesire || '等待评估' }}</strong>
-        <small class="muted">当前偏好版本已记录 · 评估方式 {{ production.quality.evaluatorKind === 'HEURISTIC_KEYWORD' ? '关键词启发式' : '待确认' }}</small>
-      </div>
-      <div v-if="production.quality?.repair" class="task-row">
-        <strong>{{ production.quality.repair.status === 'ADVISORY_ESCALATION' ? '质量提示待复核' : `局部修订 ${production.quality.repair.run}/${production.quality.repair.limit}` }}</strong>
-        <small class="muted">影响范围：{{ qualityRepairScope.map(scopeLabel).join('、') || '无' }} · {{ production.quality.repair.status === 'ADVISORY_ESCALATION' ? '正文未修改，建议进一步复核' : detailLabel(production.quality.repair.escalation, '未升级') }}</small>
-      </div>
-      <div v-for="finding in qualityFindings" :key="finding.findingId" class="task-row">
-        <strong>{{ dimensionLabel(finding.dimension) }}</strong><small class="muted">{{ finding.repairable ? '建议复核' : '仅供查看' }}</small>
-      </div>
-    </section>
 
     <section v-if="production.repair" class="card pad section">
       <div class="card-head">
@@ -886,9 +812,97 @@ function costText(value: number | null | undefined) {
         <strong>{{ repairExecutionLabel(production.repair.executionReceipt) }}</strong><small class="muted">{{ production.repair.executionReceipt.status === 'REPAIR_VERIFICATION_INCOMPLETE' ? '重新核对只检查现有回执，不会再次执行正式操作。' : production.repair.executionReceipt.status === 'REPAIR_VERIFICATION_FAILED' ? '请查看回执中的验证项；系统不会自动重试正式操作。' : production.repair.executionReceipt.status === 'REPAIR_VERIFIED' ? '正式操作及其预期结果已核对。' : '请根据回执状态核对结果。' }}</small>
       </div>
     </section>
+    <details class="card pad section production-details" data-production-details>
+      <summary class="card-title">生产详情 <span class="muted production-details-hint">费用、检查规则、模型调用、创作建议</span></summary>
+      <p class="card-subtitle">日常写作不用看这里；章节卡住、费用异常或想知道为什么这样写时再展开。</p>
+      <NarrativeValidation v-if="!production.validation || production.validation.canExecute" :validation="production.validation" :advanced="store.advancedMode" />
+      <section v-if="production.modelRuns?.length" class="card pad section" data-model-runs>
+        <h2 class="card-title">模型调用记录</h2>
+        <div v-for="run in production.modelRuns" :key="run.modelRunId" class="task-row"><strong>{{ capabilityLabel(run.capability) }}</strong><small class="muted">{{ run.model }} · {{ statusLabel(run.status) }}</small></div>
+      </section>
+      <section v-if="production.costSummary" class="card pad section" data-cost-summary aria-label="模型成本与预算">
+        <div class="card-head"><div><h2 class="card-title">模型成本与预算</h2><p class="card-subtitle">预算按作品设置。已设置的上限会在发送前校验并预留预测成本。</p></div></div>
+        <div class="setting-grid">
+          <div class="task-row"><span>本章已用 / 预留</span><strong>{{ costText(production.costSummary.chapterUsed ?? 0) }}</strong></div>
+          <div class="task-row"><span>本章上限 / 剩余</span><strong>{{ costText(production.costSummary.chapterBudget) }}<template v-if="production.costSummary.chapterRemaining != null"> · 剩余 {{ costText(production.costSummary.chapterRemaining) }}</template></strong></div>
+          <div class="task-row"><span>本月已用 / 预留</span><strong>{{ costText(production.costSummary.monthUsed ?? 0) }}</strong></div>
+          <div class="task-row"><span>本月上限 / 剩余</span><strong>{{ costText(production.costSummary.monthlyBudget) }}<template v-if="production.costSummary.monthRemaining != null"> · 剩余 {{ costText(production.costSummary.monthRemaining) }}</template></strong></div>
+        </div>
+      </section>
+      <section v-if="production.gatePolicy" class="card pad section" data-gate-policy>
+        <div class="card-head">
+          <div>
+            <span class="eyebrow">一致性规则</span>
+            <h2 class="card-title" style="margin-top:6px">GatePolicy · 第 {{ production.gatePolicy.version }} 版</h2>
+            <p class="card-subtitle">规则版本与摘要会绑定到规划和正式检查记录。</p>
+          </div>
+          <span class="badge" :class="production.gatePolicy.needsUpgrade ? 'warning' : 'success'">{{ production.gatePolicy.needsUpgrade ? '需要升级' : '当前规则有效' }}</span>
+        </div>
+        <div v-if="production.gatePolicy.needsUpgrade" class="task-row" style="align-items:flex-start;flex-wrap:wrap">
+          <span>当前长篇规则仍是旧开篇策略。采用默认规则集会创建新的 GatePolicy 版本，并保留旧版本供查询。</span>
+          <button class="btn primary" :disabled="gatePolicyUpdateInFlight" @click="adoptDefaultGatePolicy">采用默认规则集</button>
+        </div>
+        <template v-else>
+          <p v-if="production.gatePolicy.resourceRef" class="muted">默认资源 {{ production.gatePolicy.resourceRef.version }} · 校验码 {{ production.gatePolicy.resourceRef.sha256 }}</p>
+          <div v-for="rule in production.gatePolicy.rules" :key="String(rule.predicate)" class="task-row" style="align-items:flex-start">
+            <code>{{ JSON.stringify(rule) }}</code>
+            <button class="btn" :disabled="gatePolicyUpdateInFlight" @click="disableGatePolicyRule(rule)">停用</button>
+          </div>
+          <label class="section" style="display:grid;gap:8px">
+            新增或修改谓词规则（JSON）
+            <textarea v-model="gatePolicyRuleDraft" rows="4" autocomplete="off" spellcheck="false" />
+          </label>
+          <p v-if="gatePolicyDraftError" class="banner warning" role="alert">{{ gatePolicyDraftError }}</p>
+          <button class="btn primary" :disabled="gatePolicyUpdateInFlight" @click="saveGatePolicyRule">保存规则新版本</button>
+        </template>
+      </section>
+      <section v-if="store.advancedMode" class="card pad section">
+        <h2 class="card-title">规划与签约来源</h2>
+        <dl class="pitch-kv">
+          <div><dt>执行模式</dt><dd>{{ production.nextChapter?.executionMode ?? '无当前执行章' }}</dd></div>
+          <div><dt>规划依据的作品版本 / 状态摘要</dt><dd>{{ production.chapterPlan?.compiledFromProjectRevision ?? '未提供' }} / {{ production.chapterPlan?.compiledFromStateDigest ?? '未提供' }}</dd></div>
+          <div><dt>写作上下文清单</dt><dd>{{ production.chapterPlan?.contextManifestRef?.artifactId ?? '未提供' }} · v{{ production.chapterPlan?.contextManifestRef?.version ?? '—' }}</dd></div>
+          <div><dt>签约受评章节摘要</dt><dd>{{ signing?.receipt?.chapterHashes?.join('、') || '未提供' }}</dd></div>
+          <div><dt>开篇合同 / 评估规则版本</dt><dd>{{ signing?.receipt?.openingContractVersion ?? '未提供' }} / {{ signing?.receipt?.platformPolicyVersion ?? '未提供' }}</dd></div>
+          <div><dt>签约证据引用</dt><dd>{{ signing?.signingEvidenceRefs?.join('、') || '未提供' }}</dd></div>
+        </dl>
+      </section>
+      <section v-if="production.creativeSkills || production.quality" class="card pad section">
+        <div class="card-head">
+          <div><h2 class="card-title">创作建议与叙事质量</h2><p class="card-subtitle">建议用于改善正文表现；正式准入仍以作品记录和结构化检查为准。</p></div>
+          <span class="muted">{{ production.quality?.softOnly ? '辅助质量评估' : '等待质量评估' }}</span>
+        </div>
+        <div v-if="production.creativeSkills" class="metric-grid">
+          <MetricCard label="创作建议状态" value="已加载" note="使用当前作品的受限建议" />
+          <MetricCard label="主要建议" :value="production.creativeSkills.selection?.primary?.nameZh || '无'" note="辅助参考" />
+          <MetricCard label="补充建议数" :value="String(production.creativeSkills.selection?.support?.length || 0)" note="只展示当前任务需要的内容" />
+          <MetricCard label="方法注入" :value="String(production.creativeSkills.methodInjectionProvenance?.length || 0)" note="已关联正文生成记录" />
+        </div>
+        <div v-if="production.creativeSkills" class="task-row">
+          <strong>当前作品版本 {{ production.creativeSkills.context?.projectRevision ?? '-' }}</strong>
+          <small class="muted">已选择 {{ production.creativeSkills.context?.boundedRefs?.length || 0 }} 项必要记录 · 本次使用 {{ production.creativeSkills.context?.budget?.modelCalls || 0 }} 次创作调用</small>
+        </div>
+        <div v-if="production.quality" class="quality-grid">
+          <div v-for="([dimension, item]) in qualityDimensions" :key="dimension" class="task-row">
+            <strong>{{ dimensionLabel(dimension) }}</strong><span>{{ item.score }} 分 · {{ item.severity === 'risk' ? '需重点关注' : item.severity === 'attention' ? '建议关注' : '稳定' }}</span>
+          </div>
+        </div>
+        <div v-if="production.quality" class="task-row">
+          <strong>读者期待：{{ production.quality.softAssessment?.readerDesire || '等待评估' }}</strong>
+          <small class="muted">当前偏好版本已记录 · 评估方式 {{ production.quality.evaluatorKind === 'HEURISTIC_KEYWORD' ? '关键词启发式' : '待确认' }}</small>
+        </div>
+        <div v-if="production.quality?.repair" class="task-row">
+          <strong>{{ production.quality.repair.status === 'ADVISORY_ESCALATION' ? '质量提示待复核' : `局部修订 ${production.quality.repair.run}/${production.quality.repair.limit}` }}</strong>
+          <small class="muted">影响范围：{{ qualityRepairScope.map(scopeLabel).join('、') || '无' }} · {{ production.quality.repair.status === 'ADVISORY_ESCALATION' ? '正文未修改，建议进一步复核' : detailLabel(production.quality.repair.escalation, '未升级') }}</small>
+        </div>
+        <div v-for="finding in qualityFindings" :key="finding.findingId" class="task-row">
+          <strong>{{ dimensionLabel(finding.dimension) }}</strong><small class="muted">{{ finding.repairable ? '建议复核' : '仅供查看' }}</small>
+        </div>
+      </section>
+    </details>
   </div>
   <div v-else-if="project" class="page">
-    <PageHeader title="创作" subtitle="正在重新读取当前作品的正式创作状态。" />
+    <PageHeader title="写作" subtitle="正在读取这部作品的写作状态…" />
     <div class="banner warning"><div><div class="banner-title">暂时无法读取创作状态</div><div class="banner-copy">{{ productionLoadError || '正在读取当前作品记录…' }}</div></div></div>
     <div class="actions" style="margin-top:14px"><button class="btn primary" @click="loadProductionProjection">重试读取</button></div>
   </div>

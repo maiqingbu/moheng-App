@@ -147,3 +147,7 @@
 @media (max-width: 560px) {
   .prototype-grid3 { grid-template-columns: 1fr; }
 }
+/* 2026-11-27: decisions waiting for the owner, always in reach from the top bar. */
+.prototype-btn.decision-pill { background: var(--amber-soft); color: #6e4510; border-color: transparent; font-weight: 600; text-decoration: none; border-radius: 999px; }
+.prototype-btn.decision-pill:hover { filter: brightness(.97); }
+:root[data-theme="dark"] .prototype-btn.decision-pill { color: var(--amber); }

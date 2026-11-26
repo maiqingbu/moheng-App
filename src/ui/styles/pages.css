@@ -189,3 +189,15 @@
 .overview-chapters > div { padding:10px 0; border-bottom:1px solid var(--line); display:grid; grid-template-columns:66px minmax(0,1fr) auto; gap:9px; align-items:center; font-size:11px; }
 .overview-chapters > div:last-child { border-bottom:0; }
 .overview-chapters span,.overview-chapters small { color:var(--ink-4); }
+
+/* 2026-11-27 redesign: the writing page leads with the current chapter;
+   production details stay folded until asked for. */
+.production-hero { margin-top: 16px; padding: 20px 24px 4px; display: flex; flex-direction: column; gap: 4px; }
+.production-hero h2 { margin: 0; font-family: var(--font-serif); font-size: 26px; line-height: 1.3; color: var(--ink); }
+.production-hero p { margin: 0; font-size: 15px; color: var(--ink-2); }
+.production-details > summary { cursor: pointer; display: flex; align-items: baseline; gap: 10px; list-style: none; }
+.production-details > summary::-webkit-details-marker { display: none; }
+.production-details > summary::before { content: '▸'; color: var(--ink-3); }
+.production-details[open] > summary::before { content: '▾'; }
+.production-details-hint { font-size: 13px; font-weight: 400; }
+.production-details > .card { box-shadow: none; }

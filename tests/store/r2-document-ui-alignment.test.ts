@@ -430,7 +430,7 @@ describe('R2 文档修订对应的前端行为', () => {
   it('Given 无长篇计划 When 展示 Then 不显示开篇创建说明', async () => {
     production({ chapterPlan: null, nextChapter: null })
     const page = await render(ProductionCenter)
-    expect(page.textContent).toContain('当前没有可执行章节计划')
+    expect(page.textContent).toContain('当前没有要写的章节')
     expect(page.textContent).not.toContain('再建立第一章规划')
   })
   it('Given 后端返回卷路线重规划 When 展示 Then 保留具体后续动作', async () => {
