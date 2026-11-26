@@ -23,13 +23,13 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   { id: 'custom', label: '自定义（其他兼容服务）', endpoint: '', hosts: [], models: [] },
 ]
 
-const CUSTOM = PROVIDER_PRESETS[PROVIDER_PRESETS.length - 1]
+export const CUSTOM_PRESET = PROVIDER_PRESETS[PROVIDER_PRESETS.length - 1]
 
 /** The preset a saved endpoint belongs to, by its host; custom otherwise. */
 export function presetForEndpoint(endpoint: string): ProviderPreset {
   let host = ''
-  try { host = new URL(endpoint.trim()).hostname } catch { return CUSTOM }
-  return PROVIDER_PRESETS.find(preset => preset.hosts.some(known => host === known || host.endsWith(`.${known}`))) ?? CUSTOM
+  try { host = new URL(endpoint.trim()).hostname } catch { return CUSTOM_PRESET }
+  return PROVIDER_PRESETS.find(preset => preset.hosts.some(known => host === known || host.endsWith(`.${known}`))) ?? CUSTOM_PRESET
 }
 
 /** The models offered in the model fields: the preset's usual ones first,

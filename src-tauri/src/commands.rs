@@ -5439,6 +5439,8 @@ fn planned_support_steps(
 #[derive(Default)]
 struct SupportRun {
     calls: Vec<crate::harness::CapabilityResultEnvelope>,
+    /// Each call's capability and input, in the order of `calls`.
+    asked: Vec<(String, Value)>,
     evidence_ledger: Vec<EvidenceLedgerEntry>,
     source_refs: BTreeSet<String>,
     result_digests: Vec<String>,
@@ -5446,14 +5448,37 @@ struct SupportRun {
 }
 
 impl SupportRun {
-    /// The results so far as the follow-up planner reads them.
-    fn prompt_views(&self, steps: &[crate::harness::SupportTaskStep]) -> Vec<Value> {
+    fn nothing_found(&self) -> bool {
         self.calls
             .iter()
-            .zip(steps)
-            .map(|(call, step)| {
-                json!({"capabilityId":step.capability_id,"input":step.typed_args,
+            .all(|call| crate::assistant_answer::is_empty_result(&call.result))
+    }
+
+    /// The results so far as the follow-up planner reads them.
+    fn prompt_views(&self) -> Vec<Value> {
+        self.calls
+            .iter()
+            .zip(&self.asked)
+            .map(|(call, (capability, input))| {
+                json!({"capabilityId":capability,"input":input,
                     "empty":crate::assistant_answer::is_empty_result(&call.result),"truncated":call.truncated})
+            })
+            .collect()
+    }
+
+    /// The results as the composer reads them.
+    fn result_views(&self) -> Vec<Value> {
+        self.calls
+            .iter()
+            .zip(&self.asked)
+            .map(|(call, (capability, _))| {
+                crate::assistant_answer::result_prompt_view(
+                    &call.call_id,
+                    capability,
+                    &call.result,
+                    &call.source_refs,
+                    call.truncated,
+                )
             })
             .collect()
     }
@@ -5551,6 +5576,8 @@ impl SupportRunner<'_> {
                         finished_at: requested_at.into(),
                         status: result.status.clone(),
                     });
+                    run.asked
+                        .push((step.capability_id.clone(), call.input.clone()));
                     run.calls.push(result);
                     step.status = crate::harness::SupportStepStatus::DONE;
                 }
@@ -5580,19 +5607,6 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
         .project_revision(project_id)
         .map_err(|e| e.to_string())?;
     let scope = resolve_project_scope(project_id, revision, question, mode, requested_scope)?;
-    let intent = crate::assistant_intent::resolve_intent(
-        state,
-        project_id,
-        crate::assistant_intent::AssistantEntry::Diagnose,
-        question,
-        requested_at,
-    );
-    let mut plan = crate::harness::plan_support_for_context(
-        &scope,
-        &intent.intent,
-        request.get("chapterId").and_then(Value::as_str).is_some(),
-        requested_at,
-    )?;
     let registry = CapabilityRegistry::read_only_r1();
     let executor = BoundedCapabilityExecutor {
         registry: registry.clone(),
@@ -5614,9 +5628,9 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
                     .map_err(|e| ManagerError::ProjectCommand(e.to_string()))
                 })
                 .ok()
-                .map(|(entities, chapters)| crate::assistant_answer::Directory {
-                    entities,
-                    chapters,
+                .map(|(entities, chapters)| {
+                    crate::assistant_answer::Directory { entities, chapters }
+                        .for_question(question, 40, 30)
                 })
         })
         .flatten();
@@ -5631,6 +5645,28 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
         )
         .ok()
     });
+    // A plan the model made needs no separate guess at the question's kind.
+    let intent = if model_planned.is_some() {
+        crate::assistant_intent::IntentResolution::keyword(
+            crate::assistant_intent::AssistantEntry::Diagnose,
+            question,
+            "MODEL_PLANNED",
+        )
+    } else {
+        crate::assistant_intent::resolve_intent(
+            state,
+            project_id,
+            crate::assistant_intent::AssistantEntry::Diagnose,
+            question,
+            requested_at,
+        )
+    };
+    let mut plan = crate::harness::plan_support_for_context(
+        &scope,
+        &intent.intent,
+        request.get("chapterId").and_then(Value::as_str).is_some(),
+        requested_at,
+    )?;
     match &model_planned {
         Some(planned) => plan.steps = planned_support_steps(planned, 0),
         None => {
@@ -5652,15 +5688,11 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
     };
     let mut run = SupportRun::default();
     runner.run(&mut plan.steps, &mut run)?;
-    // HFR-007: one follow-up round, at most two steps, when a planned query
-    // came back empty.
+    // HFR-007: one follow-up round, at most two steps, when the planned
+    // queries all came back empty.
     if let (Some(directory), Some(_)) = (&directory, &model_planned) {
-        if run
-            .calls
-            .iter()
-            .any(|call| crate::assistant_answer::is_empty_result(&call.result))
-        {
-            let earlier = run.prompt_views(&plan.steps);
+        if run.nothing_found() {
+            let earlier = run.prompt_views();
             if let Ok(more) = crate::assistant_answer::plan_with_model(
                 state,
                 project_id,
@@ -5675,12 +5707,18 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
             }
         }
     }
+    let nothing_found = run.nothing_found();
+    let conflicting_result = run.calls.iter().any(|call| {
+        call.result.get("supportStatus").and_then(Value::as_str) == Some("CONFLICTING")
+    });
+    let result_views = run.result_views();
     let SupportRun {
         calls,
         evidence_ledger,
         source_refs,
         result_digests,
         evidence_found,
+        ..
     } = run;
     let requires_evidence = question.contains("知道") || question.contains("承诺");
     let planning_question = [
@@ -5699,7 +5737,10 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
     ]
     .iter()
     .any(|term| question.to_lowercase().contains(term));
-    let diagnostic_finding = if question.contains("知道") {
+    // A model-planned answer rests on its own queries, not the keyword checks.
+    let diagnostic_finding = if model_planned.is_some() {
+        None
+    } else if question.contains("知道") {
         state
             .manager
             .with_read_connection(project_id, requested_at, |connection| {
@@ -5818,26 +5859,19 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
     // support is the system's, not the model's.
     let mut answer = Value::Null;
     if model_planned.is_some() {
-        let views = calls
-            .iter()
-            .zip(&plan.steps)
-            .map(|(call, step)| {
-                crate::assistant_answer::result_prompt_view(
-                    &call.call_id,
-                    &step.capability_id,
-                    &call.result,
-                    &call.source_refs,
-                    call.truncated,
-                )
-            })
-            .collect::<Vec<_>>();
-        if let Ok(reply) = crate::assistant_answer::compose_with_model(
-            state,
-            project_id,
-            question,
-            &views,
-            requested_at,
-        ) {
+        // Nothing came back: the answer is that, without asking the model.
+        let reply = if nothing_found {
+            Ok(json!({"sentences":[]}))
+        } else {
+            crate::assistant_answer::compose_with_model(
+                state,
+                project_id,
+                question,
+                &result_views,
+                requested_at,
+            )
+        };
+        if let Ok(reply) = reply {
             let available = source_refs
                 .iter()
                 .cloned()
@@ -5848,9 +5882,8 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
                         .map(|call| call.call_id.clone()),
                 )
                 .collect::<BTreeSet<_>>();
-            let conflicting = finding.support_status == crate::harness::SupportStatus::CONFLICTING;
             let (sentences, status) =
-                crate::assistant_answer::grounded_answer(&reply, &available, conflicting);
+                crate::assistant_answer::grounded_answer(&reply, &available, conflicting_result);
             finding.claim = if sentences.is_empty() {
                 "现有作品记录里查不到能回答这个问题的内容。".into()
             } else {
@@ -5866,10 +5899,7 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect();
-            answer = json!({
-                "planner":"MODEL",
-                "sentences":sentences.iter().map(|sentence| json!({"text":sentence.text,"sources":sentence.sources,"inferred":sentence.inferred})).collect::<Vec<_>>(),
-            });
+            answer = json!({"planner":"MODEL","sentences":sentences});
         }
     }
     let plan_digest = sha256_canonical(&serde_json::to_value(&plan).map_err(|e| e.to_string())?)

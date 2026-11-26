@@ -83,6 +83,14 @@ fn round130_the_model_plans_only_menu_queries_and_an_empty_result_gets_one_follo
         .count();
     assert_eq!(planner_rounds, 2);
     assert_eq!(session["answer"]["planner"], "MODEL");
+    // The model planned the queries, so the question's kind is not asked
+    // separately, and nothing came back, so no answer is asked for either.
+    for skipped in ["CLASSIFY_ASSISTANT_INTENT", "COMPOSE_ASSISTANT_ANSWER"] {
+        assert!(
+            calls.iter().all(|(capability, _)| capability != skipped),
+            "{skipped}"
+        );
+    }
 }
 
 #[test]

@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projectStore'
 import { assistantHeading, presentAssistantSession } from '../presentation/assistantPresentation'
+import { areaOf, tabName } from '../presentation/workspaceAreas'
 import { productErrorMessage, repairExecutionLabel, sanitizeProductText } from '../presentation/productLanguage'
 import type { AssistantPresentation } from '../presentation/assistantPresentation'
 import type { AssistantRepairPlan } from '../../application/contracts'
@@ -26,9 +27,13 @@ const assistantError = ref('')
 const assistantPhase = ref<AssistantPhase>('PROPOSAL_READY')
 const executionBeforeRevision = ref<number | null>(null)
 const unknownCommandKey = ref<'assistant-execute' | 'assistant-reverify'>('assistant-execute')
-const context = computed(() => ({ 'project-overview': '首页', production: '写作', directions: '故事', volumes: '故事 · 本卷', 'volume-workspace': '故事 · 本卷', decisions: '待决定', health: '资料库 · 长篇健康', read: '稿件', history: '稿件 · 版本', graph: '资料库', completion: '故事 · 完结' }[String(route.name)] ?? '当前作品'))
+const context = computed(() => {
+  const place = areaOf(route.name)
+  if (!place) return '当前作品'
+  return place.area.label === place.tab.label ? place.area.label : `${place.area.label} · ${place.tab.label}`
+})
 const projectTitle = computed(() => store.project?.title?.trim() || '当前作品')
-const placeholder = computed(() => context.value === '当前卷' ? '问问这一卷还缺什么、为什么卡住……' : context.value === '创作' ? '问问这一章的设定、冲突或修改建议……' : '问问这部作品的进展、问题或下一步……')
+const placeholder = computed(() => { const name = tabName(route.name); return name === 'volumes' ? '问问这一卷还缺什么、为什么卡住……' : name === 'production' ? '问问这一章的设定、冲突或修改建议……' : '问问这部作品的进展、问题或下一步……' })
 const proposalState = computed(() => store.commandState('assistant-plan'))
 const authorizationState = computed(() => store.commandState('assistant-authorize'))
 const executionState = computed(() => store.commandState('assistant-execute'))

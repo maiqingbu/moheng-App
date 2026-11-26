@@ -8,6 +8,7 @@ import WriteLockBanner from './WriteLockBanner.vue'
 import LoadingBlock from './LoadingBlock.vue'
 import { phaseLabel } from '../presentation/projectLabels'
 import { productErrorMessage } from '../presentation/productLanguage'
+import { WORKSPACE_AREAS, areaOf, tabName, type AreaTab, type WorkspaceArea } from '../presentation/workspaceAreas'
 
 const route = useRoute()
 const router = useRouter()
@@ -22,35 +23,17 @@ const phase = computed(() => store.project ? phaseLabel(store.project.phase) : '
 const currentVolume = computed(() => store.overview?.currentVolume ? `第 ${store.overview.currentVolume.number} 卷 · ${store.overview.currentVolume.title}` : phase.value)
 const committedChapters = computed(() => store.project?.committedChapters ?? 0)
 
-type NavItem = { label: string; icon: string; to: string; matches: string[] }
-// 2026-11-27 (owner approved the redesign): five task areas. Decisions are
-// in the top bar and on the home page; every former page keeps its route.
-const workspaceNav = computed<NavItem[]>(() => inWorkspace.value ? [
-  { label: '首页', icon: '⌂', to: `/projects/${id.value}`, matches: ['project-overview', 'decisions'] },
-  { label: '写作', icon: '✎', to: `/projects/${id.value}/production`, matches: ['production', 'opening-ready'] },
-  // A work with a volume opens on its route; one still being set up on its direction.
-  { label: '故事', icon: '◇', to: store.overview?.currentVolume ? `/projects/${id.value}/volumes` : `/projects/${id.value}/directions`, matches: ['directions', 'market', 'story-setup', 'craft-setup', 'volumes', 'volume-workspace', 'completion'] },
-  // 版本与变更记录 (match: 'history') belongs with the manuscript.
-  { label: '稿件', icon: '▤', to: `/projects/${id.value}/read`, matches: ['read', 'history'] },
-  // 长篇健康 (/health) belongs with the work's records.
-  { label: '资料库', icon: '◎', to: `/projects/${id.value}/graph`, matches: ['graph', 'health'] },
-] : [])
-const isActive = (item: NavItem) => item.matches.includes(String(route.name))
-// Each area's pages, so none is left without a way in: a row of tabs above
-// the page when the area has more than one.
-type AreaTab = { label: string; name: string; path: string }
-const areaTabs: AreaTab[][] = [
-  [{ label: '首页', name: 'project-overview', path: '' }, { label: '待决定', name: 'decisions', path: '/decisions' }],
-  [{ label: '写作', name: 'production', path: '/production' }, { label: '开篇三章', name: 'opening-ready', path: '/opening' }],
-  [{ label: '故事方向', name: 'directions', path: '/directions' }, { label: '市场定位', name: 'market', path: '/market' }, { label: '故事设定', name: 'story-setup', path: '/setup' }, { label: '写作风格', name: 'craft-setup', path: '/craft' }, { label: '分卷', name: 'volumes', path: '/volumes' }, { label: '完结准备', name: 'completion', path: '/completion' }],
-  [{ label: '阅读', name: 'read', path: '/read' }, { label: '版本记录', name: 'history', path: '/history' }],
-  [{ label: '作品图谱', name: 'graph', path: '/graph' }, { label: '长篇健康', name: 'health', path: '/health' }],
-]
-const currentTabs = computed(() => {
-  const name = route.name === 'volume-workspace' ? 'volumes' : String(route.name)
-  return inWorkspace.value ? areaTabs.find(tabs => tabs.some(tab => tab.name === name)) ?? [] : []
-})
-const tabActive = (tab: AreaTab) => tab.name === (route.name === 'volume-workspace' ? 'volumes' : String(route.name))
+// 2026-11-27 (owner approved the redesign): five task areas (presentation/
+// workspaceAreas). Decisions are in the top bar and on the home page; every
+// former page keeps its route and its tab.
+const current = computed(() => inWorkspace.value ? areaOf(route.name) : null)
+const areaPath = (area: WorkspaceArea) => {
+  // A work with a volume opens 故事 on its route; one still being set up on its direction.
+  const path = area.label === '故事' && store.overview?.currentVolume ? '/volumes' : area.tabs[0].path
+  return `/projects/${id.value}${path}`
+}
+const currentTabs = computed(() => current.value?.area.tabs ?? [])
+const tabActive = (tab: AreaTab) => tab.name === tabName(route.name)
 const pendingDecisions = computed(() => store.pendingDecisionCount ?? 0)
 // Below this width the assistant floats over the page, so it starts folded
 // (the same 1180px breakpoint as prototype-shell.css).
@@ -80,7 +63,7 @@ watch(() => route.fullPath, () => {
     <div class="prototype-shell" :class="{ 'assistant-collapsed': assistantCollapsed, 'no-assistant': !inWorkspace }">
       <nav class="prototype-nav" aria-label="作品导航">
         <template v-if="inWorkspace">
-          <RouterLink v-for="item in workspaceNav" :key="item.label" :to="item.to" class="prototype-navbutton" :class="{ active: isActive(item) }" :aria-current="isActive(item) ? 'page' : undefined"><span class="ico" aria-hidden="true">{{ item.icon }}</span><span>{{ item.label }}</span></RouterLink>
+          <RouterLink v-for="area in WORKSPACE_AREAS" :key="area.label" :to="areaPath(area)" class="prototype-navbutton" :class="{ active: current?.area === area }" :aria-current="current?.area === area ? 'page' : undefined"><span class="ico" aria-hidden="true">{{ area.icon }}</span><span>{{ area.label }}</span></RouterLink>
           <div class="prototype-navspacer" />
           <RouterLink :to="`/projects/${id}/settings`" class="prototype-navbutton" :class="{ active: route.name === 'project-settings' }"><span class="ico">⚙</span><span>作品设置</span></RouterLink>
         </template>

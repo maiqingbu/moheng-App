@@ -75,6 +75,11 @@ describe('R2 文档修订对应的前端行为', () => {
       },
     })
     const page = await render(ProductionCenter)
+    // 2026-11-27: the cost sits in 生产详情, drawn once that is opened.
+    const details = page.querySelector('[data-production-details]') as HTMLDetailsElement
+    details.open = true
+    details.dispatchEvent(new Event('toggle'))
+    await nextTick()
 
     expect(page.querySelector('[data-cost-summary]')).toBeTruthy()
     expect(page.textContent).toContain('¥2.00')

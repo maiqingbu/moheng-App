@@ -9,7 +9,8 @@ const read = relative => fs.readFileSync(path.join(root, relative), 'utf8')
 
 test('B12 History remains active and B13 Health now uses its formal workspace', () => {
   const router = read('src/app/router.ts')
-  const shell = read('src/ui/components/AppShell.vue')
+  // 2026-11-27: the shell reads its areas from presentation/workspaceAreas.
+  const shell = `${read('src/ui/components/AppShell.vue')}\n${read('src/ui/presentation/workspaceAreas.ts')}`
   assert.match(router, /HistoryCenter/)
   assert.match(router, /path:\s*['"]\/projects\/:id\/history['"]/) 
   assert.match(router, /path:\s*['"]\/projects\/:id\/health['"].*LongFormHealth/)

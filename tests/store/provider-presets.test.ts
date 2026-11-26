@@ -33,7 +33,7 @@ describe('内置服务商预设', () => {
     const page = source('src/ui/pages/SettingsPage.vue')
     expect(page).toContain('data-provider-preset')
     expect(page).toContain('@change="choosePreset"')
-    expect(page).toContain('modelChoices(preset,models)')
+    expect(page).toContain('modelChoices(preset.value,models.value)')
     expect((page.match(/list="provider-models"/g) ?? []).length).toBe(3)
   })
 })

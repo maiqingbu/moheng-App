@@ -22,7 +22,8 @@ export function inspectB11CapabilityParity(projectRoot = root) {
   const frontend = fs.readFileSync(path.join(projectRoot, 'src/infrastructure/tauri/frontendPort.ts'), 'utf8')
   const commands = fs.readFileSync(path.join(projectRoot, 'src-tauri/src/commands.rs'), 'utf8')
   const router = fs.readFileSync(path.join(projectRoot, 'src/app/router.ts'), 'utf8')
-  const shell = fs.readFileSync(path.join(projectRoot, 'src/ui/components/AppShell.vue'), 'utf8')
+  // 2026-11-27: the shell reads its areas from presentation/workspaceAreas.
+  const shell = ['src/ui/components/AppShell.vue', 'src/ui/presentation/workspaceAreas.ts'].map(file => fs.readFileSync(path.join(projectRoot, file), 'utf8')).join('\n')
   const overview = fs.readFileSync(path.join(projectRoot, 'src/ui/pages/ProjectOverview.vue'), 'utf8')
   const creation = fs.readFileSync(path.join(projectRoot, 'src/ui/pages/CreationLaunch.vue'), 'utf8')
   const market = fs.readFileSync(path.join(projectRoot, 'src/ui/pages/MarketStrategy.vue'), 'utf8')

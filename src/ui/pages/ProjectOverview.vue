@@ -2,7 +2,8 @@
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projectStore'
-import { blockReasonLabels, phaseLabel, signingLabels } from '../presentation/projectLabels'
+import { phaseLabel, signingLabels } from '../presentation/projectLabels'
+import { homeNextStep } from '../presentation/homeNextStep'
 
 const store = useProjectStore()
 const router = useRouter()
@@ -12,43 +13,10 @@ const id = computed(() => store.currentProjectId ?? '')
 const currentVolume = computed(() => overview.value?.currentVolume)
 const recentChapters = computed(() => overview.value?.recentChapters ?? [])
 const pending = computed(() => store.pendingDecisionCount ?? 0)
-const nextChapter = computed(() => recentChapters.value.length ? recentChapters.value[0].number + 1 : 1)
 
-// 2026-11-27: one next step, said plainly, from the work's own state; the
-// button goes exactly where that step is done.
 const nextStep = computed(() => {
-  const state = project.value?.runState
-  const phase = project.value?.phase
-  if (pending.value) return {
-    title: `先处理 ${pending.value} 件待决定`,
-    note: '它们会影响接下来怎么写，处理完就能继续。',
-    action: '去处理', to: `/projects/${id.value}/decisions`,
-  }
-  if (state === 'ACTIVE') return {
-    title: '正在写作中',
-    note: '写完、检查完会自动入库，可以随时去看进度。',
-    action: '查看写作进度', to: `/projects/${id.value}/production`,
-  }
-  if (state === 'BLOCKED' || state === 'FAILED') return {
-    title: '写作停下来了',
-    note: project.value?.blockReason ? `原因：${blockReasonLabels[project.value.blockReason]}。` : '上一次没有写完，需要看一下原因。',
-    action: '去看原因', to: `/projects/${id.value}/production`,
-  }
-  if (state === 'PAUSED') return {
-    title: '写作已暂停',
-    note: '准备好了就从写作页继续。',
-    action: '去写作页', to: `/projects/${id.value}/production`,
-  }
-  if (phase === 'PITCHING' || phase === 'STORY_BLUEPRINT') return {
-    title: '先定好故事方向',
-    note: '方向和设定确认后，就能开始写第一章。',
-    action: '去定方向', to: `/projects/${id.value}/directions`,
-  }
-  return {
-    title: `写第 ${nextChapter.value} 章`,
-    note: recentChapters.value.length ? `第 ${recentChapters.value[0].number} 章已经入库。` : '设定已经就绪，可以开始写第一章。',
-    action: '去写作', to: `/projects/${id.value}/production`,
-  }
+  const step = homeNextStep(project.value!, pending.value, recentChapters.value[0]?.number ?? null)
+  return { ...step, to: `/projects/${id.value}${step.path}` }
 })
 
 const stageMetric = computed(() => currentVolume.value
@@ -128,5 +96,5 @@ const healthNote = computed(() => overview.value?.healthSummary.note ?? '正式�
 .home-next-label { font-size: 13px; }
 .home-next-action { background: #ffffff; color: var(--pine-800); border-color: #ffffff; font-weight: 600; padding: 10px 20px; }
 .home-metrics { margin-top: 16px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
-@media (max-width: 900px) { .home-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@container workspace (max-width: 900px) { .home-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 </style>

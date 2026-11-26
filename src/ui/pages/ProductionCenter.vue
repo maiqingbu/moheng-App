@@ -361,6 +361,8 @@ async function startProduction() {
 // be given a fresh allowance by hand, after a second confirmation.
 const chapterQuota = computed(() => production.value?.nextChapter?.quota ?? null)
 const chapterQuotaExhausted = computed(() => isChapterQuotaExhausted(chapterQuota.value))
+// The details are drawn only once opened.
+const detailsOpen = ref(false)
 const quotaResetPending = ref(false)
 async function resetChapterQuota() {
   const chapter = production.value?.nextChapter
@@ -598,8 +600,6 @@ function costText(value: number | null | undefined) {
     <!-- Only a check that stops writing is shown up here; the full check is in 生产详情. -->
     <NarrativeValidation v-if="production.validation && !production.validation.canExecute" :validation="production.validation" :advanced="store.advancedMode" />
 
-
-
     <section class="card pad section opening-evaluation-panel" data-opening-evaluation>
       <div class="card-head">
         <div>
@@ -792,8 +792,6 @@ function costText(value: number | null | undefined) {
       </aside>
     </div>
 
-
-
     <section v-if="production.repair" class="card pad section">
       <div class="card-head">
         <div><h2 class="card-title">需要确认的修复</h2><p class="card-subtitle">系统会先说明影响范围；只有你明确确认后才会执行，并在完成后重新核对。</p></div>
@@ -812,8 +810,9 @@ function costText(value: number | null | undefined) {
         <strong>{{ repairExecutionLabel(production.repair.executionReceipt) }}</strong><small class="muted">{{ production.repair.executionReceipt.status === 'REPAIR_VERIFICATION_INCOMPLETE' ? '重新核对只检查现有回执，不会再次执行正式操作。' : production.repair.executionReceipt.status === 'REPAIR_VERIFICATION_FAILED' ? '请查看回执中的验证项；系统不会自动重试正式操作。' : production.repair.executionReceipt.status === 'REPAIR_VERIFIED' ? '正式操作及其预期结果已核对。' : '请根据回执状态核对结果。' }}</small>
       </div>
     </section>
-    <details class="card pad section production-details" data-production-details>
+    <details class="card pad section production-details" data-production-details @toggle="detailsOpen = ($event.target as HTMLDetailsElement).open">
       <summary class="card-title">生产详情 <span class="muted production-details-hint">费用、检查规则、模型调用、创作建议</span></summary>
+      <template v-if="detailsOpen">
       <p class="card-subtitle">日常写作不用看这里；章节卡住、费用异常或想知道为什么这样写时再展开。</p>
       <NarrativeValidation v-if="!production.validation || production.validation.canExecute" :validation="production.validation" :advanced="store.advancedMode" />
       <section v-if="production.modelRuns?.length" class="card pad section" data-model-runs>
@@ -899,6 +898,7 @@ function costText(value: number | null | undefined) {
           <strong>{{ dimensionLabel(finding.dimension) }}</strong><small class="muted">{{ finding.repairable ? '建议复核' : '仅供查看' }}</small>
         </div>
       </section>
+      </template>
     </details>
   </div>
   <div v-else-if="project" class="page">

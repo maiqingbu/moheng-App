@@ -13,7 +13,9 @@ test('Post-B14 shell uses task-oriented IA and a real assistant dock', () => {
   const overview = read('src/ui/pages/ProjectOverview.vue')
   assert.match(shell, /ProjectAssistantDock/)
   // 2026-11-27 (owner approved the redesign): five task areas, decisions in the top bar.
-  for (const label of ['首页', '写作', '故事', '稿件', '资料库']) assert.match(shell, new RegExp(`label: '${label}'`))
+  const areas = read('src/ui/presentation/workspaceAreas.ts')
+  assert.match(shell, /WORKSPACE_AREAS/)
+  for (const label of ['首页', '写作', '故事', '稿件', '资料库']) assert.match(areas, new RegExp(`label: '${label}', icon`))
   assert.match(shell, /件事等你决定/)
   // No button may promise what it does not do (the old search only opened the library).
   assert.doesNotMatch(shell, /⌘K 搜索/)
