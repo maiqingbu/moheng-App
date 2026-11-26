@@ -151,3 +151,9 @@
 .prototype-btn.decision-pill { background: var(--amber-soft); color: #6e4510; border-color: transparent; font-weight: 600; text-decoration: none; border-radius: 999px; }
 .prototype-btn.decision-pill:hover { filter: brightness(.97); }
 :root[data-theme="dark"] .prototype-btn.decision-pill { color: var(--amber); }
+/* 2026-11-27: the pages of one area, side by side above the page. */
+.area-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 16px; padding: 4px; border-radius: 12px; background: var(--surface-soft); width: fit-content; max-width: 100%; }
+.area-tab { padding: 6px 14px; border-radius: 9px; color: var(--ink-2); text-decoration: none; font-size: 13px; display: inline-flex; align-items: center; gap: 6px; }
+.area-tab:hover { background: var(--surface); }
+.area-tab.active { background: var(--surface); color: var(--pine-700); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+.area-tab-count { min-width: 18px; padding: 0 5px; border-radius: 9px; background: var(--amber-soft); color: #6e4510; font-size: 12px; text-align: center; }

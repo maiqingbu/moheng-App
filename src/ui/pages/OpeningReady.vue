@@ -64,7 +64,7 @@ function focusOpeningProgress() {
         <div class="task-row"><strong>前三章暂不揭开</strong><span>{{ opening.forbiddenReveals.join('；') }}</span></div>
         <div class="task-row"><strong>黄金三章进度</strong><span>第 {{ openingProgress?.completed ?? '—' }} / {{ openingProgress?.total ?? 3 }} 章 · 当前第 {{ openingProgress?.currentChapter ?? '—' }} 章</span></div>
         <div class="task-row"><strong>上一章正式提交</strong><span>{{ openingProgress?.previousCommitted ? '是' : '尚无上一章' }} · 下一章{{ openingProgress?.nextPrepared ? '已准备' : '未准备' }}</span></div>
-        <div v-if="opening.firstChapterPlan" class="task-row"><strong>第一章规划已存在</strong><span>可以进入正式创作中心继续操作。</span></div>
+        <div v-if="opening.firstChapterPlan" class="task-row"><strong>第一章规划已存在</strong><span>可以去写作页继续。</span></div>
         <CommandFeedback :state="approvalState" @confirm="store.confirmCommandResult('opening-ready')" />
         <CommandFeedback :state="startState" @confirm="store.confirmCommandResult('opening-start')" />
         <div class="actions" style="justify-content:flex-end;margin-top:16px"><button v-if="!opening.ready" class="btn primary" @click="approvalInFlight ? focusOpeningProgress() : approveOpening()">{{ approvalInFlight ? '查看当前开篇进度' : '确认开篇准备' }}</button><button v-else class="btn primary" @click="startInFlight ? focusOpeningProgress() : startCreating()">{{ startInFlight ? '查看当前开篇进度' : '进入正式创作' }}</button></div>

@@ -137,8 +137,8 @@ function openDestination(destination: string) {
             <div class="card-head"><div><span class="badge" :class="factor.severity === 'risk' ? 'danger' : factor.severity === 'attention' ? 'warning' : 'success'">{{ severityLabel(factor.severity) }}</span><h3 style="margin:8px 0 4px">{{ factorLabel(factor.factorCode) }}</h3></div><small class="muted">{{ truthClassLabel(factor.truthClass) }}</small></div>
             <p class="card-subtitle">{{ factor.summary }}</p>
             <p class="muted" style="font-size:12px">{{ factor.detail }}</p>
-            <p class="muted health-source-count">
-              可核验来源：{{ factorSourceCount(factor) }} 项
+            <p v-if="factorSourceCount(factor) > 0" class="muted health-source-count">
+              依据：{{ factorSourceCount(factor) }} 条记录
               <span v-if="factor.sourceRefsTruncated">（当前列出前 {{ factor.sourceRefs.length }} 项，完整来源可按页查看）</span>
             </p>
             <div v-if="factorSourceCount(factor) > 0" class="health-source-control">

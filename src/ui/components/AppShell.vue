@@ -36,6 +36,21 @@ const workspaceNav = computed<NavItem[]>(() => inWorkspace.value ? [
   { label: '资料库', icon: '◎', to: `/projects/${id.value}/graph`, matches: ['graph', 'health'] },
 ] : [])
 const isActive = (item: NavItem) => item.matches.includes(String(route.name))
+// Each area's pages, so none is left without a way in: a row of tabs above
+// the page when the area has more than one.
+type AreaTab = { label: string; name: string; path: string }
+const areaTabs: AreaTab[][] = [
+  [{ label: '首页', name: 'project-overview', path: '' }, { label: '待决定', name: 'decisions', path: '/decisions' }],
+  [{ label: '写作', name: 'production', path: '/production' }, { label: '开篇三章', name: 'opening-ready', path: '/opening' }],
+  [{ label: '故事方向', name: 'directions', path: '/directions' }, { label: '市场定位', name: 'market', path: '/market' }, { label: '故事设定', name: 'story-setup', path: '/setup' }, { label: '写作风格', name: 'craft-setup', path: '/craft' }, { label: '分卷', name: 'volumes', path: '/volumes' }, { label: '完结准备', name: 'completion', path: '/completion' }],
+  [{ label: '阅读', name: 'read', path: '/read' }, { label: '版本记录', name: 'history', path: '/history' }],
+  [{ label: '作品图谱', name: 'graph', path: '/graph' }, { label: '长篇健康', name: 'health', path: '/health' }],
+]
+const currentTabs = computed(() => {
+  const name = route.name === 'volume-workspace' ? 'volumes' : String(route.name)
+  return inWorkspace.value ? areaTabs.find(tabs => tabs.some(tab => tab.name === name)) ?? [] : []
+})
+const tabActive = (tab: AreaTab) => tab.name === (route.name === 'volume-workspace' ? 'volumes' : String(route.name))
 const pendingDecisions = computed(() => store.pendingDecisionCount ?? 0)
 // Below this width the assistant floats over the page, so it starts folded
 // (the same 1180px breakpoint as prototype-shell.css).
@@ -78,7 +93,7 @@ watch(() => route.fullPath, () => {
         </template>
       </nav>
 
-      <main ref="workspaceEl" class="prototype-workspace"><WriteLockBanner :locked="inWorkspace && store.writeLocked" /><div v-if="inWorkspace && store.loadError" class="prototype-panel"><strong>暂时无法读取作品</strong><p>{{ productErrorMessage(store.loadError, '请返回作品库后重试。') }}</p><button class="prototype-btn" type="button" @click="store.refresh">重试</button></div><LoadingBlock v-else-if="inWorkspace && store.loading && !store.overview" class="prototype-panel" caption="正在读取作品记录…" /><slot v-else /></main>
+      <main ref="workspaceEl" class="prototype-workspace"><WriteLockBanner :locked="inWorkspace && store.writeLocked" /><div v-if="inWorkspace && store.loadError" class="prototype-panel"><strong>暂时无法读取作品</strong><p>{{ productErrorMessage(store.loadError, '请返回作品库后重试。') }}</p><button class="prototype-btn" type="button" @click="store.refresh">重试</button></div><LoadingBlock v-else-if="inWorkspace && store.loading && !store.overview" class="prototype-panel" caption="正在读取作品记录…" /><template v-else><nav v-if="currentTabs.length > 1" class="area-tabs" aria-label="本区页面"><RouterLink v-for="tab in currentTabs" :key="tab.name" :to="`/projects/${id}${tab.path}`" class="area-tab" :class="{ active: tabActive(tab) }" :aria-current="tabActive(tab) ? 'page' : undefined">{{ tab.label }}<span v-if="tab.name === 'decisions' && pendingDecisions" class="area-tab-count">{{ pendingDecisions }}</span></RouterLink></nav><slot /></template></main>
       <ProjectAssistantDock v-if="inWorkspace" :collapsed="assistantCollapsed" @toggle="assistantCollapsed = !assistantCollapsed" />
     </div>
   </div>
