@@ -350,6 +350,20 @@ fn round100_an_event_or_an_ending_written_out_as_prose_is_sent_back() {
     assert!(!has(&problems, "第 1 场"), "{problems:?}");
 }
 
+/// Real run round 12: chapter goals of 80-120 characters scripted each
+/// chapter (place, tool, the grey mark moving half an inch, what it proves).
+#[test]
+fn round130_a_chapter_goal_written_out_as_steps_is_sent_back() {
+    let mut scripted = plan();
+    scripted["chapterGoal"] = json!("沈砚在社区卫生站三号诊室当着吴医生的面完成体检报告备注栏四字书写，该文字未被系统抹除，并同步触发灰痕加速蔓延半寸");
+    let problems = plan_problems(&scripted, 1, &bible(), &creation_ledger(&[], &bible()));
+    assert!(has(&problems, "本章目标写成了步骤"), "{problems:?}");
+    let mut direction = plan();
+    direction["chapterGoal"] = json!("沈砚证实有人记得他时灰痕会退，吴医生成了知情人");
+    let problems = plan_problems(&direction, 1, &bible(), &creation_ledger(&[], &bible()));
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
 #[test]
 fn ld8_a_chapter_shaped_like_the_two_before_it_is_a_reminder_not_a_replan() {
     let earlier = plan()["craft"].clone();

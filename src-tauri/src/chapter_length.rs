@@ -118,7 +118,12 @@ impl ChapterLengthRange {
     /// 15% past the maximum or short of the minimum, too far off to cut or
     /// pad without harm, so it is written again.
     pub fn is_far_off(&self, characters: i64) -> bool {
-        characters * 20 > self.max * 23 || characters * 20 < self.min * 17
+        self.is_far_too_long(characters) || characters * 20 < self.min * 17
+    }
+
+    /// Whether a draft is more than 15% past the maximum.
+    pub fn is_far_too_long(&self, characters: i64) -> bool {
+        characters * 20 > self.max * 23
     }
 
     /// The length a chapter aims for: the middle of the range.
@@ -267,7 +272,8 @@ pub(crate) fn cut_sentences(
 /// of the lines with a quote in the conversation around its line, or only
 /// itself when its line has none. One line of narration between two such
 /// lines does not end the conversation (real run round 10: 小杨脚步停了一下
-/// split a question from its answer); it stays out of the exchange. A line
+/// split a question from its answer); it goes with the exchange (round 13:
+/// cut alone, it left a line answering an action no longer written). A line
 /// that must stay (a planned event, by `single`) does end it.
 fn exchanges(body: &str, spans: &[(usize, usize)], single: &[bool]) -> Vec<Vec<usize>> {
     let lines = body.split('\n').collect::<Vec<_>>();
@@ -292,13 +298,17 @@ fn exchanges(body: &str, spans: &[(usize, usize)], single: &[bool]) -> Vec<Vec<u
         .collect::<BTreeSet<_>>();
     // Narration lines since the last spoken one; None before any.
     let mut since_spoken = None;
+    // The latest narration line.
+    let mut narration = 0;
     for (index, line) in lines.iter().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
         if line.contains(['“', '「']) {
-            if !matches!(since_spoken, Some(0 | 1)) {
-                run += 1;
+            match since_spoken {
+                Some(0) => {}
+                Some(1) => runs[narration] = Some(run),
+                _ => run += 1,
             }
             runs[index] = Some(run);
             since_spoken = Some(0);
@@ -306,6 +316,7 @@ fn exchanges(body: &str, spans: &[(usize, usize)], single: &[bool]) -> Vec<Vec<u
             since_spoken = None;
         } else {
             since_spoken = since_spoken.map(|lines: usize| lines + 1);
+            narration = index;
         }
     }
     (0..spans.len())
@@ -474,12 +485,29 @@ mod tests {
         let shortened = cut_sentences(body, &[first], range, &PlannedEvents::default());
         assert!(shortened.contains("“用量？”"), "{shortened}");
         assert!(shortened.contains("水机在走廊尽头"), "{shortened}");
-        let most = ["“水机", "“用量", "“锡箔"].map(|text| sentence_at(body, text));
+        let most = ["“水机", "小杨脚步", "“用量", "“锡箔"].map(|text| sentence_at(body, text));
         let shortened = cut_sentences(body, &most, range, &PlannedEvents::default());
         for line in ["水机", "用量", "主任签字", "锡箔片"] {
             assert!(!shortened.contains(line), "{line}: {shortened}");
         }
         assert!(shortened.contains("第四张锡箔落下"), "{shortened}");
+    }
+
+    #[test]
+    fn round130_the_narration_inside_a_conversation_goes_only_with_it() {
+        // Real run round 12: the line where the doctor typed the key went
+        // alone and left 屏幕跳出一行提示 with no input before it.
+        let body = "诊室里很静。\n“用这六个字。”\n吴医生把六个字符敲进对话框。\n“校准通过了。”\n窗外有车开过。";
+        let range = ChapterLengthRange { min: 10, max: 20 };
+        let typed = sentence_at(body, "吴医生");
+        let shortened = cut_sentences(body, &[typed], range, &PlannedEvents::default());
+        assert!(shortened.contains("吴医生把六个字符"), "{shortened}");
+        let whole = ["“用这", "吴医生", "“校准"].map(|text| sentence_at(body, text));
+        let shortened = cut_sentences(body, &whole, range, &PlannedEvents::default());
+        assert!(
+            !shortened.contains("吴医生") && !shortened.contains("六个字"),
+            "{shortened}"
+        );
     }
 
     #[test]

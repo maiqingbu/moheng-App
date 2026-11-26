@@ -1244,6 +1244,9 @@ fn scarce_allowance_skips_polish_but_still_runs_the_submission_checks() {
         .unwrap();
     drop(connection);
     write_next_chapter(&state, &project_id, "polish-budget:first");
+    // Review 2026-11-27: a skipped rewrite says why in the receipt.
+    let review = prose_review(&state, &project_id);
+    assert_eq!(review["rewriteSkipped"], "NO_MODEL_RUNS_LEFT", "{review}");
     let calls = gateway.calls.lock().unwrap();
     assert!(inputs(&calls, "REWRITE_PASSAGES").is_empty());
     assert_eq!(inputs(&calls, "CHECK_CONTINUITY").len(), 1);
@@ -1978,15 +1981,7 @@ fn qc1_a_failed_rewrite_never_stops_the_chapter() {
         },
     );
     write_next_chapter(&state, &project_id, "rwfail:production:1");
-    let connection = state.manager.open(&project_id, "", NOW).unwrap();
-    let review: String = connection
-        .query_row(
-            "SELECT json_extract(p.payload_json,'$.craftSkills.proseReview') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ProductionReceipt'",
-            [&project_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let review: Value = serde_json::from_str(&review).unwrap();
+    let review = prose_review(&state, &project_id);
     assert!(review["rewriteError"].is_string(), "{review}");
     assert_eq!(review["editsApplied"], 0);
 }
@@ -2118,4 +2113,19 @@ fn rp1_a_repeat_in_a_legacy_checkpoint_is_rewritten_once_more() {
         .unwrap();
     assert!(!body.contains("第三下咽回去了"), "{body}");
     assert!(body.contains("后来没了动静"));
+}
+
+/// The prose review of the project's production receipt.
+fn prose_review(state: &KernelState, project_id: &str) -> Value {
+    let review: String = state
+        .manager
+        .open(project_id, "", NOW)
+        .unwrap()
+        .query_row(
+            "SELECT json_extract(p.payload_json,'$.craftSkills.proseReview') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ProductionReceipt'",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    serde_json::from_str(&review).unwrap()
 }

@@ -248,10 +248,10 @@ export interface StoryBibleR1 {
   "confirmedFromRef": unknown
   "normalWorld": string
   "mechanism": { "experience": string; "rules": Array<{ "rule": string; "numbers": string; "howReadersSeeIt": string }> }
-  "protagonist": { "name": string; "personality": string; "flaw": string; "wantsNow": string; "humorStyle": string; "innerVoiceStyle": string }
+  "protagonist": { "name": string; "gender": string; "personality": string; "flaw": string; "wantsNow": string; "humorStyle": string; "innerVoiceStyle": string }
   "emotionalAnchor": { "object": string; "memorySummary": string }
-  "antagonist": { "name": string; "position": string; "wants": string; "method": string }
-  "cast": Array<{ "name": string; "role": string; "relation": string; "privateAgenda": string; "speechStyle": string; "contrastWithProtagonist": string; "firstAppears": number }>
+  "antagonist": { "name": string; "gender": string; "position": string; "wants": string; "method": string }
+  "cast": Array<{ "name": string; "gender": string; "role": string; "relation": string; "privateAgenda": string; "speechStyle": string; "contrastWithProtagonist": string; "firstAppears": number }>
   "openingArc": Array<{ "chapter": number; "direction": string; "protagonistWin": string }>
   "createdAt": Rfc3339Utc
 }

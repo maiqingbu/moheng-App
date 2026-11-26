@@ -265,8 +265,54 @@ pub fn check_plan(
 /// broken into paragraphs (real run round 22: one paragraph; round 26: four
 /// of 400 to 600 characters, where a chapter's run 40 to 150).
 pub fn is_unbroken(body: &str) -> bool {
-    body.lines()
-        .any(|paragraph| paragraph.chars().count() > 300)
+    body.lines().any(is_long_paragraph)
+}
+
+/// The most characters a paragraph runs before it counts as unbroken.
+const PARAGRAPH_CHARS: usize = 300;
+
+fn is_long_paragraph(paragraph: &str) -> bool {
+    paragraph.chars().count() > PARAGRAPH_CHARS
+}
+
+/// How many characters a paragraph broken by `break_long_paragraphs` runs
+/// before it ends at the next sentence end.
+const BROKEN_PARAGRAPH_CHARS: usize = 120;
+
+/// Round 13 (review 2026-11-27): `body` with each paragraph over
+/// `PARAGRAPH_CHARS` broken at sentence ends outside quotes, about every
+/// `BROKEN_PARAGRAPH_CHARS` characters; the words stay as they are.
+pub fn break_long_paragraphs(body: &str) -> String {
+    if !is_unbroken(body) {
+        return body.to_owned();
+    }
+    body.split('\n')
+        .map(|line| {
+            if !is_long_paragraph(line) {
+                return line.to_string();
+            }
+            let mut broken = String::with_capacity(line.len() + 16);
+            let (mut depth, mut run, mut ended) = (0_i32, 0, false);
+            for c in line.chars() {
+                broken.push(c);
+                run += 1;
+                match c {
+                    '“' | '「' => depth += 1,
+                    '”' | '」' => depth -= 1,
+                    _ => {}
+                }
+                let ends = matches!(c, '。' | '！' | '？' | '…');
+                let sentence_end = ends || (matches!(c, '”' | '」') && ended);
+                ended = ends;
+                if depth <= 0 && sentence_end && run >= BROKEN_PARAGRAPH_CHARS {
+                    broken.push('\n');
+                    run = 0;
+                }
+            }
+            broken.trim_end_matches('\n').to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Real run round 32: Markdown the writer leaves in the prose, which the
@@ -940,26 +986,21 @@ fn short_lines(text: &str) -> BTreeSet<&str> {
         .collect()
 }
 
-/// The short lines both of the two latest chapters of `history` (newest
-/// first) spoke (real run round 9: the same two-word exchange closed scene
-/// after scene, below the length the phrase checks look at).
-pub fn repeated_short_lines(history: &[String]) -> Vec<String> {
-    let Some([latest, before]) = history.get(..2) else {
-        return Vec::new();
-    };
-    let earlier = short_lines(before)
+/// The short lines the latest chapter of `history` (newest first) spoke
+/// (real run round 9: the same two-word exchange closed scene after scene,
+/// below the length the phrase checks look at; round 12: a chapter spoke
+/// the one before's exchanges again).
+pub fn recent_short_lines(history: &[String]) -> Vec<String> {
+    history
+        .first()
         .into_iter()
-        .map(line_key)
-        .collect::<BTreeSet<_>>();
-    short_lines(latest)
-        .into_iter()
-        .filter(|line| earlier.contains(line_key(line)))
+        .flat_map(|latest| short_lines(latest))
         .map(ToOwned::to_owned)
         .collect()
 }
 
 /// A finding for each sentence of `body` that speaks one of the short
-/// `lines` the two latest chapters both spoke, the third chapter in a row.
+/// `lines` the latest chapter spoke.
 pub(crate) fn short_line_findings(lines: &[String], body: &str) -> Vec<Value> {
     let keys = lines
         .iter()
@@ -978,7 +1019,7 @@ pub(crate) fn short_line_findings(lines: &[String], body: &str) -> Vec<Value> {
                 "word_repetition",
                 "MEDIUM",
                 quote,
-                format!("「{line}」前两章都说过，这一章又说"),
+                format!("「{line}」上一章说过，这一章又说"),
                 "换一句这个场面才有的话，或删掉这一问一答",
             ))
         })
@@ -3457,6 +3498,24 @@ mod tests {
     }
 
     #[test]
+    fn round130_a_redraw_left_unbroken_is_broken_at_sentence_ends() {
+        // Review 2026-11-27: the redraw was never checked for paragraphs.
+        let sentence = format!("{}。", "正".repeat(59));
+        let spoken = format!("“{}。{}”", "说".repeat(40), "话".repeat(40));
+        let long = format!("{}{spoken}{}", sentence.repeat(3), sentence.repeat(3));
+        let body = format!("开头。\n{long}\n结尾。");
+        let broken = break_long_paragraphs(&body);
+        assert!(!is_unbroken(&broken), "{broken}");
+        assert_eq!(broken.replace('\n', ""), body.replace('\n', ""));
+        assert!(broken
+            .lines()
+            .all(|line| line.matches('“').count() == line.matches('”').count()));
+        assert!(broken.starts_with("开头。\n") && broken.ends_with("\n结尾。"));
+        let short = "一句。\n两句。";
+        assert_eq!(break_long_paragraphs(short), short);
+    }
+
+    #[test]
     fn a_rejected_direction_is_told_it_is_a_direction() {
         let feedback = plan_feedback(&format!(
             "{}:阶段少了",
@@ -3809,17 +3868,19 @@ mod tests {
     }
 
     #[test]
-    fn round90_a_short_line_of_both_latest_chapters_is_avoided_then_rewritten() {
+    fn round130_a_short_line_of_the_latest_chapter_is_avoided_then_rewritten() {
+        // Real run round 12: chapter 9 spoke chapter 8's exchanges again
+        // (“什么时候的事。”“上个月。”), one chapter later.
         let history = [
-            "“你手。”\n“记着！”沈砚把丝带缠紧。“好。”".to_string(),
-            "陈默看着他。“记着。”他说。“好。”“走廊那头的推车是空的吗？”".to_string(),
+            "“什么时候的事。”\n“上个月。”沈砚把袖子卷起。“好。”".to_string(),
+            "陈默看着他。“记着。”他说。".to_string(),
         ];
-        assert_eq!(repeated_short_lines(&history), ["记着！"]);
-        assert!(repeated_short_lines(&history[..1]).is_empty());
-        let body = "沈砚点头。\n“记着。”\n“好。”";
-        let findings = short_line_findings(&repeated_short_lines(&history), body);
+        assert_eq!(recent_short_lines(&history), ["上个月。", "什么时候的事。"]);
+        assert!(recent_short_lines(&[]).is_empty());
+        let body = "陈伯点头。\n“上个月。”\n“记着。”\n“好。”";
+        let findings = short_line_findings(&recent_short_lines(&history), body);
         assert_eq!(findings.len(), 1, "{findings:?}");
-        assert_eq!(findings[0]["quote"], "“记着。”");
+        assert_eq!(findings[0]["quote"], "“上个月。”");
     }
 
     #[test]

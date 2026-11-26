@@ -365,6 +365,56 @@ fn round110_a_draft_far_off_the_range_is_written_again_with_its_count() {
     }
 }
 
+#[test]
+fn round130_a_redraw_still_far_too_long_is_shortened_by_the_writer_not_cut() {
+    // Real run round 12: redraws of 2749-2997 characters (range 1800-2200)
+    // were cut by 20%-27% and left lines without their setup.
+    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[3600, 3500, 2900]));
+    let project_id = "p-compressed";
+    let (_temp, state, chapter_id, result) = produce(gateway.clone(), project_id);
+    result.unwrap();
+    let renders = gateway.inputs("RENDER_CHAPTER");
+    assert_eq!(renders.len(), 3);
+    let feedback = &renders[2]["outputFeedback"];
+    assert_eq!(
+        ai_novel_production_system_core::chapter_length::character_count(
+            feedback["previousDraft"].as_str().unwrap()
+        ),
+        3500
+    );
+    assert!(feedback["instruction"].as_str().unwrap().contains("3500"));
+    assert!(gateway.inputs("CUT_CHAPTER").is_empty());
+    assert_eq!(committed_word_count(&state, project_id, &chapter_id), 2900);
+
+    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[3600, 3500, 3480]));
+    let (_temp, _state, _chapter_id, result) = produce(gateway.clone(), "p-compressed-too-long");
+    assert!(result
+        .unwrap_err()
+        .starts_with("B08_RENDER_LENGTH_OUT_OF_RANGE:3480"));
+    assert!(gateway.inputs("CUT_CHAPTER").is_empty());
+}
+
+#[test]
+fn round130_a_redraw_left_in_long_paragraphs_is_broken_before_it_is_kept() {
+    // Review 2026-11-27: only the first draft was checked for paragraphs.
+    let mut gateway = CraftGateway::new(vec![good_plan()], &[3600, 2500]);
+    // The redraw holds one paragraph of 60 sentences.
+    gateway.inject = vec![
+        String::new(),
+        distinct_cuttable_sentences().replace('\n', ""),
+    ];
+    let gateway = Arc::new(gateway);
+    let project_id = "p-redraw-unbroken";
+    let (_temp, state, _chapter_id, result) = produce(gateway.clone(), project_id);
+    result.unwrap();
+    assert_eq!(gateway.inputs("RENDER_CHAPTER").len(), 2);
+    let body = committed_body(&state, project_id);
+    assert!(
+        !ai_novel_production_system_core::chapter_craft::is_unbroken(&body),
+        "{body}"
+    );
+}
+
 fn distinct_cuttable_sentences() -> String {
     (0..60)
         .map(|n| {

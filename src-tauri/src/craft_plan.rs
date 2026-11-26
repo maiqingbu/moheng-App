@@ -49,6 +49,10 @@ pub(crate) const SCENE_EVENTS: std::ops::RangeInclusive<usize> = 1..=1;
 /// Round 10: the most characters an event or the ending is stated in; a
 /// longer one is prose the writer would copy.
 const DIRECTION_CHARS: usize = 50;
+/// Round 13 (owner decision 2026-11-27): the most characters the chapter
+/// goal is stated in (real run round 12: goals of 80-120 characters
+/// scripted the place, the tool and what each step proves).
+const GOAL_CHARS: usize = 40;
 /// What is wrong with the device a plan uses, against the earlier uses.
 fn device_problems(planned: &Value, ledger: &Value) -> Vec<String> {
     let mut problems = Vec::new();
@@ -571,6 +575,12 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
                 ));
             }
         }
+    }
+    let goal_length = text(&plan["chapterGoal"]).chars().count();
+    if goal_length > GOAL_CHARS {
+        problems.push(format!(
+            "本章目标写成了步骤（{goal_length} 字）：{GOAL_CHARS} 字以内只写这一章结束时故事停在哪里，在哪里、用什么、怎么做留给写手"
+        ));
     }
     let hook_length = text(&craft["endHook"]).chars().count();
     if hook_length > DIRECTION_CHARS {

@@ -135,6 +135,23 @@ fn a_story_bible_reply_off_the_spec_is_caught_for_a_resend() {
         &json!({"bibles":[quoted, bible(), bible()]})
     )
     .is_err());
+    // Real run round 12: a doctor without a stated sex was 他 in chapter 3
+    // and 她 in chapter 7.
+    for person in ["/protagonist", "/antagonist", "/cast/0"] {
+        let mut unsexed = bible();
+        unsexed
+            .pointer_mut(person)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("gender");
+        let error = check(
+            "GENERATE_STORY_BIBLE",
+            &json!({"bibles":[unsexed, bible(), bible()]}),
+        )
+        .unwrap_err();
+        assert!(error.contains("gender"), "{person}: {error}");
+    }
 }
 
 #[test]

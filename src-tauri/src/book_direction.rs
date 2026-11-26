@@ -18,7 +18,6 @@ pub const CHECK_BOOK_CONTINUATION: &str = "CHECK_BOOK_CONTINUATION";
 pub const CONFIRM_BOOK_CONTINUATION: &str = "CONFIRM_BOOK_CONTINUATION";
 pub(crate) const REPAIR_BOOK_PRESSURE: &str = "REPAIR_BOOK_PRESSURE";
 const BOOK_CONTINUATION_EVIDENCE_INVALID: &str = "B07_BOOK_CONTINUATION_EVIDENCE_INVALID";
-const BOOK_PRESSURE_REPAIR_REQUIRED: &str = "B07_BOOK_PRESSURE_REPAIR_REQUIRED";
 /// The most candidates one confirmation judges (its schema's limit).
 const CONFIRM_CANDIDATES: usize = 20;
 
@@ -55,6 +54,12 @@ fn too_long_step_problem(location: &str, step: &str) -> String {
 fn is_too_long_step(problem: &str) -> bool {
     problem.contains(&format!("」超过 {STEP_CHARS} 字："))
 }
+
+/// What a problem says after a step that replays the opening, and after a
+/// step that is a line of dialogue: the two kinds of step taken out of the
+/// direction handed back.
+const REPLAY_MARK: &str = "」重排了开篇已发生的结果「";
+const LINE_MARK: &str = "」只写了一句台词：";
 
 /// The direction step's input: the confirmed story, what the opening did,
 /// the signing conclusions and the first volume's size.
@@ -288,7 +293,7 @@ fn stage_problems(seed: &Value, bible: &Value, label: &str, room: (&str, i64)) -
         for (step_index, step) in names(&stage["steps"]).enumerate() {
             if says_a_line(step) {
                 problems.push(format!(
-                    "{}「{step}」只写了一句台词：一步写的是结果，这一步之后人物能做、知道或决定什么",
+                    "{}「{step}{LINE_MARK}一步写的是结果，这一步之后人物能做、知道或决定什么",
                     step_location(index, step_index as u64 + 1)
                 ));
             } else if step.chars().count() > STEP_CHARS {
@@ -755,15 +760,17 @@ fn goal_location(stage_index: usize) -> String {
     format!("阶段 {} 的目标", stage_index + 1)
 }
 
-/// Takes the first volume's steps that `feedback` says replay the opening out
-/// of the direction handed back: given back, the planner keeps them.
+/// Takes the first volume's steps that `feedback` says replay the opening or
+/// only speak a line out of the direction handed back: given back, the
+/// planner keeps them. A step sent back for anything else stays to be fixed
+/// in place.
 pub(crate) fn drop_replayed_steps(direction: &mut Value, feedback: &Value) {
     let replayed = |stage_index: usize, index: usize| {
         let start = format!("{}「", step_location(stage_index, index as u64 + 1));
-        // A step that is only too long stays to be shortened in place.
-        items(feedback, "problems")
-            .iter()
-            .any(|problem| text(problem).starts_with(&start) && !is_too_long_step(text(problem)))
+        items(feedback, "problems").iter().map(text).any(|problem| {
+            problem.starts_with(&start)
+                && (problem.contains(REPLAY_MARK) || problem.contains(LINE_MARK))
+        })
     };
     let seeds = direction["volumeIntentSeeds"].as_array_mut();
     let first = seeds
@@ -784,7 +791,7 @@ pub(crate) fn drop_replayed_steps(direction: &mut Value, feedback: &Value) {
 }
 
 fn replay_feedback(location: &str, planned: &str, evidence: &str, reason: &str) -> String {
-    format!("{location}「{planned}」重排了开篇已发生的结果「{evidence}」。{reason}。请从该结果推进新的后果。")
+    format!("{location}「{planned}{REPLAY_MARK}{evidence}」。{reason}。请从该结果推进新的后果。")
 }
 
 /// The sentences of the opening a step is compared with at a time.
@@ -1131,12 +1138,13 @@ fn run_direction(
                 .flatten()
                 .find(|seed| seed["volumeNo"] == 1);
             if let Some(stages) = first.and_then(|seed| seed["stages"].as_array_mut()) {
-                if let Some(gap) =
-                    pressure_shortfall(stages, antagonist).filter(|gap| gap.problem == found[0])
+                // Review 2026-11-27: one repair a run, whatever its round; a
+                // gap it leaves, or one in a later round, goes back to the
+                // planner.
+                if let Some(gap) = pressure_shortfall(stages, antagonist)
+                    .filter(|gap| gap.problem == found[0])
+                    .filter(|_| !pressure_repair_attempted.replace(true))
                 {
-                    if pressure_repair_attempted.replace(true) {
-                        return Err(format!("{BOOK_PRESSURE_REPAIR_REQUIRED}:{}", gap.problem));
-                    }
                     let repair = ModelRunSpec {
                         capability: REPAIR_BOOK_PRESSURE.into(),
                         ..crate::production::follow_up_spec(&spec, ":pressure-repair", 1)?
@@ -1159,21 +1167,15 @@ fn run_direction(
                             }),
                             now,
                         )?;
-                    outcome
+                    if outcome
                         .parsed
                         .as_ref()
                         .and_then(|reply| apply_pressure_repairs(stages, antagonist, &gap, reply))
-                        .ok_or_else(|| {
-                            format!("{BOOK_PRESSURE_REPAIR_REQUIRED}:{}", gap.problem)
-                        })?;
-                    found = checked(&direction);
-                    if !found.is_empty() {
-                        return Err(format!(
-                            "{BOOK_PRESSURE_REPAIR_REQUIRED}:{}",
-                            found.join("；")
-                        ));
+                        .is_some()
+                    {
+                        found = checked(&direction);
+                        repair_run = found.is_empty().then_some(run_id);
                     }
-                    repair_run = Some(run_id);
                 }
             }
         }
@@ -2100,6 +2102,24 @@ mod tests {
     }
 
     #[test]
+    fn round130_a_step_sent_back_for_any_other_reason_stays_in_place() {
+        // Review 2026-11-27: every step problem but a long step took the step
+        // out, so a new kind of problem would empty a stage as in round 12.
+        let mut direction = direction();
+        let steps = direction["volumeIntentSeeds"][0]["stages"][1]["steps"].clone();
+        let problem = format!(
+            "{}「{}」用了别的阶段的人物。",
+            step_location(1, 1),
+            steps[0].as_str().unwrap()
+        );
+        drop_replayed_steps(&mut direction, &json!({"problems":[problem]}));
+        assert_eq!(
+            direction["volumeIntentSeeds"][0]["stages"][1]["steps"],
+            steps
+        );
+    }
+
+    #[test]
     fn round62_a_short_opening_cue_locates_evidence_without_proving_a_replay_by_itself() {
         let stages = [json!({"goal":"查明灰中文字","steps":["陆照比对灰烬与饼上的炭字笔锋"]})];
         let opening = [json!({"chapterNo":1,"body":
@@ -2157,6 +2177,7 @@ mod tests {
     /// the pressure repair below; every call is kept.
     struct DirectionGateway {
         original: Value,
+        repair: Value,
         calls: std::sync::Mutex<Vec<(String, Value)>>,
     }
 
@@ -2164,6 +2185,9 @@ mod tests {
         fn new(original: Value) -> Self {
             Self {
                 original,
+                repair: json!({"pressureCorrections":[{
+                    "stage":2,"pressure":"裴砚舟命守库的执事封住原账，陆照只能去找旧抄本。"
+                }]}),
                 calls: std::sync::Mutex::new(Vec::new()),
             }
         }
@@ -2194,9 +2218,7 @@ mod tests {
                 .push((capability.into(), input.clone()));
             let reply = match capability {
                 PLAN_BOOK_DIRECTION => self.original.clone(),
-                "REPAIR_BOOK_PRESSURE" => json!({"pressureCorrections":[{
-                    "stage":2,"pressure":"裴砚舟命守库的执事封住原账，陆照只能去找旧抄本。"
-                }]}),
+                "REPAIR_BOOK_PRESSURE" => self.repair.clone(),
                 CHECK_BOOK_CONTINUATION => json!({"issues":[]}),
                 _ => return Err(format!("unexpected capability {capability}")),
             };
@@ -2257,6 +2279,48 @@ mod tests {
             response["pressureCorrections"][0]["pressure"],
             expected["volumeIntentSeeds"][0]["stages"][1]["pressure"]
         );
+    }
+
+    #[test]
+    fn round130_a_pressure_gap_the_repair_cannot_close_goes_back_to_the_planner() {
+        // Review 2026-11-27: a repair that did not take, or a gap in a later
+        // round, failed the setup at once with rounds left.
+        use crate::project_db::{paths::AppPaths, ProjectManager};
+
+        let mut original = direction();
+        original["volumeIntentSeeds"][0]["stages"][1]["pressure"] = json!("宗门断了丹房的炭");
+        let mut gateway = DirectionGateway::new(original);
+        gateway.repair =
+            json!({"pressureCorrections":[{"stage":1,"pressure":"裴砚舟命人烧掉旧账"}]});
+        let temp = tempfile::tempdir().unwrap();
+        let manager = ProjectManager::new(AppPaths::new(temp.path()));
+        let now = "2026-09-13T12:00:00Z";
+        let db = manager.create("pressure-again", "方向复核", now).unwrap();
+        let failed = run_direction(
+            &db,
+            &gateway,
+            (
+                "pressure-again",
+                "pressure-again",
+                "pressure-again:key",
+                now,
+            ),
+            (PLAN_BOOK_DIRECTION, "book-direction"),
+            direction_input(),
+            &[],
+            problems,
+        )
+        .unwrap()
+        .unwrap_err();
+        assert!(failed.starts_with("反派裴砚舟只在"), "{failed}");
+        let calls = gateway.calls.lock().unwrap();
+        let count = |name: &str| calls.iter().filter(|(called, _)| called == name).count();
+        assert_eq!(count("REPAIR_BOOK_PRESSURE"), 1);
+        assert!(count(PLAN_BOOK_DIRECTION) > 1);
+        assert!(calls.iter().any(|(name, input)| name == PLAN_BOOK_DIRECTION
+            && input["planFeedback"]["problems"][0]
+                .as_str()
+                .is_some_and(|problem| problem.starts_with("反派裴砚舟只在"))));
     }
 
     #[test]

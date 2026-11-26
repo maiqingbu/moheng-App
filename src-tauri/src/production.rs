@@ -3296,7 +3296,7 @@ fn run_chapter_production_inner(
         render_input["stageStep"] = stage.input();
     }
     let mut avoid_phrases = crate::chapter_craft::repeated_phrases(&chapter_history.bodies);
-    avoid_phrases.extend(crate::chapter_craft::repeated_short_lines(
+    avoid_phrases.extend(crate::chapter_craft::recent_short_lines(
         &chapter_history.bodies,
     ));
     if !avoid_phrases.is_empty() {
@@ -3527,6 +3527,15 @@ fn run_chapter_production_inner(
         .flatten();
     // An earlier audit only fits a retry that reuses that attempt's prose.
     let render_reused = reusable_render.is_some();
+    let rendered_body = |result: &ModelRunOutcome| {
+        result
+            .parsed
+            .as_ref()
+            .and_then(|payload| payload.get("body"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| "B08_RENDER_OUTPUT_INVALID".to_string())
+    };
     let (render_run_id, mut body) = if let Some(checkpoint) = resumed_prose.or(resumed_draft) {
         let body_hash =
             sha256_canonical(&json!(checkpoint.body)).map_err(|error| error.to_string())?;
@@ -3559,15 +3568,6 @@ fn run_chapter_production_inner(
             .ok_or_else(|| "B08_RENDER_OUTPUT_INVALID".to_string())?;
         (model_run_id, body)
     } else {
-        let rendered_body = |result: &ModelRunOutcome| {
-            result
-                .parsed
-                .as_ref()
-                .and_then(|payload| payload.get("body"))
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-                .ok_or_else(|| "B08_RENDER_OUTPUT_INVALID".to_string())
-        };
         if copied_checkpoint {
             render_input["outputFeedback"] = prior_copy_feedback.clone();
         }
@@ -3638,7 +3638,7 @@ fn run_chapter_production_inner(
             None
         };
         if let Some((suffix, feedback)) = render_recovery {
-            let mut input = render_input;
+            let mut input = render_input.clone();
             input["outputFeedback"] = feedback;
             let (model_run_id, result) =
                 craft_call(suffix, render_capability, &render_profile, 2, input)?;
@@ -3699,11 +3699,49 @@ fn run_chapter_production_inner(
     use crate::chapter_craft::duplicate_in_chapter;
     if gateway.enforces_chapter_length() && !prose_resumed {
         let in_range = |text: &str| length_range.accepts(character_count(text));
-        body = crate::chapter_craft::normalize_typography(body.trim());
-        if duplicate_in_chapter(&body).is_none() {
-            save_prose("RENDER", &body, &prose_run_ids, &craft_skills)?;
+        let tidy = |text: &str| {
+            crate::chapter_craft::break_long_paragraphs(
+                &crate::chapter_craft::normalize_typography(text.trim()),
+            )
+        };
+        let save_draft = |text: &str, run_ids: &[String], skills: &Value| {
+            if duplicate_in_chapter(text).is_none() {
+                save_prose("RENDER", text, run_ids, skills)?;
+            }
+            Ok::<_, String>(())
+        };
+        body = tidy(&body);
+        save_draft(&body, &prose_run_ids, &craft_skills)?;
+        let mut length = character_count(&body);
+        if length_range.is_far_too_long(length) {
+            // Round 13 (owner decision 2026-11-27): cutting a fifth or more
+            // of a redraw left lines without their setup (real run round
+            // 12), so the writer shortens its own draft once; one still far
+            // too long fails.
+            let mut input = render_input;
+            input["outputFeedback"] = json!({
+                "rejectedFor":length_error(&body),
+                "previousDraft":body,
+                "instruction":format!(
+                    "上一稿有 {length} 字，要求 {}–{} 字（不算空格和换行）。把 previousDraft 压缩到 {} 字左右：每件事、每段对话的来回和结尾都留下，删走路、等待、重复确认和不改变局面的描写，不加新内容。",
+                    length_range.min, length_range.max, length_range.target()
+                )
+            });
+            let (run_id, outcome) = craft_call(
+                "compress-length",
+                render_capability,
+                &render_profile,
+                3,
+                input,
+            )?;
+            prose_run_ids.push(run_id);
+            body = tidy(&rendered_body(&outcome)?);
+            length = character_count(&body);
+            if length_range.is_far_too_long(length) {
+                return Err(length_error(&body));
+            }
+            save_draft(&body, &prose_run_ids, &craft_skills)?;
         }
-        let length = character_count(&body);
         if length < length_range.min {
             // LD-7 (real run 2026-11-01, round 11): one expansion added
             // 100-300 characters to chapters 300-600 short, so one still
@@ -4299,7 +4337,7 @@ fn run_chapter_production_inner(
                 .iter()
                 .any(|finding| finding["quote"] == rule["quote"])
         });
-        let short_lines = crate::chapter_craft::repeated_short_lines(&chapter_history.bodies);
+        let short_lines = crate::chapter_craft::recent_short_lines(&chapter_history.bodies);
         for finding in crate::chapter_craft::repetition_findings(&repeated, &body)
             .into_iter()
             .chain(crate::chapter_craft::short_line_findings(
@@ -4343,7 +4381,12 @@ fn run_chapter_production_inner(
         };
         let fits = |text: &str| length_range.accepts(character_count(text));
         let mut rewrite_error = None;
-        if (!to_fix.is_empty() || !repeated.is_empty()) && room_for_polish(2)? {
+        let wants_rewrite = !to_fix.is_empty() || !repeated.is_empty();
+        // Review 2026-11-27: a rewrite left out for want of model runs is
+        // recorded, not mistaken for a chapter with nothing to fix.
+        let has_rewrite_room = wants_rewrite && room_for_polish(2)?;
+        let rewrite_skipped = (wants_rewrite && !has_rewrite_room).then_some("NO_MODEL_RUNS_LEFT");
+        if has_rewrite_room {
             craft_signals.findings = to_fix
                 .iter()
                 .filter_map(|finding| finding["code"].as_str().map(ToOwned::to_owned))
@@ -4764,6 +4807,7 @@ fn run_chapter_production_inner(
                 "editsApplied":if discarded.is_null() { applied } else { 0 },
                 "discarded":discarded,
                 "rewriteError":rewrite_error,
+                "rewriteSkipped":rewrite_skipped,
                 "detailFindings":detail_count,
                 "overusedDetails":running_details,
                 "reviewError":review.get("reviewError")

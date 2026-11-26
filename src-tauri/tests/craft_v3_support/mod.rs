@@ -17,12 +17,12 @@ pub fn bible() -> Value {
         "mechanism":{"experience":"触碰旧物时会先听见物主最后一次说话的声音。","rules":[
             {"rule":"每听一次旧物就忘掉自己一天的记忆","numbers":"一次一天，每日最多三次","howReadersSeeIt":"第二天对着账本想不起自己记过的一笔"},
             {"rule":"旧物离开原主超过一年就听不见","numbers":"一年为限","howReadersSeeIt":"当铺里的旧表一声不响"}]},
-        "protagonist":{"name":"林满","personality":"嘴硬心软，算账极细","flaw":"凡事先算代价","wantsNow":"赎回姑妈的面馆","humorStyle":"一本正经地抠字眼","innerVoiceStyle":"像给自己记账，先列数再下结论"},
+        "protagonist":{"name":"林满","gender":"男","personality":"嘴硬心软，算账极细","flaw":"凡事先算代价","wantsNow":"赎回姑妈的面馆","humorStyle":"一本正经地抠字眼","innerVoiceStyle":"像给自己记账，先列数再下结论"},
         "emotionalAnchor":{"object":"姑妈补过三次的围裙","memorySummary":"十岁发烧时姑妈守了他一夜"},
-        "antagonist":{"name":"彭三","position":"码头放贷的二当家","wants":"吞下面馆那块地","method":"借据和打手"},
+        "antagonist":{"name":"彭三","gender":"男","position":"码头放贷的二当家","wants":"吞下面馆那块地","method":"借据和打手"},
         "cast":[
-            {"name":"阿秋","role":"面馆伙计","relation":"发小","privateAgenda":"想去城里学厨","speechStyle":"话少，开口就呛人","contrastWithProtagonist":"冲动","firstAppears":1},
-            {"name":"老董","role":"船老大","relation":"主顾","privateAgenda":"欠彭三的钱","speechStyle":"满嘴俗语","contrastWithProtagonist":"认命","firstAppears":1}],
+            {"name":"阿秋","gender":"女","role":"面馆伙计","relation":"发小","privateAgenda":"想去城里学厨","speechStyle":"话少，开口就呛人","contrastWithProtagonist":"冲动","firstAppears":1},
+            {"name":"老董","gender":"男","role":"船老大","relation":"主顾","privateAgenda":"欠彭三的钱","speechStyle":"满嘴俗语","contrastWithProtagonist":"认命","firstAppears":1}],
         "openingArc":[
             {"chapter":1,"direction":"账目里出现一笔对不上的货","protagonistWin":"当场揪出调包的货单"},
             {"chapter":2,"direction":"彭三上门催债","protagonistWin":"用旧物的声音找到借据漏洞"},

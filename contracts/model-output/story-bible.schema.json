@@ -71,6 +71,10 @@
                 "type": "string",
                 "minLength": 1
               },
+              "gender": {
+                "type": "string",
+                "minLength": 1
+              },
               "personality": {
                 "type": "string",
                 "minLength": 1
@@ -96,6 +100,7 @@
             },
             "required": [
               "name",
+              "gender",
               "personality",
               "flaw",
               "wantsNow",
@@ -129,6 +134,10 @@
                 "type": "string",
                 "minLength": 1
               },
+              "gender": {
+                "type": "string",
+                "minLength": 1
+              },
               "position": {
                 "type": "string",
                 "minLength": 1
@@ -144,6 +153,7 @@
             },
             "required": [
               "name",
+              "gender",
               "position",
               "wants",
               "method"
@@ -158,6 +168,10 @@
               "type": "object",
               "properties": {
                 "name": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "gender": {
                   "type": "string",
                   "minLength": 1
                 },
@@ -189,6 +203,7 @@
               },
               "required": [
                 "name",
+                "gender",
                 "role",
                 "relation",
                 "privateAgenda",

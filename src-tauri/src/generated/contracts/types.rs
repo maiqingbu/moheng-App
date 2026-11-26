@@ -1079,6 +1079,7 @@ pub struct StoryBibleR1MechanismRulesItem {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoryBibleR1Protagonist {
     pub name: String,
+    pub gender: String,
     pub personality: String,
     pub flaw: String,
     pub wants_now: String,
@@ -1097,6 +1098,7 @@ pub struct StoryBibleR1EmotionalAnchor {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoryBibleR1Antagonist {
     pub name: String,
+    pub gender: String,
     pub position: String,
     pub wants: String,
     pub method: String,
@@ -1106,6 +1108,7 @@ pub struct StoryBibleR1Antagonist {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoryBibleR1CastItem {
     pub name: String,
+    pub gender: String,
     pub role: String,
     pub relation: String,
     pub private_agenda: String,

@@ -32,7 +32,7 @@ export function changeTypeForIntent(resolution: Pick<AssistantIntentResolution, 
 // P3: the story bible fields a draft names, in the owner's words.
 const setupFieldLabels: Record<string, string> = {
   angle: '角度', normalWorld: '日常世界', mechanism: '核心机制', protagonist: '主角', emotionalAnchor: '情感锚点',
-  antagonist: '反派', cast: '配角', openingArc: '开篇走向', name: '名字', personality: '性格', flaw: '缺点',
+  antagonist: '反派', cast: '配角', openingArc: '开篇走向', name: '名字', gender: '性别', personality: '性格', flaw: '缺点',
   wantsNow: '眼下想要的', humorStyle: '幽默方式', innerVoiceStyle: '内心独白方式', position: '身份', wants: '想要的',
   method: '手段', role: '角色', relation: '关系', privateAgenda: '私心', speechStyle: '说话方式',
   contrastWithProtagonist: '和主角的反差', firstAppears: '首次出场章', experience: '体验', rules: '规则',

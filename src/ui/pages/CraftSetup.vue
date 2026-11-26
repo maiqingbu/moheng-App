@@ -57,9 +57,9 @@ async function confirmBible() {
   if (!edit || problems.value.length || busy('story-bible-confirm')) return
   if (await run('story-bible-confirm', craftConfirmRequest('bible', edit.candidateId, edit.draft))) bibleEdit.value = null
 }
-const protagonistFields = [['name', '姓名'], ['personality', '性格'], ['flaw', '缺点'], ['wantsNow', '眼下想要'], ['humorStyle', '幽默方式（只写描述）'], ['innerVoiceStyle', '内心声音（只写描述）']]
-const antagonistFields = [['name', '姓名'], ['position', '身份'], ['wants', '想要'], ['method', '手段']]
-const castFields = [['name', '姓名'], ['role', '身份'], ['relation', '与主角关系'], ['privateAgenda', '自己的盘算'], ['speechStyle', '说话方式（只写描述）'], ['contrastWithProtagonist', '与主角的反差']]
+const protagonistFields = [['name', '姓名'], ['gender', '性别'], ['personality', '性格'], ['flaw', '缺点'], ['wantsNow', '眼下想要'], ['humorStyle', '幽默方式（只写描述）'], ['innerVoiceStyle', '内心声音（只写描述）']]
+const antagonistFields = [['name', '姓名'], ['gender', '性别'], ['position', '身份'], ['wants', '想要'], ['method', '手段']]
+const castFields = [['name', '姓名'], ['gender', '性别'], ['role', '身份'], ['relation', '与主角关系'], ['privateAgenda', '自己的盘算'], ['speechStyle', '说话方式（只写描述）'], ['contrastWithProtagonist', '与主角的反差']]
 const ruleFields = [['rule', '规则'], ['numbers', '数字与限度'], ['howReadersSeeIt', '读者看到的后果']]
 
 // ---- 风格卡 ----
@@ -166,7 +166,7 @@ async function confirmCard() {
               <label class="field"><span class="field-label">第几章出场</span><input v-model.number="member.firstAppears" type="number" min="1" class="input" /></label>
               <button class="btn small" @click="bibleDraft.cast.splice(index, 1)">删除此人</button>
             </div>
-            <button class="btn small" @click="bibleDraft.cast.push({ name: '', role: '', relation: '', privateAgenda: '', speechStyle: '', contrastWithProtagonist: '', firstAppears: 1 })">加一位配角</button>
+            <button class="btn small" @click="bibleDraft.cast.push({ name: '', gender: '', role: '', relation: '', privateAgenda: '', speechStyle: '', contrastWithProtagonist: '', firstAppears: 1 })">加一位配角</button>
           </div>
           <div class="field"><span class="field-label">前三章走向</span>
             <div v-for="arc in bibleDraft.openingArc" :key="arc.chapter" class="setting-grid">

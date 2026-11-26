@@ -14,12 +14,12 @@ const bible = (index: number) => ({
   angle: `侧重角度${index}`,
   normalWorld: '林满在码头记账。',
   mechanism: { experience: '听旧物的声音', rules: [{ rule: '听一次忘一天', numbers: '每日三次', howReadersSeeIt: '想不起账' }, { rule: '一年为限', numbers: '一年', howReadersSeeIt: '旧表无声' }] },
-  protagonist: { name: `林满${index}`, personality: '嘴硬心软', flaw: '先算代价', wantsNow: '赎回面馆', humorStyle: '抠字眼', innerVoiceStyle: '像记账' },
+  protagonist: { name: `林满${index}`, gender: '男', personality: '嘴硬心软', flaw: '先算代价', wantsNow: '赎回面馆', humorStyle: '抠字眼', innerVoiceStyle: '像记账' },
   emotionalAnchor: { object: '围裙', memorySummary: '发烧那夜' },
-  antagonist: { name: '彭三', position: '放贷二当家', wants: '吞地', method: '借据' },
+  antagonist: { name: '彭三', gender: '男', position: '放贷二当家', wants: '吞地', method: '借据' },
   cast: [
-    { name: '阿秋', role: '伙计', relation: '发小', privateAgenda: '学厨', speechStyle: '话少', contrastWithProtagonist: '冲动', firstAppears: 1 },
-    { name: '老董', role: '船老大', relation: '主顾', privateAgenda: '欠钱', speechStyle: '俗语', contrastWithProtagonist: '认命', firstAppears: 2 },
+    { name: '阿秋', gender: '女', role: '伙计', relation: '发小', privateAgenda: '学厨', speechStyle: '话少', contrastWithProtagonist: '冲动', firstAppears: 1 },
+    { name: '老董', gender: '男', role: '船老大', relation: '主顾', privateAgenda: '欠钱', speechStyle: '俗语', contrastWithProtagonist: '认命', firstAppears: 2 },
   ],
   openingArc: [1, 2, 3].map(chapter => ({ chapter, direction: `走向${chapter}`, protagonistWin: `赢${chapter}` })),
 })
