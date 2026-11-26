@@ -204,8 +204,8 @@ function resetForm(){ const source=isProjectSettings.value ? projectStore.settin
           <div v-if="!isProjectSettings" class="section-subgroup" data-model-pricing>
             <div class="card-head"><div><h3 class="card-title">模型价格表 · v{{ pricingVersion }}</h3><p class="card-subtitle">单位：元 / 百万 tokens。价格只由你维护，不从网络抓取。</p></div><button class="btn" @click="addPricingEntry">添加模型</button></div>
             <div v-for="(entry,index) in pricingEntries" :key="`${entry.providerId}:${entry.modelId}:${index}`" class="setting-grid pricing-entry">
-              <label class="field"><span class="field-label">服务商 ID</span><input v-model.trim="entry.providerId" class="input" /></label>
-              <label class="field"><span class="field-label">模型 ID</span><input v-model.trim="entry.modelId" class="input" /></label>
+              <label class="field"><span class="field-label">服务商标识</span><input v-model.trim="entry.providerId" class="input" /></label>
+              <label class="field"><span class="field-label">模型名</span><input v-model.trim="entry.modelId" class="input" /></label>
               <label class="field"><span class="field-label">输入单价</span><input v-model.number="entry.inputPricePerMillionTokens" type="number" min="0" step=".01" class="input" /></label>
               <label class="field"><span class="field-label">输出单价</span><input v-model.number="entry.outputPricePerMillionTokens" type="number" min="0" step=".01" class="input" /></label>
               <label class="field"><span class="field-label">缓存输入单价（可选）</span><input v-model.number="entry.cachedInputPricePerMillionTokens" type="number" min="0" step=".01" class="input" /></label>

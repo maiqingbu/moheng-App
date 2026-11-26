@@ -615,7 +615,7 @@ function costText(value: number | null | undefined) {
         <button class="btn primary" :disabled="gatePolicyUpdateInFlight" @click="adoptDefaultGatePolicy">采用默认规则集</button>
       </div>
       <template v-else>
-        <p v-if="production.gatePolicy.resourceRef" class="muted">默认资源 {{ production.gatePolicy.resourceRef.version }} · SHA-256 {{ production.gatePolicy.resourceRef.sha256 }}</p>
+        <p v-if="production.gatePolicy.resourceRef" class="muted">默认资源 {{ production.gatePolicy.resourceRef.version }} · 校验码 {{ production.gatePolicy.resourceRef.sha256 }}</p>
         <div v-for="rule in production.gatePolicy.rules" :key="String(rule.predicate)" class="task-row" style="align-items:flex-start">
           <code>{{ JSON.stringify(rule) }}</code>
           <button class="btn" :disabled="gatePolicyUpdateInFlight" @click="disableGatePolicyRule(rule)">停用</button>
@@ -827,8 +827,8 @@ function costText(value: number | null | undefined) {
       <h2 class="card-title">规划与签约来源</h2>
       <dl class="pitch-kv">
         <div><dt>执行模式</dt><dd>{{ production.nextChapter?.executionMode ?? '无当前执行章' }}</dd></div>
-        <div><dt>编译 revision / digest</dt><dd>{{ production.chapterPlan?.compiledFromProjectRevision ?? '未提供' }} / {{ production.chapterPlan?.compiledFromStateDigest ?? '未提供' }}</dd></div>
-        <div><dt>ContextManifest</dt><dd>{{ production.chapterPlan?.contextManifestRef?.artifactId ?? '未提供' }} · v{{ production.chapterPlan?.contextManifestRef?.version ?? '—' }}</dd></div>
+        <div><dt>规划依据的作品版本 / 状态摘要</dt><dd>{{ production.chapterPlan?.compiledFromProjectRevision ?? '未提供' }} / {{ production.chapterPlan?.compiledFromStateDigest ?? '未提供' }}</dd></div>
+        <div><dt>写作上下文清单</dt><dd>{{ production.chapterPlan?.contextManifestRef?.artifactId ?? '未提供' }} · v{{ production.chapterPlan?.contextManifestRef?.version ?? '—' }}</dd></div>
         <div><dt>签约受评章节摘要</dt><dd>{{ signing?.receipt?.chapterHashes?.join('、') || '未提供' }}</dd></div>
         <div><dt>开篇合同 / 评估规则版本</dt><dd>{{ signing?.receipt?.openingContractVersion ?? '未提供' }} / {{ signing?.receipt?.platformPolicyVersion ?? '未提供' }}</dd></div>
         <div><dt>签约证据引用</dt><dd>{{ signing?.signingEvidenceRefs?.join('、') || '未提供' }}</dd></div>

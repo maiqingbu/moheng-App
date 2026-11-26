@@ -285,7 +285,7 @@ onUnmounted(() => {
           <p v-if="exportError" class="banner warning" role="alert">{{ exportError }}</p>
           <div v-if="exportReceipt?.status === 'COMPLETED'" class="banner success" aria-live="polite">
             <strong>正式成品已生成：{{ exportReceipt.fileName }}</strong>
-            <div>{{ exportReceipt.chapters.length }} 章 · {{ exportReceipt.sourceCharacterCount.toLocaleString() }} 字 · SHA-256 {{ exportReceipt.sha256 }}</div>
+            <div>{{ exportReceipt.chapters.length }} 章 · {{ exportReceipt.sourceCharacterCount.toLocaleString() }} 字 · 校验码 {{ exportReceipt.sha256 }}</div>
             <div class="export-path">{{ exportReceipt.finalPath }}</div>
           </div>
           <button class="btn" style="width:100%;margin-top:8px" :disabled="!exportCapability?.available || exporting" @click="exportFinal">
