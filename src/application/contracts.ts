@@ -135,6 +135,8 @@ export interface SupportSessionProjection {
   evidenceLedger?: Record<string, unknown>[]
   /** FX-21: how the question was understood. */
   intent?: AssistantIntentResolution
+  /** 2026-11-27: the answer the configured model wrote from the results; null without one. */
+  answer?: { planner: 'MODEL'; sentences: { text: string; sources: string[]; inferred: boolean }[] } | null
 }
 /** FX-22: one backup of a work; revision is the one it was taken at. */
 export interface BackupEntry {

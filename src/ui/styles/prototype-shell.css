@@ -157,3 +157,6 @@
 .area-tab:hover { background: var(--surface); }
 .area-tab.active { background: var(--surface); color: var(--pine-700); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
 .area-tab-count { min-width: 18px; padding: 0 5px; border-radius: 9px; background: var(--amber-soft); color: #6e4510; font-size: 12px; text-align: center; }
+.prototype-steps { margin-top: 8px; font-size: 12px; color: var(--ink-3); }
+.prototype-steps summary { cursor: pointer; }
+.prototype-steps ol { margin: 6px 0 0; padding-left: 18px; }

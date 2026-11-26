@@ -5418,6 +5418,148 @@ impl ReadCapabilityAdapter for RepositoryReadAdapter<'_> {
     }
 }
 
+/// The support steps for planned calls, numbered after `offset`.
+fn planned_support_steps(
+    planned: &[crate::assistant_answer::PlannedCall],
+    offset: usize,
+) -> Vec<crate::harness::SupportTaskStep> {
+    planned
+        .iter()
+        .enumerate()
+        .map(|(index, call)| crate::harness::SupportTaskStep {
+            step_id: format!("step:{}", offset + index + 1),
+            capability_id: call.capability_id.clone(),
+            status: crate::harness::SupportStepStatus::PENDING,
+            typed_args: call.input.clone(),
+        })
+        .collect()
+}
+
+/// What a support session's queries returned so far.
+#[derive(Default)]
+struct SupportRun {
+    calls: Vec<crate::harness::CapabilityResultEnvelope>,
+    evidence_ledger: Vec<EvidenceLedgerEntry>,
+    source_refs: BTreeSet<String>,
+    result_digests: Vec<String>,
+    evidence_found: bool,
+}
+
+impl SupportRun {
+    /// The results so far as the follow-up planner reads them.
+    fn prompt_views(&self, steps: &[crate::harness::SupportTaskStep]) -> Vec<Value> {
+        self.calls
+            .iter()
+            .zip(steps)
+            .map(|(call, step)| {
+                json!({"capabilityId":step.capability_id,"input":step.typed_args,
+                    "empty":crate::assistant_answer::is_empty_result(&call.result),"truncated":call.truncated})
+            })
+            .collect()
+    }
+}
+
+/// Runs support steps through the bounded executor on one read connection.
+struct SupportRunner<'a> {
+    state: &'a KernelState,
+    project_id: &'a str,
+    requested_at: &'a str,
+    registry: &'a CapabilityRegistry,
+    executor: &'a BoundedCapabilityExecutor,
+    mode: &'a str,
+    revision: i64,
+    model_planned: bool,
+    request: &'a Value,
+}
+
+impl SupportRunner<'_> {
+    fn run(
+        &self,
+        steps: &mut [crate::harness::SupportTaskStep],
+        run: &mut SupportRun,
+    ) -> Result<(), String> {
+        let (project_id, requested_at, revision) =
+            (self.project_id, self.requested_at, self.revision);
+        self.state
+            .manager
+            .with_read_connection(project_id, requested_at, |connection| {
+                let adapter = RepositoryReadAdapter {
+                    connection,
+                    project_id,
+                };
+                for step in steps.iter_mut() {
+                    step.status = crate::harness::SupportStepStatus::RUNNING;
+                    let spec = self
+                        .registry
+                        .specs
+                        .get(&step.capability_id)
+                        .ok_or_else(|| ManagerError::ProjectCommand("CAPABILITY_UNKNOWN".into()))?;
+                    let call_input = if self.model_planned {
+                        step.typed_args.clone()
+                    } else if step.capability_id == "query_knowledge" {
+                        json!({"entityIds":request_strings(self.request,"entityIds")})
+                    } else {
+                        self.request.clone()
+                    };
+                    let call = CapabilityCallEnvelope {
+                        call_id: format!("call:{}", step.step_id),
+                        capability_id: spec.capability_id.clone(),
+                        capability_version: spec.version.clone(),
+                        spec_digest: spec.spec_digest.clone(),
+                        mode: self.mode.into(),
+                        project_id: project_id.into(),
+                        project_revision: revision,
+                        input_digest: sha256_canonical(&call_input)
+                            .map_err(|e| ManagerError::ProjectCommand(e.to_string()))?,
+                        input: call_input,
+                        requested_bounds: RequestedBounds {
+                            max_results: 100,
+                            max_serialized_bytes: 65_536,
+                        },
+                    };
+                    let result = match self.executor.execute(&adapter, &call) {
+                        Ok(result) => result,
+                        // A planned step the capability cannot take is skipped,
+                        // not the whole session.
+                        Err(_) if self.model_planned => {
+                            step.status = crate::harness::SupportStepStatus::SKIPPED;
+                            continue;
+                        }
+                        Err(error) => return Err(ManagerError::ProjectCommand(error)),
+                    };
+                    run.source_refs.extend(result.source_refs.clone());
+                    run.result_digests.push(result.result_digest.clone());
+                    if step.capability_id == "query_evidence" {
+                        run.evidence_found = result
+                            .result
+                            .as_array()
+                            .is_some_and(|items| !items.is_empty());
+                    }
+                    run.evidence_ledger.push(EvidenceLedgerEntry {
+                        call_id: result.call_id.clone(),
+                        capability_id: step.capability_id.clone(),
+                        capability_version: spec.version.clone(),
+                        spec_digest: spec.spec_digest.clone(),
+                        project_id: project_id.into(),
+                        project_revision: revision,
+                        input_digest: call.input_digest.clone(),
+                        source_refs: result.source_refs.clone(),
+                        result_digest: result.result_digest.clone(),
+                        truncated: result.truncated,
+                        bounds_applied: result.bounds_applied.clone(),
+                        started_at: requested_at.into(),
+                        finished_at: requested_at.into(),
+                        status: result.status.clone(),
+                    });
+                    run.calls.push(result);
+                    step.status = crate::harness::SupportStepStatus::DONE;
+                }
+                Ok::<(), ManagerError>(())
+            })
+            .map_err(|e| e.to_string())
+    }
+}
+
 pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value, String> {
     let project_id = required_string(&request, "projectId")?;
     let question = required_string(&request, "question")?;
@@ -5456,81 +5598,90 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
         registry: registry.clone(),
     };
     let input = request.clone();
-    for step in &mut plan.steps {
-        step.typed_args = input.clone();
-    }
-    let mut calls = Vec::new();
-    let mut evidence_ledger = Vec::new();
-    let mut source_refs = BTreeSet::new();
-    let mut result_digests = Vec::new();
-    let mut evidence_found = false;
-    state
-        .manager
-        .with_read_connection(project_id, requested_at, |connection| {
-            let adapter = RepositoryReadAdapter {
-                connection,
-                project_id,
-            };
-            for step in &mut plan.steps {
-                step.status = crate::harness::SupportStepStatus::RUNNING;
-                let spec = registry
-                    .specs
-                    .get(&step.capability_id)
-                    .ok_or_else(|| ManagerError::ProjectCommand("CAPABILITY_UNKNOWN".into()))?;
-                let call_input = if step.capability_id == "query_knowledge" {
-                    json!({"entityIds":request_strings(&input,"entityIds")})
-                } else {
-                    input.clone()
-                };
-                let call = CapabilityCallEnvelope {
-                    call_id: format!("call:{}", step.step_id),
-                    capability_id: spec.capability_id.clone(),
-                    capability_version: spec.version.clone(),
-                    spec_digest: spec.spec_digest.clone(),
-                    mode: mode.into(),
-                    project_id: project_id.into(),
-                    project_revision: revision,
-                    input_digest: sha256_canonical(&call_input)
-                        .map_err(|e| ManagerError::ProjectCommand(e.to_string()))?,
-                    input: call_input,
-                    requested_bounds: RequestedBounds {
-                        max_results: 100,
-                        max_serialized_bytes: 65_536,
-                    },
-                };
-                let result = executor
-                    .execute(&adapter, &call)
-                    .map_err(ManagerError::ProjectCommand)?;
-                source_refs.extend(result.source_refs.clone());
-                result_digests.push(result.result_digest.clone());
-                if step.capability_id == "query_evidence" {
-                    evidence_found = result
-                        .result
-                        .as_array()
-                        .is_some_and(|items| !items.is_empty());
-                }
-                evidence_ledger.push(EvidenceLedgerEntry {
-                    call_id: result.call_id.clone(),
-                    capability_id: step.capability_id.clone(),
-                    capability_version: spec.version.clone(),
-                    spec_digest: spec.spec_digest.clone(),
-                    project_id: project_id.into(),
-                    project_revision: revision,
-                    input_digest: call.input_digest.clone(),
-                    source_refs: result.source_refs.clone(),
-                    result_digest: result.result_digest.clone(),
-                    truncated: result.truncated,
-                    bounds_applied: result.bounds_applied.clone(),
-                    started_at: requested_at.into(),
-                    finished_at: requested_at.into(),
-                    status: result.status.clone(),
-                });
-                calls.push(result);
-                step.status = crate::harness::SupportStepStatus::DONE;
-            }
-            Ok::<(), ManagerError>(())
+    // Owner decision 2026-11-27 (H00 HFR-002/003): a configured model plans
+    // the queries over the planner menu; without one, or without a usable
+    // plan, the fixed plan for the question's kind stays.
+    let directory = state
+        .production_gateway
+        .plans_assistant_answers()
+        .then(|| {
+            state
+                .manager
+                .with_read_connection(project_id, requested_at, |connection| {
+                    crate::repositories::narrative::NarrativeRepository::assistant_directory(
+                        connection, project_id, 120,
+                    )
+                    .map_err(|e| ManagerError::ProjectCommand(e.to_string()))
+                })
+                .ok()
+                .map(|(entities, chapters)| crate::assistant_answer::Directory {
+                    entities,
+                    chapters,
+                })
         })
-        .map_err(|e| e.to_string())?;
+        .flatten();
+    let model_planned = directory.as_ref().and_then(|directory| {
+        crate::assistant_answer::plan_with_model(
+            state,
+            project_id,
+            question,
+            directory,
+            None,
+            requested_at,
+        )
+        .ok()
+    });
+    match &model_planned {
+        Some(planned) => plan.steps = planned_support_steps(planned, 0),
+        None => {
+            for step in &mut plan.steps {
+                step.typed_args = input.clone();
+            }
+        }
+    }
+    let runner = SupportRunner {
+        state,
+        project_id,
+        requested_at,
+        registry: &registry,
+        executor: &executor,
+        mode,
+        revision,
+        model_planned: model_planned.is_some(),
+        request: &input,
+    };
+    let mut run = SupportRun::default();
+    runner.run(&mut plan.steps, &mut run)?;
+    // HFR-007: one follow-up round, at most two steps, when a planned query
+    // came back empty.
+    if let (Some(directory), Some(_)) = (&directory, &model_planned) {
+        if run
+            .calls
+            .iter()
+            .any(|call| crate::assistant_answer::is_empty_result(&call.result))
+        {
+            let earlier = run.prompt_views(&plan.steps);
+            if let Ok(more) = crate::assistant_answer::plan_with_model(
+                state,
+                project_id,
+                question,
+                directory,
+                Some(&earlier),
+                requested_at,
+            ) {
+                let mut extra = planned_support_steps(&more, plan.steps.len());
+                runner.run(&mut extra, &mut run)?;
+                plan.steps.extend(extra);
+            }
+        }
+    }
+    let SupportRun {
+        calls,
+        evidence_ledger,
+        source_refs,
+        result_digests,
+        evidence_found,
+    } = run;
     let requires_evidence = question.contains("知道") || question.contains("承诺");
     let planning_question = [
         "高潮",
@@ -5645,7 +5796,7 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
     } else {
         None
     };
-    let finding = diagnostic_finding.unwrap_or_else(|| {
+    let mut finding = diagnostic_finding.unwrap_or_else(|| {
         grounded_finding(
             &scope,
             if requires_evidence && !evidence_found {
@@ -5662,6 +5813,65 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
             Vec::new(),
         )
     });
+    // HFR-004 (owner decision 2026-11-27): the answer is written from the
+    // results alone; a sentence citing no returned record is dropped, and the
+    // support is the system's, not the model's.
+    let mut answer = Value::Null;
+    if model_planned.is_some() {
+        let views = calls
+            .iter()
+            .zip(&plan.steps)
+            .map(|(call, step)| {
+                crate::assistant_answer::result_prompt_view(
+                    &call.call_id,
+                    &step.capability_id,
+                    &call.result,
+                    &call.source_refs,
+                    call.truncated,
+                )
+            })
+            .collect::<Vec<_>>();
+        if let Ok(reply) = crate::assistant_answer::compose_with_model(
+            state,
+            project_id,
+            question,
+            &views,
+            requested_at,
+        ) {
+            let available = source_refs
+                .iter()
+                .cloned()
+                .chain(
+                    calls
+                        .iter()
+                        .filter(|call| !crate::assistant_answer::is_empty_result(&call.result))
+                        .map(|call| call.call_id.clone()),
+                )
+                .collect::<BTreeSet<_>>();
+            let conflicting = finding.support_status == crate::harness::SupportStatus::CONFLICTING;
+            let (sentences, status) =
+                crate::assistant_answer::grounded_answer(&reply, &available, conflicting);
+            finding.claim = if sentences.is_empty() {
+                "现有作品记录里查不到能回答这个问题的内容。".into()
+            } else {
+                sentences
+                    .iter()
+                    .map(|sentence| sentence.text.as_str())
+                    .collect::<String>()
+            };
+            finding.support_status = status;
+            finding.source_refs = sentences
+                .iter()
+                .flat_map(|sentence| sentence.sources.iter().cloned())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            answer = json!({
+                "planner":"MODEL",
+                "sentences":sentences.iter().map(|sentence| json!({"text":sentence.text,"sources":sentence.sources,"inferred":sentence.inferred})).collect::<Vec<_>>(),
+            });
+        }
+    }
     let plan_digest = sha256_canonical(&serde_json::to_value(&plan).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
     let checkpoint = SupportCheckpoint {
@@ -5706,7 +5916,7 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
         finished_at: requested_at.into(),
     };
     Ok(
-        json!({"plan":plan,"calls":calls,"evidenceLedger":evidence_ledger,"finding":finding,"receipt":receipt,"intent":intent.to_json()}),
+        json!({"plan":plan,"calls":calls,"evidenceLedger":evidence_ledger,"finding":finding,"receipt":receipt,"intent":intent.to_json(),"answer":answer}),
     )
 }
 

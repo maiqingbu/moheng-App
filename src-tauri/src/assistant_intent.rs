@@ -174,7 +174,7 @@ pub fn resolve_intent(
 }
 
 /// Runs one assistant model step for the project: its reply and run id.
-fn run_assistant_model(
+pub(crate) fn run_assistant_model(
     state: &KernelState,
     gateway: &dyn ProductionModelGateway,
     project_id: &str,

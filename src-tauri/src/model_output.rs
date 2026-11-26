@@ -134,7 +134,7 @@ pub fn prompt_section(capability: &str) -> Option<String> {
 mod tests {
     /// Model steps without an output spec, and why their replies cannot
     /// fail a run unnoticed.
-    const UNSPECIFIED_STEPS: [(&str, &str); 11] = [
+    const UNSPECIFIED_STEPS: [(&str, &str); 13] = [
         (
             "PLAN_STRATEGY",
             "r1 plans: the plan contract sends a reply back to the planner",
@@ -158,6 +158,14 @@ mod tests {
         (
             "CLASSIFY_ASSISTANT_INTENT",
             "a failed reply falls back to keyword routing",
+        ),
+        (
+            "PLAN_ASSISTANT_QUERY",
+            "every step is checked against the planner menu and the directory; a failed reply keeps the fixed plan",
+        ),
+        (
+            "COMPOSE_ASSISTANT_ANSWER",
+            "every sentence must cite a returned record; a failed reply keeps the diagnostic finding",
         ),
         (
             "DRAFT_SETUP_CHANGE",

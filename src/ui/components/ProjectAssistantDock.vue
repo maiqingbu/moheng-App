@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projectStore'
-import { presentAssistantSession } from '../presentation/assistantPresentation'
+import { assistantHeading, presentAssistantSession } from '../presentation/assistantPresentation'
 import { productErrorMessage, repairExecutionLabel, sanitizeProductText } from '../presentation/productLanguage'
 import type { AssistantPresentation } from '../presentation/assistantPresentation'
 import type { AssistantRepairPlan } from '../../application/contracts'
@@ -253,7 +253,7 @@ function startConversation() {
     <div class="prototype-messages">
       <template v-if="presentation">
         <div class="prototype-msg user">{{ lastQuestion }}</div>
-        <div class="prototype-msg assistantmsg"><div class="prototype-answercard"><h4>{{ presentation.status === 'supported' ? '已完成当前记录核对' : '还需要继续核对' }}</h4><p>{{ presentation.answer }}</p><div v-if="presentation.evidence.length" class="prototype-evidence"><span>依据来自当前作品记录</span><button class="prototype-link" type="button" @click="evidenceOpen = !evidenceOpen">{{ evidenceOpen ? '收起依据' : '查看依据' }}</button></div><div v-if="evidenceOpen" class="prototype-proposal"><strong>已核对的依据</strong><p v-for="item in presentation.evidence" :key="`${item.label}-${item.source ?? ''}`">{{ item.label }} · {{ item.detail }}</p></div><div class="prototype-proposal"><strong>需要修改时</strong><p>我可以整理一份修改方案，但不会直接改动已经确认的故事事实。</p><button class="prototype-btn" type="button" @click="prepareProposal">查看修改方案</button></div></div></div>
+        <div class="prototype-msg assistantmsg"><div class="prototype-answercard"><h4>{{ assistantHeading(presentation.status) }}</h4><p>{{ presentation.answer }}</p><details v-if="presentation.steps?.length" class="prototype-steps"><summary>查了哪几步</summary><ol><li v-for="(step, index) in presentation.steps" :key="index">{{ step }}</li></ol></details><div v-if="presentation.evidence.length" class="prototype-evidence"><span>依据来自当前作品记录</span><button class="prototype-link" type="button" @click="evidenceOpen = !evidenceOpen">{{ evidenceOpen ? '收起依据' : '查看依据' }}</button></div><div v-if="evidenceOpen" class="prototype-proposal"><strong>已核对的依据</strong><p v-for="item in presentation.evidence" :key="`${item.label}-${item.source ?? ''}`">{{ item.label }} · {{ item.detail }}</p></div><div class="prototype-proposal"><strong>需要修改时</strong><p>我可以整理一份修改方案，但不会直接改动已经确认的故事事实。</p><button class="prototype-btn" type="button" @click="prepareProposal">查看修改方案</button></div></div></div>
       </template>
       <div v-else class="prototype-msg assistantmsg"><div class="prototype-answercard"><h4>从一件具体的事开始</h4><p>我会先核对当前作品记录，再告诉你能够确认到什么。涉及正式修改时，会先给出方案并等待你的确认。</p><div class="prototype-evidence"><span>当前上下文：{{ context }}</span><span>等待提问</span></div></div></div>
       <div v-if="assistantError" class="prototype-msg assistantmsg" role="alert"><div class="prototype-answercard"><h4>暂时无法完成查询</h4><p>{{ assistantError }}</p><button class="prototype-btn" type="button" @click="assistantError = ''">知道了</button></div></div>

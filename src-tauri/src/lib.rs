@@ -1,3 +1,4 @@
+pub mod assistant_answer;
 pub mod assistant_intent;
 pub mod book_direction;
 pub mod canon_semantics;

@@ -23,6 +23,27 @@ export interface AssistantPresentation {
   status: AssistantViewStatus
   sections: AssistantSection[]
   evidence: AssistantEvidenceItem[]
+  /** 2026-11-27: the queries run for the answer, in plain words. */
+  steps?: string[]
+}
+
+/** 2026-11-27: the answer card's heading says how well the records back it. */
+export function assistantHeading(status: AssistantViewStatus): string {
+  return { supported: '有依据的回答', inferred: '有依据的推断', conflicting: '记录之间不一致', insufficient: '记录里查不到' }[status]
+}
+
+const STEP_LABELS: Record<string, string> = {
+  query_canon: '查已确定的事实', query_relations: '查人物关系', query_knowledge: '查人物知道什么',
+  query_events: '查章节里发生的事', query_evidence: '查正文原句', query_obligations: '查还没兑现的剧情承诺',
+  query_foreshadows: '查没回收的伏笔', query_mysteries: '查没解开的谜团', query_continuity: '查剧情线',
+  query_task_states: '查本卷任务进度', query_volume_progress: '查分卷进度', query_plan_route: '查本卷路线',
+  diagnose_planning_constraints: '查规划限制', diagnose_knowledge_event: '核对人物知情是否有正文依据',
+  diagnose_canon_evidence: '核对事实是否有正文依据', query_project_meta: '查作品目标',
+}
+
+function planSteps(session: SupportSessionProjection): string[] {
+  const steps = (session.plan as { steps?: { capabilityId?: string }[] })?.steps ?? []
+  return steps.map(step => STEP_LABELS[step.capabilityId ?? ''] ?? '查作品记录')
 }
 
 const boilerplate = [
@@ -160,6 +181,23 @@ function topicLabel(capability: string): string {
 export function presentAssistantSession(session: SupportSessionProjection): AssistantPresentation {
   const finding = session.finding ?? {}
   const status = statusOf(finding)
+  // 2026-11-27: an answer the model wrote from the records, sentence by sentence.
+  if (session.answer?.planner === 'MODEL') {
+    const evidence = buildEvidence(session)
+    const answer = sanitizeAssistantText(finding.claim) || '现有作品记录里查不到能回答这个问题的内容。'
+    return {
+      answer,
+      status,
+      sections: [
+        { title: '当前情况', body: answer },
+        { title: '原因', body: status === 'inferred' ? '有一部分是根据记录推断的，记录里没有直接写明。' : status === 'insufficient' ? '查过的记录里没有能回答这个问题的内容。' : '每句话都对应到查到的作品记录。' },
+        { title: '依据', body: evidence.length ? `${evidence.length} 条可展开记录` : '没有可展开的记录。' },
+        { title: '建议', body: status === 'insufficient' ? '可以换个问法，或说出具体的人物、章节再问。' : '如果要改变已经确定的故事事实，请先创建修改方案。' },
+      ],
+      evidence,
+      steps: planSteps(session),
+    }
+  }
   if (status === 'insufficient') {
     return {
       answer: '现有记录不足以确认这件事，目前只能确认到已查询的范围。',
