@@ -52,7 +52,7 @@ test('b12_history_change_execution_is_active_after_b11_freeze', () => {
 })
 
 test('b11_sidebar preserves the frozen IA while B13 enables health', () => {
-  const shell = read('src/ui/components/AppShell.vue')
+  const shell = `${read('src/ui/components/AppShell.vue')}\n${read('src/ui/presentation/workspaceAreas.ts')}`
   assert.match(shell, /长篇健康/)
   assert.match(shell, /版本与变更记录/)
   assert.match(shell, /\/health/)

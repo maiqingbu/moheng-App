@@ -245,7 +245,7 @@ onUnmounted(() => {
 
 <template>
   <div class="page">
-    <PageHeader title="资料 · 成品阅读" subtitle="按卷打开正式章节，也可以从人物、事件、线索与设定角度查看作品记录。">
+    <PageHeader title="稿件" subtitle="按卷阅读已入库的章节，查看版本、导出成品；人物和线索在“资料库”。">
       <div class="actions"><input v-model="query" class="input" style="width:220px" placeholder="搜索正文 / 人名 / 地点" @keyup.enter="search"><button class="btn" @click="search">搜索</button></div>
     </PageHeader>
 
@@ -285,7 +285,7 @@ onUnmounted(() => {
           <p v-if="exportError" class="banner warning" role="alert">{{ exportError }}</p>
           <div v-if="exportReceipt?.status === 'COMPLETED'" class="banner success" aria-live="polite">
             <strong>正式成品已生成：{{ exportReceipt.fileName }}</strong>
-            <div>{{ exportReceipt.chapters.length }} 章 · {{ exportReceipt.sourceCharacterCount.toLocaleString() }} 字 · SHA-256 {{ exportReceipt.sha256 }}</div>
+            <div>{{ exportReceipt.chapters.length }} 章 · {{ exportReceipt.sourceCharacterCount.toLocaleString() }} 字 · 校验码 {{ exportReceipt.sha256 }}</div>
             <div class="export-path">{{ exportReceipt.finalPath }}</div>
           </div>
           <button class="btn" style="width:100%;margin-top:8px" :disabled="!exportCapability?.available || exporting" @click="exportFinal">

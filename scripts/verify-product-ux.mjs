@@ -45,6 +45,8 @@ const forbiddenVisiblePatterns = [
   /\b(?:BookPlan|VolumePlan)\b/,
   /\b(?:OBLIGATION_OVERDUE|FORESHADOW_AGING|ROUTE_DRIFT|TASK_BLOCKAGE|CONTEXT_GROWTH|MODEL_COST_DRIFT|READER_DESIRE|QUALITY_DRIFT|SOURCE_UNAVAILABLE|INSUFFICIENT_DATA)\b/,
   /\bCanon\b/,
+  // 2026-11-27: development wording left on pages.
+  /\bContextManifest\b|\brevision\b|\bdigest\b|SHA-256|服务商 ID|模型 ID/i,
   /根据架构要求|正式实现必须|不常驻页面内存|AI 推荐理由|根据你提供的上下文|作为 AI|以下是详细分析|希望这些建议/,
 ]
 

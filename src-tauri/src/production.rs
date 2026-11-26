@@ -181,6 +181,13 @@ pub trait ProductionModelGateway: Send + Sync {
         false
     }
 
+    /// Owner decision 2026-11-27: configured providers plan the assistant's
+    /// queries and write its answer; deterministic gateways keep the fixed
+    /// queries for each kind of question.
+    fn plans_assistant_answers(&self) -> bool {
+        false
+    }
+
     /// Deterministic gateways can model a concurrent writer after the gate
     /// snapshot has been checked and immediately before CommitService runs.
     /// Configured providers keep this no-op.
@@ -538,6 +545,10 @@ impl ProductionModelGateway for ConfiguredProductionGateway {
     }
 
     fn classifies_assistant_intent(&self) -> bool {
+        true
+    }
+
+    fn plans_assistant_answers(&self) -> bool {
         true
     }
 

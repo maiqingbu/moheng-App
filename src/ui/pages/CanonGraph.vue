@@ -53,7 +53,7 @@ async function submitRevision(){ await store.runCommand(revisionKey,{type:'chang
 
 <template>
   <div class="page" v-if="canon">
-    <PageHeader title="作品图谱" subtitle="这里展示正式作品事实、人物关系、伏笔和角色知识差。制作稿影响会单独标记，绝不会污染正式图谱。">
+    <PageHeader title="作品图谱" subtitle="这里只显示已入库的作品事实：人物关系、时间线、伏笔和谁知道什么；还没入库的稿子里的内容会单独标出。">
       <button class="btn" @click="revisionOpen=true">发起设定修订</button>
     </PageHeader>
 

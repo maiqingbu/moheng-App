@@ -7,6 +7,7 @@ import ChapterLengthPicker from '../components/ChapterLengthPicker.vue'
 import BaseModal from '../components/BaseModal.vue'
 import { backupRestoreRequests, restorableBackups } from '../flows/backupRestore'
 import { isInFlight, productTimeLabel } from '../presentation/productLanguage'
+import { CUSTOM_PRESET, PROVIDER_PRESETS, modelChoices, presetForEndpoint } from '../presentation/providerPresets'
 import { useProjectStore } from '../stores/projectStore'
 import { useProjectLibraryStore } from '../stores/projectLibraryStore'
 import type { BackupEntry, OwnerCorrection, SettingsProjection, StepThinking, ThinkingStep } from '../../application/contracts'
@@ -25,11 +26,23 @@ const apiKey=ref('')
 // when the list cannot be read.
 const models=ref<string[]>([])
 const modelsMessage=ref('')
+// 2026-11-27: a built-in service fills its endpoint and its usual models.
+const presetId=ref('custom')
+const preset=computed(()=>PROVIDER_PRESETS.find(item=>item.id===presetId.value) ?? CUSTOM_PRESET)
+const modelOptions=computed(()=>modelChoices(preset.value,models.value))
+function choosePreset(event:Event){
+  presetId.value=(event.target as HTMLSelectElement).value
+  models.value=[]
+  modelsMessage.value=''
+  if(!preset.value.endpoint) return
+  form.endpoint=preset.value.endpoint
+  void loadModels()
+}
 async function loadModels(){
   modelsMessage.value='正在获取模型列表…'
   const listed=await libraryStore.listProviderModels(providerSettings()).catch(()=>({models:[] as string[]}))
   models.value=listed.models
-  modelsMessage.value=listed.models.length ? `找到 ${listed.models.length} 个模型，可以在下面三个框里选，也可以照常手填。` : '没有读到模型列表，请直接填写模型名。'
+  modelsMessage.value=listed.models.length ? `找到 ${listed.models.length} 个模型，可以在下面三个框里选，也可以照常手填。` : preset.value.models.length ? '没读到服务商的完整模型列表（填好密钥后可再点一次），先列出了常用模型，也可以直接填写模型名。' : '没有读到模型列表，请直接填写模型名。'
 }
 // P4: each step's thinking: the provider's default (nothing sent), off or on.
 const thinkingSteps:{step:ThinkingStep;label:string}[]=[{step:'default',label:'默认创作模型'},{step:'render',label:'写正文模型'},{step:'audit',label:'审核模型'}]
@@ -74,6 +87,7 @@ watchEffect(()=>{
   const source=isProjectSettings.value ? projectStore.settings : libraryStore.globalSettings
   if(source) {
     Object.assign(form,source)
+    presetId.value=presetForEndpoint(source.endpoint).id
     loadThinking(source.thinking)
     if(!isProjectSettings.value) {
       pricingEntries.value=source.modelPricing?.entries.map(entry=>({...entry})) ?? []
@@ -148,9 +162,9 @@ function resetForm(){ const source=isProjectSettings.value ? projectStore.settin
       <main>
         <section id="setting-model" class="setting-section">
           <div class="card-head"><div><h2 class="card-title">模型配置</h2><p class="card-subtitle">可在这里测试模型服务连接。应用设置作为默认配置，单个作品可以使用独立的模型设置。</p></div></div>
-          <div class="setting-grid"><label class="field"><span class="field-label">服务类型</span><select v-model="form.provider" class="select"><option>OpenAI Compatible</option><option>自定义兼容服务</option></select></label><label class="field"><span class="field-label">默认创作模型</span><input v-model="form.model" class="input" list="provider-models" /></label><label class="field" data-render-model><span class="field-label">写正文模型（可选）</span><input v-model="form.renderModelId" class="input" list="provider-models" /><span class="help">只用于写章节正文和修改正文，不用于规划和审核；留空则沿用默认创作模型。使用前请在下方填写它的价格。</span></label><label class="field" data-audit-model><span class="field-label">审核模型（可选）</span><input v-model="form.auditModelId" class="input" list="provider-models" /><span class="help">用于新流程的章节计划，以及写完后的事实提取与审核；留空则沿用默认创作模型。使用前请在下方填写它的价格。</span></label><label class="field" style="grid-column:1/-1"><span class="field-label">接口地址（API Endpoint）</span><input v-model="form.endpoint" class="input" /></label><label class="field" style="grid-column:1/-1"><span class="field-label">访问密钥（API Key）</span><input v-model="apiKey" class="input" type="password" autocomplete="new-password" /><span class="help">密钥会安全保存在系统凭据存储中，不会写入作品数据或操作记录。留空表示继续使用已保存的密钥。</span></label></div>
+          <div class="setting-grid"><label class="field" data-provider-preset><span class="field-label">模型服务商</span><select :value="presetId" class="select" @change="choosePreset"><option v-for="item in PROVIDER_PRESETS" :key="item.id" :value="item.id">{{ item.label }}</option></select><span class="help">选好服务商会自动填接口地址，并读取它的模型列表；列表外的模型名也可以直接填。</span></label><label class="field"><span class="field-label">默认创作模型</span><input v-model="form.model" class="input" list="provider-models" /></label><label class="field" data-render-model><span class="field-label">写正文模型（可选）</span><input v-model="form.renderModelId" class="input" list="provider-models" /><span class="help">只用于写章节正文和修改正文，不用于规划和审核；留空则沿用默认创作模型。使用前请在下方填写它的价格。</span></label><label class="field" data-audit-model><span class="field-label">审核模型（可选）</span><input v-model="form.auditModelId" class="input" list="provider-models" /><span class="help">用于新流程的章节计划，以及写完后的事实提取与审核；留空则沿用默认创作模型。使用前请在下方填写它的价格。</span></label><label class="field" style="grid-column:1/-1"><span class="field-label">接口地址（API Endpoint）</span><input v-model="form.endpoint" class="input" @change="presetId=presetForEndpoint(form.endpoint).id" /></label><label class="field" style="grid-column:1/-1"><span class="field-label">访问密钥（API Key）</span><input v-model="apiKey" class="input" type="password" autocomplete="new-password" /><span class="help">密钥会安全保存在系统凭据存储中，不会写入作品数据或操作记录。留空表示继续使用已保存的密钥。</span></label></div>
           <div class="actions" style="margin-top:10px"><button class="btn" @click="loadModels">获取模型列表</button><span v-if="modelsMessage" class="help">{{ modelsMessage }}</span></div>
-          <datalist id="provider-models"><option v-for="model in models" :key="model" :value="model" /></datalist>
+          <datalist id="provider-models"><option v-for="model in modelOptions" :key="model" :value="model" /></datalist>
           <div class="setting-grid" data-thinking style="margin-top:10px">
             <label v-for="item in thinkingSteps" :key="item.step" class="field"><span class="field-label">{{ item.label }} · 思考</span>
               <select v-model="thinking[item.step].mode" class="select"><option value="">服务商默认</option><option value="off">关闭</option><option value="on">开启</option></select>
@@ -191,8 +205,8 @@ function resetForm(){ const source=isProjectSettings.value ? projectStore.settin
           <div v-if="!isProjectSettings" class="section-subgroup" data-model-pricing>
             <div class="card-head"><div><h3 class="card-title">模型价格表 · v{{ pricingVersion }}</h3><p class="card-subtitle">单位：元 / 百万 tokens。价格只由你维护，不从网络抓取。</p></div><button class="btn" @click="addPricingEntry">添加模型</button></div>
             <div v-for="(entry,index) in pricingEntries" :key="`${entry.providerId}:${entry.modelId}:${index}`" class="setting-grid pricing-entry">
-              <label class="field"><span class="field-label">服务商 ID</span><input v-model.trim="entry.providerId" class="input" /></label>
-              <label class="field"><span class="field-label">模型 ID</span><input v-model.trim="entry.modelId" class="input" /></label>
+              <label class="field"><span class="field-label">服务商标识</span><input v-model.trim="entry.providerId" class="input" /></label>
+              <label class="field"><span class="field-label">模型名</span><input v-model.trim="entry.modelId" class="input" /></label>
               <label class="field"><span class="field-label">输入单价</span><input v-model.number="entry.inputPricePerMillionTokens" type="number" min="0" step=".01" class="input" /></label>
               <label class="field"><span class="field-label">输出单价</span><input v-model.number="entry.outputPricePerMillionTokens" type="number" min="0" step=".01" class="input" /></label>
               <label class="field"><span class="field-label">缓存输入单价（可选）</span><input v-model.number="entry.cachedInputPricePerMillionTokens" type="number" min="0" step=".01" class="input" /></label>

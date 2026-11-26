@@ -2,8 +2,8 @@
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projectStore'
-import { phaseLabel } from '../presentation/projectLabels'
-import RuntimeBanner from '../components/RuntimeBanner.vue'
+import { phaseLabel, signingLabels } from '../presentation/projectLabels'
+import { homeNextStep } from '../presentation/homeNextStep'
 
 const store = useProjectStore()
 const router = useRouter()
@@ -12,11 +12,19 @@ const overview = computed(() => store.overview)
 const id = computed(() => store.currentProjectId ?? '')
 const currentVolume = computed(() => overview.value?.currentVolume)
 const recentChapters = computed(() => overview.value?.recentChapters ?? [])
-const nextAction = computed(() => store.pendingDecisionCount
-  ? { label: `处理 ${store.pendingDecisionCount} 项待处理`, to: `/projects/${id.value}/decisions` }
-  : project.value?.phase === 'PITCHING' || project.value?.phase === 'STORY_BLUEPRINT'
-    ? { label: '进入规划', to: `/projects/${id.value}/directions` }
-    : { label: '进入创作', to: `/projects/${id.value}/production` })
+const pending = computed(() => store.pendingDecisionCount ?? 0)
+
+const nextStep = computed(() => {
+  const step = homeNextStep(project.value!, pending.value, recentChapters.value[0]?.number ?? null)
+  return { ...step, to: `/projects/${id.value}${step.path}` }
+})
+
+const stageMetric = computed(() => currentVolume.value
+  ? { value: `第 ${currentVolume.value.number} 卷`, note: currentVolume.value.title }
+  : { value: phaseLabel(project.value?.phase), note: '还没有进入分卷写作' })
+const signingMetric = computed(() => project.value ? signingLabels[project.value.signingStatus] : '未评估')
+const cost = computed(() => (project.value?.totalCost ?? 0).toFixed(2))
+
 const healthClass = computed(() => {
   switch (overview.value?.healthSummary.level) {
     case 'risk': return 'danger'
@@ -38,42 +46,55 @@ const healthBadge = computed(() => {
 })
 const healthTitle = computed(() => overview.value?.healthSummary.label ?? '正在积累作品记录')
 const healthNote = computed(() => overview.value?.healthSummary.note ?? '正式章节与项目记录积累后，会显示长期状态。')
-const nextChapterLabel = computed(() => recentChapters.value.length ? `继续第 ${recentChapters.value[0].number + 1} 章创作` : '开始第一章创作')
 </script>
 
 <template>
   <div v-if="project && overview" class="prototype-overview">
-    <div class="prototype-pagehead"><div><h2>总览</h2><p>继续写作、掌握当前卷状态，并优先处理真正会影响后续创作的问题。</p></div></div>
+    <div class="prototype-pagehead"><div><h2>{{ project.title }}</h2><p>{{ [project.subtitle, project.platform, project.genre].filter(Boolean).join(' · ') }}</p></div></div>
 
-    <RuntimeBanner :state="project.runState" :reason="project.blockReason">
-      <button v-if="project.runState === 'ACTIVE'" class="prototype-btn primary" type="button" @click="router.push(`/projects/${id}/production`)">查看创作进度</button>
-      <button v-if="store.pendingDecisionCount" class="prototype-btn primary" type="button" @click="router.push(`/projects/${id}/decisions`)">去处理 {{ store.pendingDecisionCount }} 项决定</button>
-    </RuntimeBanner>
+    <section class="home-next" aria-labelledby="home-next-title">
+      <div class="home-next-copy">
+        <span class="home-next-label">下一步</span>
+        <strong id="home-next-title">{{ nextStep.title }}</strong>
+        <span>{{ nextStep.note }}</span>
+      </div>
+      <button class="prototype-btn home-next-action" type="button" @click="router.push(nextStep.to)">{{ nextStep.action }}</button>
+    </section>
 
-    <div class="prototype-grid3" style="margin-top:16px">
-      <div class="prototype-panel"><div class="prototype-metric">{{ project.committedChapters }}</div><div class="prototype-metric-label">已完成章节</div></div>
-      <div class="prototype-panel"><div class="prototype-metric">{{ currentVolume ? `第 ${currentVolume.number} 卷` : phaseLabel(project.phase) }}</div><div class="prototype-metric-label">当前创作阶段</div></div>
-      <div class="prototype-panel"><div class="prototype-metric warning">{{ store.pendingDecisionCount }}</div><div class="prototype-metric-label">需要优先处理</div></div>
+    <div class="prototype-grid3 home-metrics">
+      <div class="prototype-panel"><div class="prototype-metric-label">已写</div><div class="prototype-metric">{{ project.committedChapters }} 章</div></div>
+      <div class="prototype-panel"><div class="prototype-metric-label">当前阶段</div><div class="prototype-metric">{{ stageMetric.value }}</div><small class="muted">{{ stageMetric.note }}</small></div>
+      <div class="prototype-panel"><div class="prototype-metric-label">开篇签约评估</div><div class="prototype-metric">{{ signingMetric }}</div></div>
+      <div class="prototype-panel"><div class="prototype-metric-label">已花费</div><div class="prototype-metric">¥{{ cost }}</div></div>
     </div>
 
     <div class="prototype-grid" style="margin-top:16px">
       <section class="prototype-panel">
-        <h3>继续创作</h3>
-        <div class="prototype-item"><div><strong>{{ nextChapterLabel }}</strong><small>{{ recentChapters.length ? '最近正式章节已经确认，可以继续准备下一章。' : '先完成故事方向与第一章准备，再开始正式创作。' }}</small></div><button class="prototype-btn primary" type="button" @click="router.push(nextAction.to)">{{ nextAction.label }}</button></div>
-        <div style="height:10px" />
         <h3>最近章节</h3>
-        <div v-if="recentChapters.length" class="prototype-list"><div v-for="chapter in recentChapters.slice(0, 3)" :key="chapter.id" class="prototype-item"><div><strong>第 {{ chapter.number }} 章 · {{ chapter.title }}</strong><small>已确认 · {{ chapter.wordCount.toLocaleString() }} 字</small></div></div></div>
-        <div v-else class="prototype-item"><div><strong>还没有正式章节</strong><small>第一章确认后，最近章节会显示在这里。</small></div></div>
+        <div v-if="recentChapters.length" class="prototype-list"><div v-for="chapter in recentChapters.slice(0, 3)" :key="chapter.id" class="prototype-item"><div><strong>第 {{ chapter.number }} 章 · {{ chapter.title }}</strong><small>已入库 · {{ chapter.wordCount.toLocaleString() }} 字</small></div></div></div>
+        <div v-else class="prototype-item"><div><strong>还没有入库的章节</strong><small>第一章写完并通过检查后，会显示在这里。</small></div></div>
+        <button v-if="recentChapters.length" class="prototype-btn" type="button" style="margin-top:10px" @click="router.push(`/projects/${id}/read`)">打开稿件</button>
       </section>
 
       <aside class="prototype-panel">
-        <h3>需要处理</h3>
-        <div v-if="store.pendingDecisionCount" class="prototype-list"><div class="prototype-item"><div><strong>有 {{ store.pendingDecisionCount }} 项内容需要确认</strong><small>它们会在确认后影响下一步创作安排。</small></div><button class="prototype-btn" type="button" @click="router.push(`/projects/${id}/decisions`)">去处理</button></div></div>
-        <div v-else class="prototype-list"><div class="prototype-item"><div><strong>当前没有待确认事项</strong><small>需要确认、修改或重新检查的内容会集中显示在这里。</small></div><span class="prototype-badge brand">正常</span></div></div>
+        <h3>待决定</h3>
+        <div v-if="pending" class="prototype-item"><div><strong>{{ pending }} 件事等你决定</strong><small>系统不会替你拿主意，处理前相关的写作会等着。</small></div><button class="prototype-btn" type="button" @click="router.push(`/projects/${id}/decisions`)">去处理</button></div>
+        <div v-else class="prototype-item"><div><strong>没有要你决定的事</strong><small>需要你确认、修改或授权的事会出现在这里。</small></div></div>
         <div style="height:16px" />
-        <h3>长篇状态</h3>
-        <div class="prototype-item"><div><strong>{{ healthTitle }}</strong><small>{{ healthNote }}</small></div><span class="prototype-badge" :class="healthClass">{{ healthBadge }}</span><button class="prototype-btn" type="button" @click="router.push(`/projects/${id}/health`)">查看</button></div>
+        <h3>作品状况</h3>
+        <div class="prototype-item"><div><strong>{{ healthTitle }}</strong><small>{{ healthNote }}</small></div><span class="prototype-badge" :class="healthClass">{{ healthBadge }}</span><button class="prototype-btn" type="button" @click="router.push(`/projects/${id}/health`)">详情</button></div>
       </aside>
     </div>
   </div>
 </template>
+
+<style scoped>
+.home-next { margin-top: 16px; display: flex; flex-wrap: wrap; align-items: center; gap: 20px; padding: 24px 28px; border-radius: var(--radius-lg); background: var(--pine-800); color: #ffffff; }
+.home-next-copy { flex: 1 1 320px; display: flex; flex-direction: column; gap: 4px; }
+.home-next-copy strong { font-size: 22px; line-height: 1.4; }
+.home-next-copy span { color: var(--pine-100); }
+.home-next-label { font-size: 13px; }
+.home-next-action { background: #ffffff; color: var(--pine-800); border-color: #ffffff; font-weight: 600; padding: 10px 20px; }
+.home-metrics { margin-top: 16px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@container workspace (max-width: 900px) { .home-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+</style>

@@ -372,7 +372,7 @@ export const useProjectStore = defineStore('project-projection', () => {
       return receipt
     }
     if (outcome.kind === 'not_executed') {
-      const message = '当前作品没有这项修复的执行回执，且授权尚未消费。请前往创作中心核对后，再由你明确确认是否执行。'
+      const message = '当前作品没有这项修复的执行回执，且授权尚未消费。请到写作页核对后，再由你明确确认是否执行。'
       for (const stateKey of keys) {
         commandStates.value[stateKey] = {
           status: 'blocked',

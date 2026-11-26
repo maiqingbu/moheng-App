@@ -16,7 +16,7 @@ const feature = computed(() => route.name === 'health'
     <section class="card pad section">
       <h2 class="card-title">该功能尚未开放。</h2>
       <p class="card-subtitle">{{ feature.description }}</p>
-      <button class="btn" style="margin-top:16px" @click="router.push(`/projects/${String(route.params.id ?? '')}`)">返回作品总览</button>
+      <button class="btn" style="margin-top:16px" @click="router.push(`/projects/${String(route.params.id ?? '')}`)">返回作品首页</button>
     </section>
   </div>
 </template>

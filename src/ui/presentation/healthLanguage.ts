@@ -38,7 +38,7 @@ export function truthClassLabel(truthClass: Factor['truthClass']): string {
 }
 
 export function destinationLabel(destination: string): string {
-  if (destination.includes('创作')) return '创作中心'
+  if (destination.includes('创作')) return '写作页'
   if (destination.includes('历史')) return '版本与变更记录'
   return '卷工作区'
 }
@@ -97,7 +97,7 @@ export function healthEvidenceProjection(
     title: '需要关注的事项',
     detail: '请回到对应工作区核对当前安排。',
     location,
-    recommendedDestination: factorCode === 'QUALITY_DRIFT' ? '创作中心' : '卷工作区',
+    recommendedDestination: factorCode === 'QUALITY_DRIFT' ? '写作页' : '卷工作区',
     sourceRefs: [],
   })
 

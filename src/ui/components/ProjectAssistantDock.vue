@@ -2,7 +2,8 @@
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projectStore'
-import { presentAssistantSession } from '../presentation/assistantPresentation'
+import { assistantHeading, presentAssistantSession } from '../presentation/assistantPresentation'
+import { areaOf, tabName } from '../presentation/workspaceAreas'
 import { productErrorMessage, repairExecutionLabel, sanitizeProductText } from '../presentation/productLanguage'
 import type { AssistantPresentation } from '../presentation/assistantPresentation'
 import type { AssistantRepairPlan } from '../../application/contracts'
@@ -26,9 +27,13 @@ const assistantError = ref('')
 const assistantPhase = ref<AssistantPhase>('PROPOSAL_READY')
 const executionBeforeRevision = ref<number | null>(null)
 const unknownCommandKey = ref<'assistant-execute' | 'assistant-reverify'>('assistant-execute')
-const context = computed(() => ({ 'project-overview': '总览', production: '创作', directions: '规划', volumes: '当前卷', 'volume-workspace': '当前卷', decisions: '待处理', health: '长篇健康', read: '资料', graph: '资料', completion: '完结准备' }[String(route.name)] ?? '当前作品'))
+const context = computed(() => {
+  const place = areaOf(route.name)
+  if (!place) return '当前作品'
+  return place.area.label === place.tab.label ? place.area.label : `${place.area.label} · ${place.tab.label}`
+})
 const projectTitle = computed(() => store.project?.title?.trim() || '当前作品')
-const placeholder = computed(() => context.value === '当前卷' ? '问问这一卷还缺什么、为什么卡住……' : context.value === '创作' ? '问问这一章的设定、冲突或修改建议……' : '问问这部作品的进展、问题或下一步……')
+const placeholder = computed(() => { const name = tabName(route.name); return name === 'volumes' ? '问问这一卷还缺什么、为什么卡住……' : name === 'production' ? '问问这一章的设定、冲突或修改建议……' : '问问这部作品的进展、问题或下一步……' })
 const proposalState = computed(() => store.commandState('assistant-plan'))
 const authorizationState = computed(() => store.commandState('assistant-authorize'))
 const executionState = computed(() => store.commandState('assistant-execute'))
@@ -253,7 +258,7 @@ function startConversation() {
     <div class="prototype-messages">
       <template v-if="presentation">
         <div class="prototype-msg user">{{ lastQuestion }}</div>
-        <div class="prototype-msg assistantmsg"><div class="prototype-answercard"><h4>{{ presentation.status === 'supported' ? '已完成当前记录核对' : '还需要继续核对' }}</h4><p>{{ presentation.answer }}</p><div v-if="presentation.evidence.length" class="prototype-evidence"><span>依据来自当前作品记录</span><button class="prototype-link" type="button" @click="evidenceOpen = !evidenceOpen">{{ evidenceOpen ? '收起依据' : '查看依据' }}</button></div><div v-if="evidenceOpen" class="prototype-proposal"><strong>已核对的依据</strong><p v-for="item in presentation.evidence" :key="`${item.label}-${item.source ?? ''}`">{{ item.label }} · {{ item.detail }}</p></div><div class="prototype-proposal"><strong>需要修改时</strong><p>我可以整理一份修改方案，但不会直接改动已经确认的故事事实。</p><button class="prototype-btn" type="button" @click="prepareProposal">查看修改方案</button></div></div></div>
+        <div class="prototype-msg assistantmsg"><div class="prototype-answercard"><h4>{{ assistantHeading(presentation.status) }}</h4><p>{{ presentation.answer }}</p><details v-if="presentation.steps?.length" class="prototype-steps"><summary>查了哪几步</summary><ol><li v-for="(step, index) in presentation.steps" :key="index">{{ step }}</li></ol></details><div v-if="presentation.evidence.length" class="prototype-evidence"><span>依据来自当前作品记录</span><button class="prototype-link" type="button" @click="evidenceOpen = !evidenceOpen">{{ evidenceOpen ? '收起依据' : '查看依据' }}</button></div><div v-if="evidenceOpen" class="prototype-proposal"><strong>已核对的依据</strong><p v-for="item in presentation.evidence" :key="`${item.label}-${item.source ?? ''}`">{{ item.label }} · {{ item.detail }}</p></div><div class="prototype-proposal"><strong>需要修改时</strong><p>我可以整理一份修改方案，但不会直接改动已经确认的故事事实。</p><button class="prototype-btn" type="button" @click="prepareProposal">查看修改方案</button></div></div></div>
       </template>
       <div v-else class="prototype-msg assistantmsg"><div class="prototype-answercard"><h4>从一件具体的事开始</h4><p>我会先核对当前作品记录，再告诉你能够确认到什么。涉及正式修改时，会先给出方案并等待你的确认。</p><div class="prototype-evidence"><span>当前上下文：{{ context }}</span><span>等待提问</span></div></div></div>
       <div v-if="assistantError" class="prototype-msg assistantmsg" role="alert"><div class="prototype-answercard"><h4>暂时无法完成查询</h4><p>{{ assistantError }}</p><button class="prototype-btn" type="button" @click="assistantError = ''">知道了</button></div></div>
@@ -265,7 +270,7 @@ function startConversation() {
         <p>{{ sanitizeProductText(proposal.diagnosis?.claim, '已完成当前作品记录核对。') }}</p>
         <div class="prototype-plan-grid"><span>影响范围</span><strong>{{ displayScopes(proposal.affectedScopes) }}</strong><span>风险</span><strong>{{ sanitizeProductText(proposal.riskLevel, '按当前记录评估') }}</strong><span>执行前备份</span><strong>{{ proposal.requiresBackup ? '需要' : '不需要' }}</strong></div>
         <p v-if="proposalMessage" class="prototype-plan-message">{{ proposalMessage }}</p>
-        <div class="prototype-composerbar"><button class="prototype-btn" type="button" @click="proposalOpen = false">暂不处理</button><button v-if="proposal.action === 'EXECUTABLE' && assistantPhase === 'AWAITING_AUTHORIZATION' && authorizationState.confirmation === 'pending'" class="prototype-btn primary" type="button" @click="requeryAuthorization">重新读取授权结果</button><button v-else-if="proposal.action === 'EXECUTABLE' && assistantPhase === 'AWAITING_AUTHORIZATION'" class="prototype-btn primary" type="button" :disabled="proposalState.status !== 'committed' || ['submitting','accepted','processing'].includes(authorizationState.status) || executionState.status === 'submitting'" @click="authorizeProposal">{{ authorizationState.confirmation === 'confirmed' ? '继续执行已授权修复' : '确认执行' }}</button><button v-else-if="proposal.action === 'EXECUTABLE' && assistantPhase === 'VERIFY_INCOMPLETE'" class="prototype-btn primary" type="button" @click="reverifyProposal">重新核对现有回执</button><button v-else-if="proposal.action === 'EXECUTABLE' && assistantPhase === 'OUTCOME_UNKNOWN'" class="prototype-btn primary" type="button" @click="requeryProposalOutcome">重新读取现有回执</button><button v-else-if="proposal.action === 'EXECUTABLE' && assistantPhase === 'OUTCOME_NOT_EXECUTED'" class="prototype-btn" type="button" @click="router.push(`/projects/${store.currentProjectId}/production`)">前往创作中心核对执行状态</button><button v-else-if="proposal.action !== 'EXECUTABLE'" class="prototype-btn" type="button" @click="router.push(`/projects/${store.currentProjectId}/history`)">进入变更记录</button></div>
+        <div class="prototype-composerbar"><button class="prototype-btn" type="button" @click="proposalOpen = false">暂不处理</button><button v-if="proposal.action === 'EXECUTABLE' && assistantPhase === 'AWAITING_AUTHORIZATION' && authorizationState.confirmation === 'pending'" class="prototype-btn primary" type="button" @click="requeryAuthorization">重新读取授权结果</button><button v-else-if="proposal.action === 'EXECUTABLE' && assistantPhase === 'AWAITING_AUTHORIZATION'" class="prototype-btn primary" type="button" :disabled="proposalState.status !== 'committed' || ['submitting','accepted','processing'].includes(authorizationState.status) || executionState.status === 'submitting'" @click="authorizeProposal">{{ authorizationState.confirmation === 'confirmed' ? '继续执行已授权修复' : '确认执行' }}</button><button v-else-if="proposal.action === 'EXECUTABLE' && assistantPhase === 'VERIFY_INCOMPLETE'" class="prototype-btn primary" type="button" @click="reverifyProposal">重新核对现有回执</button><button v-else-if="proposal.action === 'EXECUTABLE' && assistantPhase === 'OUTCOME_UNKNOWN'" class="prototype-btn primary" type="button" @click="requeryProposalOutcome">重新读取现有回执</button><button v-else-if="proposal.action === 'EXECUTABLE' && assistantPhase === 'OUTCOME_NOT_EXECUTED'" class="prototype-btn" type="button" @click="router.push(`/projects/${store.currentProjectId}/production`)">前往写作页核对执行状态</button><button v-else-if="proposal.action !== 'EXECUTABLE'" class="prototype-btn" type="button" @click="router.push(`/projects/${store.currentProjectId}/history`)">进入变更记录</button></div>
       </div>
       <p v-else class="prototype-plan-message">{{ proposalMessage }}</p>
     </div>

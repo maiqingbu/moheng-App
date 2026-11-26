@@ -60,7 +60,7 @@ function completionStore() {
 afterEach(() => { mounted.splice(0).forEach(app => app.unmount()); document.body.innerHTML = '' })
 
 describe('R2 文档修订对应的前端行为', () => {
-  it('Given 后端提供项目成本摘要 When 打开创作中心 Then 显示本章与本月上限及余量', async () => {
+  it('Given 后端提供项目成本摘要 When 打开写作页 Then 显示本章与本月上限及余量', async () => {
     production({
       costSummary: {
         currentVolume: 0,
@@ -75,6 +75,11 @@ describe('R2 文档修订对应的前端行为', () => {
       },
     })
     const page = await render(ProductionCenter)
+    // 2026-11-27: the cost sits in 生产详情, drawn once that is opened.
+    const details = page.querySelector('[data-production-details]') as HTMLDetailsElement
+    details.open = true
+    details.dispatchEvent(new Event('toggle'))
+    await nextTick()
 
     expect(page.querySelector('[data-cost-summary]')).toBeTruthy()
     expect(page.textContent).toContain('¥2.00')
@@ -83,7 +88,7 @@ describe('R2 文档修订对应的前端行为', () => {
     expect(page.textContent).toContain('¥4.30')
   })
 
-  it('Given 旧生产投影没有成本摘要 When 打开创作中心 Then 隐藏摘要卡且不阻断其他内容', async () => {
+  it('Given 旧生产投影没有成本摘要 When 打开写作页 Then 隐藏摘要卡且不阻断其他内容', async () => {
     production()
     const page = await render(ProductionCenter)
 
@@ -141,7 +146,7 @@ describe('R2 文档修订对应的前端行为', () => {
     expect(page.textContent).toContain('修改已完成并核对通过')
   })
 
-  it('Given 项目助手授权后的回执验证不完整 When 展示 Then 指向创作中心重核而不显示执行失败', async () => {
+  it('Given 项目助手授权后的回执验证不完整 When 展示 Then 指向写作页重核而不显示执行失败', async () => {
     const plan = {
       action: 'EXECUTABLE',
       repairPlanId: 'repair-plan:assistant-page',
@@ -167,7 +172,7 @@ describe('R2 文档修订对应的前端行为', () => {
     await nextTick()
     expect(document.body.textContent).toContain('修复已执行，但核对不完整')
     expect(document.body.textContent).not.toContain('修复没有完成')
-    expect(Array.from(document.body.querySelectorAll('button')).some(button => button.textContent?.includes('前往创作中心重新核对'))).toBe(true)
+    expect(Array.from(document.body.querySelectorAll('button')).some(button => button.textContent?.includes('前往写作页重新核对'))).toBe(true)
     expect(harness.store.authorizeAssistantRepair).toHaveBeenCalledTimes(1)
   })
 
@@ -430,7 +435,7 @@ describe('R2 文档修订对应的前端行为', () => {
   it('Given 无长篇计划 When 展示 Then 不显示开篇创建说明', async () => {
     production({ chapterPlan: null, nextChapter: null })
     const page = await render(ProductionCenter)
-    expect(page.textContent).toContain('当前没有可执行章节计划')
+    expect(page.textContent).toContain('当前没有要写的章节')
     expect(page.textContent).not.toContain('再建立第一章规划')
   })
   it('Given 后端返回卷路线重规划 When 展示 Then 保留具体后续动作', async () => {

@@ -90,7 +90,7 @@ async function authorizeRepair() {
     const execute = await store.authorizeAssistantRepair(plan.value)
     if (execute.receipt?.status === 'REPAIR_VERIFICATION_INCOMPLETE') {
       repairVerificationIncomplete.value = true
-      repairMessage.value = '修复已执行，但核对不完整。请前往创作中心重新核对现有回执，不会再次执行修复。'
+      repairMessage.value = '修复已执行，但核对不完整。请前往写作页重新核对现有回执，不会再次执行修复。'
       return
     }
     repairVerificationIncomplete.value = false
@@ -99,7 +99,7 @@ async function authorizeRepair() {
       ? `${repairExecutionLabel(execute.receipt)}；请查看回执中的验证项。`
       : execute.finalStatus === 'committed' && execute.receipt?.status === 'REPAIR_VERIFIED'
         ? '修复已完成，并已重新核对结果。'
-        : execute.message || '修复执行未完成，请先查看创作中心中的正式回执。'
+        : execute.message || '修复执行未完成，请先查看写作页中的正式回执。'
   } catch (error) {
     const authorization = store.commandState('assistant-authorize')
     if (authorization.confirmation === 'pending') {
@@ -130,7 +130,7 @@ async function requeryRepairOutcome() {
     if (receipt?.receipt?.status === 'REPAIR_VERIFICATION_INCOMPLETE') {
       repairOutcomeUnknown.value = false
       repairVerificationIncomplete.value = true
-      repairMessage.value = '修复已执行，但核对不完整。请前往创作中心重新核对现有回执，不会再次执行修复。'
+      repairMessage.value = '修复已执行，但核对不完整。请前往写作页重新核对现有回执，不会再次执行修复。'
       return
     }
     if (receipt) {
@@ -281,7 +281,7 @@ onMounted(() => {
 <template>
   <div class="page">
     <PageHeader title="项目助手" subtitle="只回答当前作品记录中能够核对的内容；涉及正式修改时，必须先查看方案并由你明确授权。">
-      <button class="btn" @click="router.push(`/projects/${store.currentProjectId ?? ''}`)">返回作品总览</button>
+      <button class="btn" @click="router.push(`/projects/${store.currentProjectId ?? ''}`)">返回作品首页</button>
     </PageHeader>
     <section class="card pad">
       <label class="field"><span class="field-label">你想确认什么</span><textarea v-model="question" class="textarea" /></label>
@@ -336,7 +336,7 @@ onMounted(() => {
       <CommandFeedback :state="authState" />
       <CommandFeedback :state="executeState" />
       <p v-if="repairMessage" class="banner" :class="repairMessage.includes('完成') ? 'success' : 'warning'">{{ repairMessage }}</p>
-      <template #footer><button class="btn" @click="repairOpen=false">暂不处理</button><button v-if="repairVerificationIncomplete" class="btn primary" @click="router.push(`/projects/${store.currentProjectId}/production`)">前往创作中心重新核对</button><button v-else-if="repairOutcomeUnknown" class="btn primary" @click="requeryRepairOutcome">重新读取现有回执</button><button v-else-if="repairKnownNotExecuted || repairOutcomeResolved" class="btn primary" @click="router.push(`/projects/${store.currentProjectId}/production`)">{{ repairKnownNotExecuted ? '前往创作中心核对执行状态' : '查看创作中心修复回执' }}</button><button v-else-if="authState.confirmation !== 'pending'" class="btn primary" :disabled="!plan || plan.action !== 'EXECUTABLE' || planState.status !== 'committed' || ['submitting','accepted','processing'].includes(authState.status)" @click="authorizeRepair">{{ authState.confirmation === 'confirmed' ? '继续执行已授权修复' : '我确认并执行修复' }}</button></template>
+      <template #footer><button class="btn" @click="repairOpen=false">暂不处理</button><button v-if="repairVerificationIncomplete" class="btn primary" @click="router.push(`/projects/${store.currentProjectId}/production`)">前往写作页重新核对</button><button v-else-if="repairOutcomeUnknown" class="btn primary" @click="requeryRepairOutcome">重新读取现有回执</button><button v-else-if="repairKnownNotExecuted || repairOutcomeResolved" class="btn primary" @click="router.push(`/projects/${store.currentProjectId}/production`)">{{ repairKnownNotExecuted ? '前往写作页核对执行状态' : '查看写作页修复回执' }}</button><button v-else-if="authState.confirmation !== 'pending'" class="btn primary" :disabled="!plan || plan.action !== 'EXECUTABLE' || planState.status !== 'committed' || ['submitting','accepted','processing'].includes(authState.status)" @click="authorizeRepair">{{ authState.confirmation === 'confirmed' ? '继续执行已授权修复' : '我确认并执行修复' }}</button></template>
     </BaseModal>
   </div>
 </template>

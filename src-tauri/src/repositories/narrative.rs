@@ -842,6 +842,40 @@ impl NarrativeRepository {
             .map_err(Into::into)
     }
 
+    /// Owner decision 2026-11-27: the work's named entities (newest first)
+    /// and its chapters (latest first), each at most `limit`, for the
+    /// assistant's query planner to name ids by.
+    #[allow(clippy::type_complexity)]
+    pub fn assistant_directory(
+        connection: &Connection,
+        project_id: &str,
+        limit: i64,
+    ) -> Result<
+        (
+            Vec<(String, String, String)>,
+            Vec<(String, i64, String, String)>,
+        ),
+        NarrativeRepositoryError,
+    > {
+        let mut entities = connection.prepare(
+            "SELECT entity_id, canonical_name, entity_type FROM canon_entities WHERE project_id=?1 ORDER BY updated_at DESC, entity_id LIMIT ?2",
+        )?;
+        let entities = entities
+            .query_map(libsql_rusqlite::params![project_id, limit], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut chapters = connection.prepare(
+            "SELECT chapter_id, chapter_no, title, volume_id FROM chapters WHERE project_id=?1 ORDER BY chapter_no DESC LIMIT ?2",
+        )?;
+        let chapters = chapters
+            .query_map(libsql_rusqlite::params![project_id, limit], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((entities, chapters))
+    }
+
     pub fn canon_entity_exists(
         connection: &Connection,
         project_id: &str,
