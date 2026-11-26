@@ -795,6 +795,9 @@ pub(crate) fn volume_seeds(book_plan: &Value, volume_no: i64) -> impl Iterator<I
 }
 
 /// VD-1b: the volume goal a seed stage becomes.
+/// How the id of a volume's climax task starts.
+pub(crate) const CLIMAX_TASK_PREFIX: &str = "task:climax:";
+
 fn stage_goal_id(volume_id: &str, stage_id: &str) -> String {
     format!("goal:{volume_id}:{stage_id}")
 }
@@ -1479,7 +1482,7 @@ pub fn compile_volume_plan_from_authority(
     if let Some(items) = book_plan.get("majorMysteryGoals").and_then(Value::as_array) {
         for item in items.iter().filter(for_this_volume).take(1) {
             let id = item.get("id").and_then(Value::as_str).unwrap_or("mystery");
-            let task_id = format!("task:climax:{id}");
+            let task_id = format!("{CLIMAX_TASK_PREFIX}{id}");
             let mystery = item
                 .get("description")
                 .and_then(Value::as_str)

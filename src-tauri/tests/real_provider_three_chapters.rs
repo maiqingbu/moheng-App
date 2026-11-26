@@ -223,29 +223,7 @@ fn execute_real_production(
             Err(error) if error.contains("UNKNOWN_REMOTE_OUTCOME") && attempt < 5 => {
                 // What the user does in the app: cancel the job whose model
                 // call has an unknown outcome, then produce the chapter again.
-                let connection = state.manager.open(project_id, "", NOW).unwrap();
-                let decisions = connection
-                    .prepare("SELECT decision_id FROM decisions WHERE project_id=?1 AND decision_type='UNKNOWN_REMOTE_OUTCOME' AND outcome IN ('OPEN','PENDING') ORDER BY created_at,decision_id")
-                    .unwrap()
-                    .query_map([project_id], |row| row.get::<_, String>(0))
-                    .unwrap()
-                    .collect::<Result<Vec<_>, _>>()
-                    .unwrap();
-                drop(connection);
-                for (index, decision_id) in decisions.iter().enumerate() {
-                    execute(
-                        state,
-                        json!({
-                            "type":"decision_submit",
-                            "commandId":format!("{command_id}:resolve-unknown:{index}"),
-                            "idempotencyKey":format!("{command_id}:resolve-unknown:{index}:key"),
-                            "projectId":project_id,
-                            "expectedRevision":current_revision(state, project_id),
-                            "requestedAt":NOW,
-                            "payload":{"decisionId":decision_id,"choice":"CANCEL_JOB"}
-                        }),
-                    );
-                }
+                resolve_unknown_outcomes(state, project_id, &command_id, "CANCEL_JOB");
                 retry_of_job_id = None;
             }
             Err(error)
@@ -892,6 +870,34 @@ fn chapter_plan_exists(state: &KernelState, project_id: &str, chapter_id: &str) 
     .is_some()
 }
 
+/// What the user does in the app with each model call whose outcome is
+/// unknown: chooses `choice` for it.
+fn resolve_unknown_outcomes(state: &KernelState, project_id: &str, command_id: &str, choice: &str) {
+    let connection = state.manager.open(project_id, "", NOW).unwrap();
+    let decisions = connection
+        .prepare("SELECT decision_id FROM decisions WHERE project_id=?1 AND decision_type='UNKNOWN_REMOTE_OUTCOME' AND outcome IN ('OPEN','PENDING') ORDER BY created_at,decision_id")
+        .unwrap()
+        .query_map([project_id], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    drop(connection);
+    for (index, decision_id) in decisions.iter().enumerate() {
+        execute(
+            state,
+            json!({
+                "type":"decision_submit",
+                "commandId":format!("{command_id}:resolve-unknown:{index}"),
+                "idempotencyKey":format!("{command_id}:resolve-unknown:{index}:key"),
+                "projectId":project_id,
+                "expectedRevision":current_revision(state, project_id),
+                "requestedAt":NOW,
+                "payload":{"decisionId":decision_id,"choice":choice}
+            }),
+        );
+    }
+}
+
 /// Long-form plans are compiled by the model too, so a fixable rejection is
 /// retried like production.
 fn compile_real_chapter_plan(
@@ -919,6 +925,11 @@ fn compile_real_chapter_plan(
                 return;
             }
             Err(error) if retryable_real_production_error(&error) && attempt < 2 => {}
+            // Real run round 8: a plan request with an unknown outcome; the
+            // user marks it failed and plans again.
+            Err(error) if error.contains("UNKNOWN_REMOTE_OUTCOME") && attempt < 2 => {
+                resolve_unknown_outcomes(state, project_id, &command_id, "MARK_FAILED");
+            }
             Err(error) => panic!("real chapter plan failed: {error}"),
         }
     }

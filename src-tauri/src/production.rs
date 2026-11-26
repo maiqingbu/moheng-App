@@ -1220,8 +1220,8 @@ pub fn plan_chapter_with_feedback(
     Ok((plan, run_id, problems))
 }
 
-/// The rejected plan a replan starts from: without its ending when that was
-/// the problem, and not at all when its goal repeats a chapter (real run
+/// The rejected plan a replan starts from: without its ending or its scenes
+/// when they were the problem, and not at all when its goal repeats a chapter (real run
 /// 2026-11-25: given them back, the planner kept them in all three plans).
 fn previous_plan(plan: &Value, feedback: &Value) -> Option<Value> {
     let problems = || {
@@ -1237,9 +1237,14 @@ fn previous_plan(plan: &Value, feedback: &Value) -> Option<Value> {
         return None;
     }
     let mut craft = plan["craft"].clone();
-    if problems().any(crate::craft_plan::is_repeated_hook) {
-        if let Some(craft) = craft.as_object_mut() {
+    if let Some(craft) = craft.as_object_mut() {
+        if problems().any(crate::craft_plan::is_repeated_hook) {
             craft.remove("endHook");
+        }
+        // Real run round 8: given its scenes back, the planner returned the
+        // same plan three times.
+        if problems().any(crate::craft_plan::is_scene_problem) {
+            craft.remove("scenes");
         }
     }
     Some(json!({
@@ -3960,25 +3965,28 @@ fn run_chapter_production_inner(
         let mut earlier_facts = Vec::new();
         let mut continuity_input = None;
         let mut continuity_errors = Vec::new();
-        let prior_chapters =
-            chapter_history
-                .recent
-                .iter()
-                .zip(&chapter_history.bodies)
-                .filter(|(_, body)| !body.is_empty())
-                .map(|(chapter, body)| {
-                    let excerpt_end = body
-                        .char_indices()
-                        .nth(4_000)
-                        .map_or(body.len(), |(index, _)| index);
-                    let sentences = crate::chapter_craft::sentence_spans(body).into_iter()
-                    .take_while(|&(_, end)| end <= excerpt_end).enumerate()
-                    .map(|(number, (start, end))| json!({"number":number,"text":&body[start..end]}))
-                    .collect::<Vec<_>>();
-                    json!({"chapterNo":chapter["chapterNo"],"chapterId":chapter["chapterId"],
-                       "excerpts":excerpt_end < body.len(),"sentences":sentences})
-                })
-                .collect::<Vec<_>>();
+        let prior_chapters = chapter_history
+            .recent
+            .iter()
+            .zip(&chapter_history.bodies)
+            .filter(|(_, body)| !body.is_empty())
+            .map(|(chapter, body)| {
+                numbered_prior_chapter(&chapter["chapterNo"], &chapter["chapterId"], body)
+            })
+            .collect::<Vec<_>>();
+        // Real run round 8: chapter 8 redid chapter 3's rubbing, out of
+        // reach of the three latest chapters; replays are looked for in the
+        // opening too.
+        let opening_count = crate::repositories::project_entry::OPENING_CHAPTER_COUNT;
+        let replay_chapters = with_opening_chapters(
+            &prior_chapters,
+            &NarrativeRepository::final_bodies_by_chapter(connection, &project_id, opening_count)
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .filter(|(chapter_no, _)| (1..=opening_count).contains(chapter_no))
+                .collect::<Vec<_>>(),
+            chapter_number.map(i64::from),
+        );
         let covered = prior_chapters
             .iter()
             .filter(|entry| entry["excerpts"] == false)
@@ -4151,8 +4159,8 @@ fn run_chapter_production_inner(
             };
         let narrative_findings = |reported: &[Value], text: &str, history: &[Value]| {
             let mut findings =
-                crate::chapter_craft::replayed_passage_findings(&prior_chapters, text);
-            let other = crate::chapter_craft::replayed_transition_findings(&prior_chapters, text)
+                crate::chapter_craft::replayed_passage_findings(&replay_chapters, text);
+            let other = crate::chapter_craft::replayed_transition_findings(&replay_chapters, text)
                 .into_iter()
                 .chain(crate::chapter_craft::replayed_dialogue_findings(
                     &chapter_history.recent,
@@ -7009,6 +7017,47 @@ struct StageStepHistory {
     chapter_id: String,
     final_ref: ArtifactRef,
     body: String,
+}
+
+/// An earlier chapter as the continuity checks read it: its first 4000
+/// characters in numbered sentences.
+fn numbered_prior_chapter(chapter_no: &Value, chapter_id: &Value, body: &str) -> Value {
+    let excerpt_end = body
+        .char_indices()
+        .nth(4_000)
+        .map_or(body.len(), |(index, _)| index);
+    let sentences = crate::chapter_craft::sentence_spans(body)
+        .into_iter()
+        .take_while(|&(_, end)| end <= excerpt_end)
+        .enumerate()
+        .map(|(number, (start, end))| json!({"number":number,"text":&body[start..end]}))
+        .collect::<Vec<_>>();
+    json!({"chapterNo":chapter_no,"chapterId":chapter_id,
+       "excerpts":excerpt_end < body.len(),"sentences":sentences})
+}
+
+/// `prior` with the opening chapters `(number, body)` it lacks that come
+/// before chapter `current`.
+fn with_opening_chapters(
+    prior: &[Value],
+    opening: &[(i64, String)],
+    current: Option<i64>,
+) -> Vec<Value> {
+    let mut chapters = prior.to_vec();
+    for (chapter_no, body) in opening {
+        if current.is_some_and(|current| *chapter_no < current)
+            && !prior
+                .iter()
+                .any(|chapter| chapter["chapterNo"] == *chapter_no)
+        {
+            chapters.push(numbered_prior_chapter(
+                &json!(chapter_no),
+                &Value::Null,
+                body,
+            ));
+        }
+    }
+    chapters
 }
 
 /// The committed chapters that may already show the step's result: the
@@ -10245,6 +10294,33 @@ mod tests {
     }
 
     #[test]
+    fn round80_a_replay_of_the_opening_is_looked_for_beyond_the_latest_chapters() {
+        let recent = numbered_prior_chapter(&json!(7), &json!("chap:7"), "沈砚回到家。");
+        let opening = [
+            (
+                3,
+                "他扒开浮土，基座露出来。他用铅笔把铭牌拓下来。".to_string(),
+            ),
+            (7, "不该重复。".to_string()),
+        ];
+        let chapters = with_opening_chapters(&[recent], &opening, Some(8));
+        assert_eq!(
+            chapters
+                .iter()
+                .map(|c| c["chapterNo"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            [7, 3]
+        );
+        assert_eq!(
+            chapters[1]["sentences"][1]["text"],
+            "他用铅笔把铭牌拓下来。"
+        );
+        // Rewriting an opening chapter compares it with no later one.
+        assert!(with_opening_chapters(&[], &opening[..1], Some(2)).is_empty());
+        assert!(with_opening_chapters(&[], &opening[..1], Some(3)).is_empty());
+    }
+
+    #[test]
     fn a_replan_is_not_given_back_the_goal_or_ending_it_was_rejected_for() {
         let plan = json!({"chapterGoal":"再试一次端口","chapterRole":"普通",
             "craft":{"endHook":"在B-4下划一道竖线","scenes":[]},"horizonPreview":[]});
@@ -10263,6 +10339,14 @@ mod tests {
         assert!(previous_plan(&plan, &json!({"rejectedFor":"B08_PLAN_GOAL_REPEATED"})).is_none());
         let kept = previous_plan(&plan, &json!({"problems":["第 1 场没有人物"]})).unwrap();
         assert_eq!(kept["craft"], plan["craft"]);
+        for problem in [
+            "本章的地点（修复室）上一章都去过，至少换一个新地点",
+            "本章 15 条事件，2200 字最多写得开 14 条（每条 150 字以上）：删去或合并 1 条",
+        ] {
+            let replanned = previous_plan(&plan, &json!({"problems":[problem]})).unwrap();
+            assert!(replanned["craft"].get("scenes").is_none(), "{problem}");
+            assert_eq!(replanned["craft"]["endHook"], plan["craft"]["endHook"]);
+        }
     }
 
     /// Real run 2026-11-25: chapters planned in three tries had used 6 of 16

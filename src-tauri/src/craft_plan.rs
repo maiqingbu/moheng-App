@@ -464,6 +464,16 @@ pub(crate) fn is_repeated_goal(problem: &str) -> bool {
     problem.starts_with(GOAL_LIKE) || problem.starts_with(GOAL_ACTION_LIKE)
 }
 
+/// How the problems of scenes that need planning again start or read.
+const PLACES_LIKE: &str = "本章的地点（";
+const ROOM_LIKE: &str = "最多写得开";
+
+/// Whether a plan problem says the scenes have to be planned again: all at
+/// places the last chapter went to, or more events than the chapter holds.
+pub(crate) fn is_scene_problem(problem: &str) -> bool {
+    problem.starts_with(PLACES_LIKE) || problem.contains(ROOM_LIKE)
+}
+
 /// Whether a plan problem says the ending repeats an earlier chapter's.
 pub(crate) fn is_repeated_hook(problem: &str) -> bool {
     problem.starts_with(HOOK_LIKE)
@@ -559,7 +569,7 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
         .collect::<BTreeSet<_>>();
     if !last_places.is_empty() && places.is_subset(&last_places) {
         problems.push(format!(
-            "本章的地点（{}）上一章都去过，至少换一个新地点",
+            "{PLACES_LIKE}{}）上一章都去过，至少换一个新地点",
             places.into_iter().collect::<Vec<_>>().join("、")
         ));
     }
@@ -678,7 +688,7 @@ pub fn sizing_problems(craft: &Value, range: ChapterLengthRange) -> Vec<String> 
     let over_room = events > room;
     if over_room {
         problems.push(format!(
-            "本章 {events} 条事件，{} 字最多写得开 {room} 条（每条 {MIN_CHARS_PER_EVENT} 字以上）：删去或合并 {} 条，留给后面的章节；提高预估字数解决不了",
+            "本章 {events} 条事件，{} 字{ROOM_LIKE} {room} 条（每条 {MIN_CHARS_PER_EVENT} 字以上）：删去或合并 {} 条，留给后面的章节；提高预估字数解决不了",
             range.max,
             events - room
         ));
@@ -1049,6 +1059,11 @@ impl ChapterPlanner {
     pub fn extend_input(&self, input: &mut Value) {
         if let Some(direction) = &self.direction {
             input["volumeDirection"] = direction.clone();
+            // Before the last stage the direction holds no climax.
+            if direction.get("climax").is_none() {
+                let current = direction["currentStage"]["taskId"].as_str().unwrap_or("");
+                crate::book_direction::hide_volume_end(input, current);
+            }
         }
         if let Some(craft) = &self.craft {
             input["storyBible"] = craft.bible.clone();

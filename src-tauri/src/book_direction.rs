@@ -205,6 +205,27 @@ fn tidy_seed(seed: &mut Value, room: i64, bible: &Value) {
     }
 }
 
+/// Whether `step` quotes a line someone says (real run round 8: a step was
+/// a line said while handing over a cloth): a verb of speech right before a
+/// quote of a clause, not a quoted name such as 知道“丹房” or 名叫“青禾”.
+fn says_a_line(step: &str) -> bool {
+    let chars = step.chars().collect::<Vec<_>>();
+    chars.iter().enumerate().any(|(index, c)| {
+        let spoken = chars[..index]
+            .iter()
+            .rev()
+            .find(|c| !['：', ':', '，'].contains(c))
+            .is_some_and(|c| ['说', '问', '喊', '答'].contains(c));
+        let line = chars[index + 1..]
+            .iter()
+            .take_while(|c| !crate::craft_setup::QUOTE_MARKS.contains(c) && **c != '’')
+            .collect::<String>();
+        (crate::craft_setup::QUOTE_MARKS.contains(c) || *c == '‘')
+            && spoken
+            && (line.chars().count() >= 6 || line.contains(['，', '！', '？', '。']))
+    })
+}
+
 /// The problems of a volume seed's `stages` and `climax`: 3 to 6 stages,
 /// each with a goal, pressure and turn and cast from `bible`, estimates that
 /// fill between half and all of the `room` chapters, and the antagonist
@@ -240,6 +261,14 @@ fn stage_problems(seed: &Value, bible: &Value, label: &str, room: (&str, i64)) -
                 STEP_COUNT.start(),
                 STEP_COUNT.end()
             ));
+        }
+        for (step_index, step) in names(&stage["steps"]).enumerate() {
+            if says_a_line(step) {
+                problems.push(format!(
+                    "{}「{step}」只写了一句台词：一步写的是结果，这一步之后人物能做、知道或决定什么",
+                    step_location(index, step_index as u64 + 1)
+                ));
+            }
         }
         let strangers = names(&stage["cast"])
             .filter(|name| !known.is_empty() && !known.contains(name))
@@ -693,6 +722,11 @@ fn step_location(stage_index: usize, step: u64) -> String {
     format!("阶段 {} 的第 {step} 步", stage_index + 1)
 }
 
+/// How a problem names the goal of the stage at `stage_index`.
+fn goal_location(stage_index: usize) -> String {
+    format!("阶段 {} 的目标", stage_index + 1)
+}
+
 /// Takes the first volume's steps that `feedback` says replay the opening out
 /// of the direction handed back: given back, the planner keeps them.
 pub(crate) fn drop_replayed_steps(direction: &mut Value, feedback: &Value) {
@@ -749,8 +783,14 @@ fn retold_steps(stages: &[Value], opening: &[Value]) -> Vec<(Value, String)> {
         })
         .collect::<Vec<_>>();
     let mut found = Vec::new();
+    let mut goals = Vec::new();
     for (stage_index, stage) in stages.iter().enumerate() {
-        for (index, step) in names(&stage["steps"]).enumerate() {
+        // Real run round 8: stage goals retold the opening too.
+        let targets = names(&stage["steps"])
+            .enumerate()
+            .map(|(index, step)| (Some(index as u64 + 1), step))
+            .chain(std::iter::once((None, text(&stage["goal"]))));
+        for (number, step) in targets {
             let planned = pairs(step);
             let shared = |passage: &BTreeSet<(char, char)>| planned.intersection(passage).count();
             let Some((chapter, passage, nearest)) = passages
@@ -763,22 +803,28 @@ fn retold_steps(stages: &[Value], opening: &[Value]) -> Vec<(Value, String)> {
             if shared < RETOLD_PAIRS || shared * 100 < planned.len() * 35 {
                 continue;
             }
-            let number = index as u64 + 1;
-            found.push((
+            let location = match number {
+                Some(number) => step_location(stage_index, number),
+                None => goal_location(stage_index),
+            };
+            // Steps come first, so goals never take their places in the
+            // confirmation.
+            let list = if number.is_some() {
+                &mut found
+            } else {
+                &mut goals
+            };
+            list.push((
                 json!({
                     "stage":stage_index + 1,"step":number,
                     "plannedText":step,"plannedQuote":step,"plannedOutcome":planned_outcome(step),
                     "openingChapter":chapter,"openingQuote":passage,
                 }),
-                replay_feedback(
-                    &step_location(stage_index, number),
-                    step,
-                    passage,
-                    "两处写的是同一件事",
-                ),
+                replay_feedback(&location, step, passage, "两处写的是同一件事"),
             ));
         }
     }
+    found.extend(goals);
     found
 }
 
@@ -835,7 +881,7 @@ fn ground_opening_replays(
         };
         let location = match issue["step"].as_u64() {
             Some(step) => step_location(stage_index, step),
-            None => format!("阶段 {} 的目标", stage_index + 1),
+            None => goal_location(stage_index),
         };
         let pair = json!({
             "stage":stage_index + 1,"step":issue["step"],
@@ -1509,14 +1555,65 @@ pub fn chapter_direction(
         built["chaptersSoFar"] = json!((chapter_no - 1 - started).max(0));
         built
     });
-    Some(json!({
+    let mut direction = json!({
         "volumeFunction":text(&seed["description"]),
         "currentStage":current_stage,
-        "laterStages":stages.iter().skip(current + 1).map(|(stage, _)| text(&stage["goal"])).collect::<Vec<_>>(),
-        "climax":text(&seed["climax"]),
         "storyPromise":text(&book_plan["storyPromise"]),
         "previousStage":previous_stage
-    }))
+    });
+    // Real run round 8: shown the later stages and the climax, plans reached
+    // for them early. Only the last stage sees how the volume peaks.
+    if current + 1 >= stages.len() {
+        direction["climax"] = json!(text(&seed["climax"]));
+    }
+    Some(direction)
+}
+
+/// Whether a goal of the volume intent is the volume's overall goal or a
+/// stage's, which the planning direction gives one step at a time.
+fn is_hidden_goal(goal_id: &str) -> bool {
+    goal_id.starts_with("goal:book:") || goal_id.contains(":stage:")
+}
+
+/// Whether route task `task` is hidden from a chapter working on
+/// `current`: the climax, the volume's goal, and every stage or step but the
+/// current one.
+fn is_hidden_task(task: &Value, current: &str) -> bool {
+    // Route tasks carry taskId, the context's plan tasks taskRef.
+    let id = match text(&task["taskId"]) {
+        "" => text(&task["taskRef"]),
+        id => id,
+    };
+    task["class"] == "CLIMAX"
+        || id.starts_with(crate::planning::CLIMAX_TASK_PREFIX)
+        || (id != current
+            && id.strip_prefix("task:required:").is_some_and(|goal| {
+                goal.starts_with("goal:book:")
+                    || goal.contains(":stage:")
+                    || goal.contains(":step:")
+            }))
+}
+
+/// Takes the volume's overall goals, the stage goals, the other stages'
+/// tasks and the climax out of a chapter planning request before the last
+/// stage (real run round 8: plans copied the volume goal's list of losses
+/// into every chapter, reached for a later stage and showed the climax's
+/// object early). The chapter works on `current`, the task of its step.
+pub(crate) fn hide_volume_end(input: &mut Value, current: &str) {
+    let authority = &mut input["authorityContext"];
+    if let Some(fields) = authority["goalContractFields"].as_array_mut() {
+        fields.retain(|field| {
+            !text(&field["fieldPath"])
+                .strip_prefix("volumeIntent.mustAchieve[")
+                .is_some_and(|goal| is_hidden_goal(goal.trim_end_matches(']')))
+        });
+    }
+    if let Some(tasks) = authority["planTaskContexts"].as_array_mut() {
+        tasks.retain(|task| !is_hidden_task(task, current));
+    }
+    if let Some(tasks) = input["volumePlanRoute"]["tasks"].as_array_mut() {
+        tasks.retain(|task| !is_hidden_task(task, current));
+    }
 }
 
 /// The direction for planning `chapter_id` (chapter `chapter_no`), from the
@@ -1881,6 +1978,24 @@ mod tests {
     }
 
     #[test]
+    fn round80_a_stage_goal_that_tells_the_opening_again_is_put_to_the_confirmation() {
+        let stages = [
+            json!({"goal":"定位南坡气象仪基座，拓下铭牌编号和父亲的签名","steps":[
+                "沈砚把拓片交给林晚核对",
+                "林晚查到档案里少了一页"
+            ]}),
+        ];
+        let opening = [
+            json!({"chapterNo":3,"body":"他扒开浮土，露出南坡气象仪基座。铭牌编号先出来，下面是父亲的签名。他用铅笔把铭牌拓下来。"}),
+        ];
+        let found = retold_steps(&stages, &opening);
+        assert_eq!(found.len(), 1, "{found:?}");
+        let (pair, feedback) = &found[0];
+        assert_eq!(pair["step"], Value::Null);
+        assert!(feedback.starts_with("阶段 1 的目标「"), "{feedback}");
+    }
+
+    #[test]
     fn round76_a_rejected_replay_is_not_handed_back_to_the_planner() {
         // Real run round 7: the same step came back in the next two plans.
         let mut direction = direction();
@@ -2092,11 +2207,8 @@ mod tests {
         assert_eq!(stage["turn"], "段末转折");
         assert_eq!(stage["estimatedChapters"], 8);
         assert_eq!(stage["chaptersSoFar"], 0);
-        assert_eq!(
-            direction["laterStages"],
-            json!(["陆照找到改约的证据", "陆照在会审上翻案"])
-        );
-        assert_eq!(direction["climax"], "会审上陆照当众拿出原件");
+        assert_eq!(direction.get("climax"), None);
+        assert!(!direction.to_string().contains("陆照找到改约的证据"));
         assert_eq!(direction["storyPromise"], "以命换力");
     }
 
@@ -2107,7 +2219,59 @@ mod tests {
         let direction = chapter_direction(&plan, &route, ("vol:1", 1), 3, &completed, 12).unwrap();
         assert_eq!(direction["currentStage"]["goal"], "陆照找到改约的证据");
         assert_eq!(direction["currentStage"]["chaptersSoFar"], 2);
-        assert_eq!(direction["laterStages"], json!(["陆照在会审上翻案"]));
+        assert_eq!(direction.get("climax"), None);
+    }
+
+    #[test]
+    fn round80_a_chapter_before_the_last_stage_does_not_see_the_volume_s_goal() {
+        let mut input = json!({
+            "authorityContext":{
+                "goalContractFields":[
+                    {"fieldPath":"volumeIntent.mustAchieve[goal:book:1]","value":"失去三件事物"},
+                    {"fieldPath":"volumeIntent.mustAchieve[goal:vol:1:stage:1:5]","value":"传真机"},
+                    {"fieldPath":"volumeIntent.mustAchieve[goal:vol:1:responsibility:r1]","value":"跨卷责任"},
+                    {"fieldPath":"volumeIntent.mustNotBreak[rule:1]","value":"开篇事实"}
+                ],
+                "planTaskContexts":[
+                    {"taskRef":"task:required:goal:vol:1:step:1:1:1","contract":{}},
+                    {"taskRef":"task:required:goal:vol:1:step:1:2:1","contract":{"objective":"断崖"}},
+                    {"taskRef":"task:required:goal:book:1","contract":{}},
+                    {"taskRef":"task:climax:mystery:book:1","contract":{}},
+                    {"taskRef":"task:optional:relation:book:1","contract":{}}
+                ]
+            },
+            "volumePlanRoute":{"tasks":[
+                {"taskId":"task:required:goal:vol:1:step:1:1:1"},
+                {"taskId":"task:required:goal:vol:1:stage:1:3","objective":"晚报"},
+                {"taskId":"task:climax:mystery:book:1","class":"CLIMAX","objective":"铆钉"}
+            ]}
+        });
+        hide_volume_end(&mut input, "task:required:goal:vol:1:step:1:1:1");
+        let shown = input.to_string();
+        for hidden in [
+            "失去三件事物",
+            "传真机",
+            "断崖",
+            "晚报",
+            "铆钉",
+            "task:required:goal:book:1",
+        ] {
+            assert!(!shown.contains(hidden), "{hidden}: {shown}");
+        }
+        for kept in ["开篇事实", "跨卷责任", "step:1:1:1", "relation:book:1"] {
+            assert!(shown.contains(kept), "{kept}: {shown}");
+        }
+    }
+
+    #[test]
+    fn round80_the_last_stage_sees_how_the_volume_peaks() {
+        let (plan, route) = plan_and_route();
+        let completed = (1..=2)
+            .map(|n| (format!("task:required:goal:vol:1:stage:1:{n}"), 10 * n))
+            .collect();
+        let direction = chapter_direction(&plan, &route, ("vol:1", 1), 3, &completed, 23).unwrap();
+        assert_eq!(direction["currentStage"]["goal"], "陆照在会审上翻案");
+        assert_eq!(direction["climax"], "会审上陆照当众拿出原件");
     }
 
     #[test]
@@ -2118,7 +2282,6 @@ mod tests {
             .collect();
         let direction = chapter_direction(&plan, &route, ("vol:1", 1), 3, &completed, 33).unwrap();
         assert_eq!(direction["currentStage"], Value::Null);
-        assert_eq!(direction["laterStages"], json!([]));
         assert_eq!(direction["climax"], "会审上陆照当众拿出原件");
     }
 
@@ -2238,6 +2401,41 @@ mod tests {
         assert!(
             found.contains(&"第 3 个阶段要分 3 到 5 步（steps），现在是 6 步".to_string()),
             "{found:?}"
+        );
+    }
+
+    #[test]
+    fn round80_a_step_that_is_a_line_of_dialogue_is_sent_back() {
+        let mut direction = direction();
+        direction["volumeIntentSeeds"][0]["stages"][1]["steps"] = json!([
+            "陈伯递来一块粗布，说‘压住边，风不掀’",
+            "陆照认出账页上‘丹房’二字是改过的",
+            "陆照把改过的账页交给执事"
+        ]);
+        let found = problems(&direction, &direction_input());
+        assert!(
+            found.contains(&"阶段 2 的第 1 步「陈伯递来一块粗布，说‘压住边，风不掀’」只写了一句台词：一步写的是结果，这一步之后人物能做、知道或决定什么".to_string()),
+            "{found:?}"
+        );
+        assert!(
+            !found.iter().any(|p| p.starts_with("阶段 2 的第 2 步")),
+            "{found:?}"
+        );
+        for named in [
+            "陆照知道“丹房”的秘密",
+            "一个名叫“青禾”的组织",
+            "陈伯问了一句“谁”",
+        ] {
+            assert!(!says_a_line(named), "{named}");
+        }
+        let mut handed_back = direction.clone();
+        drop_replayed_steps(&mut handed_back, &json!({"problems":found}));
+        assert_eq!(
+            handed_back["volumeIntentSeeds"][0]["stages"][1]["steps"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
         );
     }
 

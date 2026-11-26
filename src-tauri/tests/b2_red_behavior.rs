@@ -1286,7 +1286,8 @@ fn vd1a_a_direction_planned_after_signing_fills_the_approved_book_plan() {
         .as_str()
         .unwrap()
         .starts_with("task:required:goal:"));
-    assert_eq!(direction["climax"], "林舟在城门口当众对账");
+    // Real run round 8: the climax waits for the last stage.
+    assert_eq!(direction.get("climax"), None);
 }
 
 #[test]
