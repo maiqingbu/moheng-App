@@ -3,8 +3,8 @@
 
 use ai_novel_production_system_core::chapter_craft::plan_feedback;
 use ai_novel_production_system_core::craft_plan::{
-    check_craft_plan, creation_ledger, drop_unchosen_beats, last_appearances, plan_problems,
-    shape_reminder, skill_decisions,
+    check_craft_plan, creation_ledger, done_in_recent_chapters, drop_unchosen_beats,
+    last_appearances, plan_problems, shape_reminder, skill_decisions,
 };
 use serde_json::{json, Value};
 
@@ -348,6 +348,33 @@ fn round100_an_event_or_an_ending_written_out_as_prose_is_sent_back() {
         "{problems:?}"
     );
     assert!(!has(&problems, "第 1 场"), "{problems:?}");
+}
+
+/// Real run round 13: chapter 4 carried out chapter 3's operation again
+/// (the negative into the reader, the sixteen-digit code, the footage).
+#[test]
+fn round131_an_event_redoing_one_of_the_last_two_chapters_is_sent_back() {
+    let mut earlier = plan()["craft"].clone();
+    earlier["scenes"][1]["events"] = json!(["林满输入十六位校验码，调出码头仓库当晚的监控片段"]);
+    let ledger = creation_ledger(&[(3, earlier)], &bible());
+    let mut redo = plan();
+    redo["craft"]["scenes"][0]["events"] =
+        json!(["林满再输入一遍十六位校验码，调出码头仓库当晚的监控片段"]);
+    let problems = plan_problems(&redo, 4, &bible(), &ledger);
+    assert!(
+        has(&problems, "第 1 场的事件重做了第 3 章已经做完的"),
+        "{problems:?}"
+    );
+    let problems = plan_problems(&plan(), 4, &bible(), &ledger);
+    assert!(!has(&problems, "已经做完的"), "{problems:?}");
+    // The writer is told what the latest chapters already carried out.
+    let done = done_in_recent_chapters(&ledger);
+    assert_eq!(done[0]["chapter"], 3);
+    assert!(done[0]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event == "林满输入十六位校验码，调出码头仓库当晚的监控片段"));
 }
 
 /// Real run round 12: chapter goals of 80-120 characters scripted each
