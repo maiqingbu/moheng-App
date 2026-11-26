@@ -364,29 +364,28 @@ fn qc1_a_grammar_fragment_is_never_a_catchphrase_candidate() {
 }
 
 #[test]
-fn qc1_a_plan_with_too_many_scenes_is_folded_without_losing_most_events() {
+fn qc1_a_plan_with_too_many_scenes_is_folded_to_one_event_a_scene() {
     let scene = |place: &str| {
         json!({"place":place,"people":[{"name":"林薇"},{"name":"沈砚"}],"conflict":place,
-               "events":[format!("{place}一"),format!("{place}二"),format!("{place}三")],
-               "readerQuestion":"？","estimatedCharacters":400})
+               "events":[format!("{place}起了争执")],"readerQuestion":"？"})
     };
     let mut plan =
         json!({"craft":{"scenes":[scene("甲"),scene("乙"),scene("丙"),scene("丁"),scene("戊")]}});
     ai_novel_production_system_core::planning::fit_lenient_plan_shape(&mut plan, 0);
     let scenes = plan["craft"]["scenes"].as_array().unwrap();
     assert_eq!(scenes.len(), 3, "{plan}");
-    let kept = scenes
+    // Round 10: a scene is one event; a folded scene's event waits for a
+    // later chapter instead of turning the scene into a list.
+    let events = scenes
         .iter()
-        .map(|scene| scene["events"].as_array().unwrap().len())
-        .sum::<usize>();
-    assert!(
-        kept >= 13,
-        "15 events into 3 scenes of 5 keeps nearly all: {plan}"
+        .map(|scene| scene["events"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        events,
+        [
+            json!(["甲起了争执"]),
+            json!(["乙起了争执"]),
+            json!(["丙起了争执"])
+        ]
     );
-    // LD-5: a folded scene takes the room estimated for both.
-    let estimated = scenes
-        .iter()
-        .map(|scene| scene["estimatedCharacters"].as_i64().unwrap())
-        .sum::<i64>();
-    assert_eq!(estimated, 2000, "{plan}");
 }

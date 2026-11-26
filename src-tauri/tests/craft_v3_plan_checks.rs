@@ -2,10 +2,9 @@
 //! the skill → plan-field decisions (CRAFT_V3_DESIGN §4.2–4.3).
 
 use ai_novel_production_system_core::chapter_craft::plan_feedback;
-use ai_novel_production_system_core::chapter_length::ChapterLengthRange;
 use ai_novel_production_system_core::craft_plan::{
     check_craft_plan, creation_ledger, drop_unchosen_beats, last_appearances, plan_problems,
-    shape_reminder, sizing_problems, skill_decisions,
+    shape_reminder, skill_decisions,
 };
 use serde_json::{json, Value};
 
@@ -23,7 +22,7 @@ fn person(name: &str) -> Value {
 
 fn scene(place: &str) -> Value {
     json!({"place":place,"people":[person("林满"),person("老董")],"conflict":"货单上的箱数和船上对不上",
-        "events":["老董把货单递过来","林满点出少了两箱","两人在船边争起来"],"readerQuestion":"少的两箱去了哪里"})
+        "events":["林满和老董在船边为少了两箱货争起来"],"readerQuestion":"少的两箱去了哪里"})
 }
 
 /// A chapter-1 plan that passes every check against the fixture bible.
@@ -301,7 +300,7 @@ fn scene_counts_people_and_events_outside_the_plan_shape_are_reported_for_a_repl
     crowded["craft"]["scenes"][0]["events"] = json!(["一", "二", "三", "四", "五", "六", "七"]);
     crowded["craft"]["scenes"][1]["people"] = json!([]);
     let problems = plan_problems(&crowded, 1, &bible(), &creation_ledger(&[], &bible()));
-    assert!(has(&problems, "第 1 场有 7 条事件"), "{problems:?}");
+    assert!(has(&problems, "第 1 场写了 7 件事"), "{problems:?}");
     assert!(has(&problems, "第 2 场没有人物"), "{problems:?}");
     let mut four = plan();
     four["craft"]["scenes"] = json!([
@@ -319,89 +318,36 @@ fn scene_counts_people_and_events_outside_the_plan_shape_are_reported_for_a_repl
     );
 }
 
-/// LD-5 (owner decision 2026-11-01): "创作作品，不是按照一套固定模板拼接文字。"
-/// The plan estimates the room each scene needs; how many scenes and
-/// events a chapter has follows from what it has to do.
-fn sized(estimates_and_events: &[(i64, usize)]) -> Value {
-    let scenes = estimates_and_events
-        .iter()
-        .map(|&(estimate, events)| {
-            let mut scene = scene("江边码头");
-            scene["events"] = json!((0..events).map(|n| format!("事件{n}")).collect::<Vec<_>>());
-            scene["estimatedCharacters"] = json!(estimate);
-            scene
-        })
-        .collect::<Vec<_>>();
-    json!({ "scenes": scenes })
-}
-
-const FANQIE: ChapterLengthRange = ChapterLengthRange {
-    min: 1800,
-    max: 2200,
-};
-
+/// Round 10 (owner decision 2026-11-26): the plan gives a direction, not an
+/// outline. A scene is one event (a contest, a quarrel, an accident dealt
+/// with), never a list of actions, and the writer decides the actions and
+/// the length.
 #[test]
-fn ld5_one_scene_with_two_full_events_is_a_chapter_too() {
-    assert!(sizing_problems(&sized(&[(2000, 2)]), FANQIE).is_empty());
-    assert!(sizing_problems(&sized(&[(700, 2), (1300, 4)]), FANQIE).is_empty());
-}
-
-#[test]
-fn ld5_a_scene_without_its_estimate_is_sent_back() {
-    let mut craft = sized(&[(1000, 2), (1000, 2)]);
-    craft["scenes"][1]
-        .as_object_mut()
-        .unwrap()
-        .remove("estimatedCharacters");
-    let problems = sizing_problems(&craft, FANQIE);
-    assert!(has(&problems, "第 2 场没有预估字数"), "{problems:?}");
-}
-
-#[test]
-fn ld5_scenes_estimated_outside_the_chapter_s_range_are_sent_back() {
-    let problems = sizing_problems(&sized(&[(1500, 3), (1500, 3)]), FANQIE);
-    assert!(
-        has(&problems, "各场预估合计 3000 字，本章写 1800 到 2200 字"),
-        "{problems:?}"
-    );
-}
-
-#[test]
-fn ld5_a_scene_too_crowded_for_its_room_is_sent_back() {
-    // Real run 2026-11-01: fifteen events in 2,000 characters tire readers.
-    // A chapter within its room can still crowd one scene.
-    let problems = sizing_problems(&sized(&[(400, 3), (1600, 3)]), FANQIE);
-    assert!(
-        has(&problems, "第 1 场预估 400 字写 3 条事件"),
-        "{problems:?}"
-    );
+fn round100_a_scene_holds_one_event_not_a_list_of_actions() {
+    let mut listed = plan();
+    listed["craft"]["scenes"][0]["events"] =
+        json!(["老董把货单递过来", "林满点出少了两箱", "两人在船边争起来"]);
+    let problems = plan_problems(&listed, 1, &bible(), &creation_ledger(&[], &bible()));
+    assert!(has(&problems, "第 1 场写了 3 件事"), "{problems:?}");
     assert!(!has(&problems, "第 2 场"), "{problems:?}");
 }
 
 #[test]
-fn ld7_a_chapter_with_more_events_than_its_length_holds_is_told_how_many_to_drop() {
-    // Real run 2026-11-01 (round 11): told a scene was too crowded, the
-    // planner raised its estimates and kept all its events.
-    for craft in [
-        sized(&[(820, 5), (780, 5), (700, 5)]),
-        sized(&[(900, 5), (900, 5), (900, 5)]),
-    ] {
-        let problems = sizing_problems(&craft, FANQIE);
-        assert!(
-            has(&problems, "本章 15 条事件，2200 字最多写得开 14 条"),
-            "{problems:?}"
-        );
-        assert!(has(&problems, "删去或合并 1 条"), "{problems:?}");
-        assert!(has(&problems, "提高预估字数"), "{problems:?}");
-    }
-}
-
-#[test]
-fn ld8_twelve_short_events_in_a_chapter_are_not_crowded() {
-    // Real run 2026-11-01 (round 12): the planner's events are single
-    // actions (a door pushed open, dust scraped off); twelve of them read
-    // naturally in 2,000 characters. Owner: only stop truly crowded plans.
-    assert!(sizing_problems(&sized(&[(720, 4), (760, 4), (720, 4)]), FANQIE).is_empty());
+fn round100_an_event_or_an_ending_written_out_as_prose_is_sent_back() {
+    let mut detailed = plan();
+    detailed["craft"]["scenes"][1]["events"] = json!([
+        "林满把账本摊在灶台边上，手指压着第三页那行墨迹未干的数字，抬头看姑妈，姑妈正把面捞进碗里，热气糊住了他的眼镜，他摘下来擦了两下又戴上"
+    ]);
+    detailed["craft"]["endHook"] = json!(
+        "林满推开面馆的门板，门板上贴着一张盖着红印的借据，风把借据的一角掀起来，露出底下一行小字，写着他的名字和一个他从没见过的日期，墨迹还没干"
+    );
+    let problems = plan_problems(&detailed, 1, &bible(), &creation_ledger(&[], &bible()));
+    assert!(has(&problems, "第 2 场的事件写成了细节"), "{problems:?}");
+    assert!(
+        has(&problems, "章末钩子和正文一样写成了画面"),
+        "{problems:?}"
+    );
+    assert!(!has(&problems, "第 1 场"), "{problems:?}");
 }
 
 #[test]
@@ -422,14 +368,12 @@ fn ld8_a_chapter_shaped_like_the_two_before_it_is_a_reminder_not_a_replan() {
 
 #[test]
 fn ld5_the_planner_sees_the_recent_chapters_shapes() {
-    let mut earlier = plan()["craft"].clone();
-    earlier["scenes"][0]["estimatedCharacters"] = json!(1200);
-    let ledger = creation_ledger(&[(1, earlier)], &bible());
+    let ledger = creation_ledger(&[(1, plan()["craft"].clone())], &bible());
     assert_eq!(
         ledger["shapes"],
         json!([{"chapter":1,
             "beats":["bigTurn","smallDiscovery","protagonistWin","device","warmth","emotionalBeat","newLosses"],
-            "scenes":[{"events":3,"estimatedCharacters":1200},{"events":3,"estimatedCharacters":null}]}])
+            "scenes":2}])
     );
 }
 

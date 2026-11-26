@@ -40,6 +40,8 @@ struct CraftGateway {
     cough_rewrites: AtomicUsize,
     /// An audited place changes after the sentence the audit cited.
     place_state: bool,
+    /// Every chapter's audit records the same look of 林满.
+    worn_look: bool,
     repeated_event: bool,
     replay_in_polish: bool,
     fail_changed_prose_check: bool,
@@ -431,6 +433,11 @@ impl ProductionModelGateway for CraftGateway {
                     if self.place_state {
                         audit["continuityDetails"].as_array_mut().unwrap().push(json!({
                             "subject":"废丹坛","kind":"PLACE","detail":"水光不溢","quote":PLACE_QUOTE
+                        }));
+                    }
+                    if self.worn_look {
+                        audit["continuityDetails"].as_array_mut().unwrap().push(json!({
+                            "subject":"林满","kind":"APPEARANCE","detail":"左手腕缠着一圈蓝布条","quote":"林满没吭声，转身进了面馆。"
                         }));
                     }
                 }
@@ -1865,6 +1872,41 @@ fn habits_and_looks_from_the_audit_reach_the_next_chapter_as_established_facts()
     );
     let renders = inputs("RENDER_CHAPTER_CRAFT");
     assert_eq!(renders[1]["establishedFacts"][0]["detail"], "喝豆浆不加糖");
+}
+
+#[test]
+fn round100_a_look_both_latest_chapters_recorded_is_a_detail_to_avoid_not_a_fact() {
+    // 假如前两章的审核都记下林满手腕缠着蓝布条，
+    // 当第三章规划和写作时，它不再作为已知事实发给模型，写手收到的是“少写”的细节。
+    let (_temp, state, gateway, project_id) = project_ready_to_write_with(
+        "worn-look",
+        CraftGateway {
+            worn_look: true,
+            ..CraftGateway::default()
+        },
+    );
+    for chapter in 1..=3 {
+        write_next_chapter(
+            &state,
+            &project_id,
+            &format!("worn-look:production:{chapter}"),
+        );
+    }
+    let calls = gateway.calls.lock().unwrap();
+    let look = "左手腕缠着一圈蓝布条";
+    let renders = inputs(&calls, "RENDER_CHAPTER_CRAFT");
+    assert!(renders[1]["establishedFacts"].to_string().contains(look));
+    let third = renders.last().unwrap();
+    assert!(
+        !third["establishedFacts"].to_string().contains(look),
+        "{third}"
+    );
+    assert!(third["avoidDetails"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(format!("林满：{look}"))));
+    let plan = inputs(&calls, "PLAN_CHAPTER_CRAFT").last().unwrap().clone();
+    assert!(!plan["establishedFacts"].to_string().contains(look));
 }
 
 #[test]

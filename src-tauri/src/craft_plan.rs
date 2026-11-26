@@ -2,7 +2,6 @@
 //! deterministic plan checks, the creation ledger rebuilt from earlier
 //! chapters' plans, and which skill bound which plan decision.
 
-use crate::chapter_length::ChapterLengthRange;
 use crate::craft_setup::QUOTE_MARKS;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -36,12 +35,20 @@ const SKILL_FIELDS: &[(&str, &[&str])] = &[
 
 /// The plan's scene shape, as chapter-plan-r2 states it: the checks report
 /// a plan off it and the last lenient pass fits a plan to it.
-/// LD-5 (owner decision 2026-11-01): bounds only; how many scenes and
-/// events a chapter has follows from what it has to do.
+/// LD-5 (owner decision 2026-11-01): bounds only; how many scenes a chapter
+/// has follows from what it has to do. Round 10 (owner decision
+/// 2026-11-26): a scene is one event (a contest, a quarrel, an accident
+/// dealt with), so a chapter has at most three events.
 pub(crate) const SCENE_COUNT: std::ops::RangeInclusive<usize> = 1..=3;
 /// LD-6: one person alone is a scene too (a search, a flight, reasoning).
 pub(crate) const MIN_SCENE_PEOPLE: usize = 1;
-pub(crate) const SCENE_EVENTS: std::ops::RangeInclusive<usize> = 1..=5;
+/// Round 10: the plan is a direction, not an outline. A scene names its one
+/// event; the writer decides the actions (real run round 10: four or five
+/// listed actions a scene were written out to 3,000 characters and cut).
+pub(crate) const SCENE_EVENTS: std::ops::RangeInclusive<usize> = 1..=1;
+/// Round 10: the most characters an event or the ending is stated in; a
+/// longer one is prose the writer would copy.
+const DIRECTION_CHARS: usize = 50;
 /// What is wrong with the device a plan uses, against the earlier uses.
 fn device_problems(planned: &Value, ledger: &Value) -> Vec<String> {
     let mut problems = Vec::new();
@@ -103,12 +110,6 @@ const CHOSEN_BEATS: [&str; 7] = [
     "emotionalBeat",
     "newLosses",
 ];
-/// LD-5: the least room an event needs written out; less and the scene
-/// reads as a list (real run 2026-11-01: fifteen events in 2,000
-/// characters). LD-8 (owner decision 2026-11-01, round 12): 150, not 250,
-/// since the planner's events are single actions, so that only truly
-/// crowded plans are sent back.
-pub(crate) const MIN_CHARS_PER_EVENT: i64 = 150;
 
 /// QC-1.2: what marks chapter 1's imminent threat in its first scene.
 pub(crate) const OPENING_THREAT_MARK: &str = "迫近的威胁：";
@@ -309,10 +310,7 @@ pub fn creation_ledger(prior: &[(i64, Value)], bible: &Value) -> Value {
     for (chapter, craft) in prior {
         shapes.push(json!({"chapter":chapter,
             "beats":chosen_beats(craft),
-            "scenes":scenes(craft).iter().map(|scene| json!({
-            "events":event_count(scene),
-            "estimatedCharacters":scene["estimatedCharacters"]
-        })).collect::<Vec<_>>()}));
+            "scenes":scenes(craft).len()}));
         if craft.get("device").is_some() {
             devices.push(json!({"chapter":chapter,"name":text(&craft["device"]["name"]),"howUsed":text(&craft["device"]["howUsed"])}));
         }
@@ -381,39 +379,23 @@ fn bible_people(bible: &Value) -> BTreeSet<&str> {
 
 /// LD-7, made a reminder by LD-8 (owner decision 2026-11-01, round 12:
 /// sent back twice, the planner kept its shape anyway): a chapter shaped
-/// exactly like the two before it, the same beats and the same events in
-/// each scene, is noted for the owner instead of planned again.
+/// exactly like the two before it, the same beats and as many scenes (one
+/// event each), is noted for the owner instead of planned again.
 pub fn shape_reminder(plan: &Value, ledger: &Value) -> Option<String> {
     let craft = &plan["craft"];
-    let scene_list = scenes(craft);
+    let scene_count = scenes(craft).len();
     let beats = chosen_beats(craft);
-    let events = scene_list
-        .iter()
-        .map(|scene| event_count(scene) as u64)
-        .collect::<Vec<_>>();
     let shapes = ledger["shapes"]
         .as_array()
         .map(Vec::as_slice)
         .unwrap_or(&[]);
     (shapes.len() >= 2
         && shapes[shapes.len() - 2..].iter().all(|earlier| {
-            earlier["beats"] == json!(beats)
-                && earlier["scenes"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|scene| scene["events"].as_u64())
-                    .eq(events.iter().copied().map(Some))
+            earlier["beats"] == json!(beats) && earlier["scenes"] == json!(scene_count)
         }))
     .then(|| {
         format!(
-            "本章和前两章是同一个形状（{} 个场景，各场 {} 条事件，同样的 {} 个要素）",
-            scene_list.len(),
-            events
-                .iter()
-                .map(u64::to_string)
-                .collect::<Vec<_>>()
-                .join("、"),
+            "本章和前两章是同一个形状（{scene_count} 场，同样的 {} 个要素）",
             beats.len()
         )
     })
@@ -466,12 +448,12 @@ pub(crate) fn is_repeated_goal(problem: &str) -> bool {
 
 /// How the problems of scenes that need planning again start or read.
 const PLACES_LIKE: &str = "本章的地点（";
-const ROOM_LIKE: &str = "最多写得开";
+const ONE_EVENT: &str = "一场只写一件事";
 
 /// Whether a plan problem says the scenes have to be planned again: all at
-/// places the last chapter went to, or more events than the chapter holds.
+/// places the last chapter went to, or a scene that lists actions.
 pub(crate) fn is_scene_problem(problem: &str) -> bool {
-    problem.starts_with(PLACES_LIKE) || problem.contains(ROOM_LIKE)
+    problem.starts_with(PLACES_LIKE) || problem.contains(ONE_EVENT)
 }
 
 /// Characters of moves and phrasing that make a three-character run an
@@ -577,12 +559,24 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
         let events = event_count(scene);
         if !SCENE_EVENTS.contains(&events) {
             problems.push(format!(
-                "第 {} 场有 {events} 条事件，每场写 {} 到 {} 条",
-                index + 1,
-                SCENE_EVENTS.start(),
-                SCENE_EVENTS.end()
+                "第 {} 场写了 {events} 件事：{ONE_EVENT}（发生什么、谁和谁），动作和细节留给写手",
+                index + 1
             ));
+        } else {
+            let length = text(&scene["events"][0]).chars().count();
+            if length > DIRECTION_CHARS {
+                problems.push(format!(
+                    "第 {} 场的事件写成了细节（{length} 字）：{DIRECTION_CHARS} 字以内写清发生什么、谁和谁",
+                    index + 1
+                ));
+            }
         }
+    }
+    let hook_length = text(&craft["endHook"]).chars().count();
+    if hook_length > DIRECTION_CHARS {
+        problems.push(format!(
+            "{HOOK_LIKE}正文一样写成了画面（{hook_length} 字）：只写一句留给读者的局面或悬念，{DIRECTION_CHARS} 字以内，怎么收尾留给写手"
+        ));
     }
     if text(&craft["situationChange"]["before"]) == text(&craft["situationChange"]["after"]) {
         problems.push("处境变化前后相同，本章结束时主角的处境必须变了".into());
@@ -723,55 +717,6 @@ pub fn check_craft_plan(
     ledger: &Value,
 ) -> Result<(), String> {
     craft_result(plan_problems(plan, chapter, bible, ledger))
-}
-
-/// LD-5: what is wrong with the room `craft`'s scenes are estimated to
-/// take: each scene states its estimate, the estimates add up to the
-/// chapter's range, and neither the chapter nor a scene has more events
-/// than its room holds.
-pub fn sizing_problems(craft: &Value, range: ChapterLengthRange) -> Vec<String> {
-    let mut problems = Vec::new();
-    // LD-7 (real run 2026-11-01, round 11): told a scene was too crowded,
-    // the planner raised its estimates and kept every event, so a chapter
-    // with more events than its length holds is told how many to drop.
-    let events = scenes(craft).iter().map(event_count).sum::<usize>() as i64;
-    let room = range.max / MIN_CHARS_PER_EVENT;
-    let over_room = events > room;
-    if over_room {
-        problems.push(format!(
-            "本章 {events} 条事件，{} 字{ROOM_LIKE} {room} 条（每条 {MIN_CHARS_PER_EVENT} 字以上）：删去或合并 {} 条，留给后面的章节；提高预估字数解决不了",
-            range.max,
-            events - room
-        ));
-    }
-    let mut total = 0;
-    for (index, scene) in scenes(craft).iter().enumerate() {
-        let Some(estimate) = scene["estimatedCharacters"]
-            .as_i64()
-            .filter(|chars| *chars > 0)
-        else {
-            problems.push(format!(
-                "第 {} 场没有预估字数（estimatedCharacters：这场写开要多少字）",
-                index + 1
-            ));
-            continue;
-        };
-        total += estimate;
-        let events = event_count(scene) as i64;
-        if !over_room && events > 0 && estimate / events < MIN_CHARS_PER_EVENT {
-            problems.push(format!(
-                "第 {} 场预估 {estimate} 字写 {events} 条事件，太挤：每条事件写开要 {MIN_CHARS_PER_EVENT} 字以上，删掉一些或留给后面的章节",
-                index + 1
-            ));
-        }
-    }
-    if problems.is_empty() && !(range.min..=range.max).contains(&total) {
-        problems.push(format!(
-            "各场预估合计 {total} 字，本章写 {} 到 {} 字：按这章要做的事重新估",
-            range.min, range.max
-        ));
-    }
-    problems
 }
 
 fn craft_result(problems: Vec<String>) -> Result<(), String> {
@@ -1046,6 +991,20 @@ impl WritingContext {
             &input["chapterPlan"]["craft"],
             &people
         ));
+        // Round 10: looks and habits both latest chapters wrote are details
+        // to stop dwelling on, not facts to bring in again.
+        let mut details = input["avoidDetails"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        for detail in crate::work_memory::worn(&self.memories) {
+            if !details.iter().any(|known| known == detail.as_str()) {
+                details.push(json!(detail));
+            }
+        }
+        if !details.is_empty() {
+            input["avoidDetails"] = json!(details);
+        }
     }
 }
 
@@ -1131,12 +1090,7 @@ impl ChapterPlanner {
     /// the problems so one replan fixes all of them (a plan without craft
     /// decisions is sent back too); nothing for r1 planning. Run before the
     /// contract so shape problems reach the planner for a replan.
-    pub fn check_craft(
-        &self,
-        plan: &Value,
-        horizon_capacity: i64,
-        length_range: ChapterLengthRange,
-    ) -> Result<(), String> {
+    pub fn check_craft(&self, plan: &Value, horizon_capacity: i64) -> Result<(), String> {
         let Some(craft) = &self.craft else {
             return Ok(());
         };
@@ -1161,7 +1115,6 @@ impl ChapterPlanner {
         problems.extend(self.direction.as_ref().and_then(|direction| {
             crate::book_direction::stage_goal_problem(direction, text(&plan["chapterGoal"]))
         }));
-        problems.extend(sizing_problems(&plan["craft"], length_range));
         if crate::planning::validate_chapter_plan_horizon(plan, horizon_capacity).is_err() {
             let (minimum, capacity) = crate::planning::horizon_slot_range(horizon_capacity);
             problems.push(format!(

@@ -48,14 +48,9 @@ pub fn craft_plan(input: &Value, chapter: i64, vague: bool) -> Value {
         ["当铺后院", "渡口"],
         ["彭三的账房", "江边码头"],
     ];
-    // LD-5: two scenes estimated to the middle of the chapter's range.
-    let range = &input["chapterLengthRange"];
-    let estimate =
-        (range["min"].as_i64().unwrap_or(2000) + range["max"].as_i64().unwrap_or(3000)) / 4;
     let scene = |place: &str| {
         json!({"place":place,"people":[person("林满"),person("老董")],"conflict":"两人对一笔账各执一词",
-            "events":["一方拿出账本","另一方指出不对","两人争到最后各退一步"],"readerQuestion":format!("第{chapter}章这笔账到底是谁做的手脚"),
-            "estimatedCharacters":estimate})
+            "events":["林满和老董为一笔账争到各退一步"],"readerQuestion":format!("第{chapter}章这笔账到底是谁做的手脚")})
     };
     let mut plan = json!({
         "payloadSchema":"chapter-plan.r2",

@@ -57,6 +57,57 @@ const RELEVANT_PAIRS: usize = 2;
 /// the same look recorded twice.
 const SAME_LOOK_PAIRS: usize = 3;
 
+/// Kinds a person shows on the page: how they look and what they do.
+const SHOWN_KINDS: [&str; 2] = ["APPEARANCE", "HABIT"];
+
+/// A look or habit with its telling pairs beside the person's name.
+type Look<'a> = (&'a Memory, BTreeSet<(char, char)>);
+
+/// `memory` as a look, when it is a look or a habit.
+fn look(memory: &Memory) -> Option<Look<'_>> {
+    SHOWN_KINDS.contains(&memory.kind.as_str()).then(|| {
+        let pairs = &crate::chapter_craft::telling_pairs(&memory.detail)
+            - &crate::chapter_craft::telling_pairs(&memory.subject);
+        (memory, pairs)
+    })
+}
+
+/// Whether two looks are the same look or habit of one person recorded
+/// twice, however worded.
+fn same_look((one, one_pairs): &Look<'_>, (other, other_pairs): &Look<'_>) -> bool {
+    one.subject == other.subject && one_pairs.intersection(other_pairs).count() >= SAME_LOOK_PAIRS
+}
+
+/// Round 10 (real run round 10): looks and habits both the newest chapter
+/// and the one before it recorded (a red mark spreading, a sleeve sliding
+/// down), at their newest. The chapters keep writing them, so they are not
+/// recalled as facts again; the writer is told to stop dwelling on them.
+fn worn_memories(memories: &[Memory]) -> Vec<Look<'_>> {
+    let Some(newest) = memories.iter().map(|memory| memory.chapter).max() else {
+        return Vec::new();
+    };
+    let before = memories
+        .iter()
+        .filter(|memory| memory.chapter == newest - 1)
+        .filter_map(look)
+        .collect::<Vec<_>>();
+    memories
+        .iter()
+        .filter(|memory| memory.chapter == newest)
+        .filter_map(look)
+        .filter(|look| before.iter().any(|earlier| same_look(look, earlier)))
+        .collect()
+}
+
+/// The worn looks and habits as `subject：detail`, for the writer's
+/// details to stop dwelling on.
+pub fn worn(memories: &[Memory]) -> Vec<String> {
+    worn_memories(memories)
+        .into_iter()
+        .map(|(memory, _)| format!("{}：{}", memory.subject, memory.detail))
+        .collect()
+}
+
 /// At most `limit` of `memories` for the chapter `query` describes, as
 /// `{chapter, subject, kind, detail}`, each detail once at its newest:
 /// first what the people of the chapter (on stage or named in the plan)
@@ -80,9 +131,11 @@ pub fn recall(memories: &[Memory], query: &RecallQuery<'_>, limit: usize) -> Vec
     newest_first.sort_by_key(|memory| std::cmp::Reverse(memory.chapter));
     // Real run round 9: a look recorded again each chapter (a ribbon on a
     // finger, bleeding) was recalled as many facts and written every chapter;
-    // a look like a newer one of the same person is left out.
+    // a look like a newer one of the same person is left out, and a worn one
+    // is left out altogether.
+    let worn = worn_memories(memories);
     let mut seen = BTreeSet::new();
-    let mut looks: Vec<(&str, BTreeSet<(char, char)>)> = Vec::new();
+    let mut looks: Vec<Look<'_>> = Vec::new();
     let mut ranked = newest_first
         .into_iter()
         .filter(|memory| {
@@ -93,18 +146,17 @@ pub fn recall(memories: &[Memory], query: &RecallQuery<'_>, limit: usize) -> Vec
             ))
         })
         .filter(|memory| {
-            if memory.kind != "APPEARANCE" {
+            let Some(look) = look(memory) else {
                 return true;
+            };
+            let known = worn
+                .iter()
+                .chain(&looks)
+                .any(|other| same_look(other, &look));
+            if !known {
+                looks.push(look);
             }
-            let pairs = &crate::chapter_craft::telling_pairs(&memory.detail)
-                - &crate::chapter_craft::telling_pairs(&memory.subject);
-            let like_newer = looks.iter().any(|(subject, newer)| {
-                *subject == memory.subject && newer.intersection(&pairs).count() >= SAME_LOOK_PAIRS
-            });
-            if !like_newer {
-                looks.push((&memory.subject, pairs));
-            }
-            !like_newer
+            !known
         })
         .filter_map(|memory| {
             let tier = if in_chapter(&memory.subject) {
@@ -181,6 +233,39 @@ mod tests {
                 "戴眼镜，镜片会被蒸汽糊住",
                 "习惯把帆布包挂在椅背",
                 "习惯把铅笔别在耳后"
+            ]
+        );
+    }
+
+    #[test]
+    fn round100_a_trait_written_in_both_latest_chapters_is_worn_not_recalled() {
+        // Real run round 10: the red marks and the sleeve sliding down were
+        // recorded every chapter, recalled every chapter, and written five
+        // times in a chapter.
+        let memories = [
+            memory(7, "APPEARANCE", "左手腕内侧有第五道红痕，颜色比前四道深"),
+            memory(8, "APPEARANCE", "左手腕有第六道红痕，蔓延至肘弯上方"),
+            memory(7, "APPEARANCE", "袖口会自然下滑露出手腕"),
+            memory(8, "HABIT", "袖口常滑下去露出手腕"),
+            memory(8, "HABIT", "习惯把手机扣在桌上"),
+            memory(1, "APPEARANCE", "戴眼镜，镜片会被蒸汽糊住"),
+        ];
+        let on_stage = ["沈砚".to_string()];
+        let query = RecallQuery {
+            on_stage: &on_stage,
+            people: &on_stage,
+            text: "",
+        };
+        let recalled = recall(&memories, &query, 40)
+            .into_iter()
+            .map(|item| item["detail"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(recalled, ["习惯把手机扣在桌上", "戴眼镜，镜片会被蒸汽糊住"]);
+        assert_eq!(
+            worn(&memories),
+            [
+                "沈砚：左手腕有第六道红痕，蔓延至肘弯上方",
+                "沈砚：袖口常滑下去露出手腕"
             ]
         );
     }

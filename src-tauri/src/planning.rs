@@ -2965,20 +2965,12 @@ pub fn fit_lenient_plan_shape(plan: &mut Value, remaining_chapter_capacity: i64)
     }
     let people = |scene: &Value| scene["people"].as_array().map_or(0, Vec::len);
     while scenes.len() > 1 {
-        // Too many scenes: the neighbours with the fewest events together
-        // join, so the events spread over the scenes left (sixth
-        // acceptance: three scenes folded into one lost ten events).
+        // Too many scenes: the last joins the one before it (round 10: a
+        // scene is one event, so the folded event waits for a later chapter).
         let Some(from) = scenes
             .iter()
             .position(|scene| people(scene) < MIN_SCENE_PEOPLE)
-            .or_else(|| {
-                if scenes.len() > *SCENE_COUNT.end() {
-                    (1..scenes.len())
-                        .min_by_key(|&at| event_count(&scenes[at - 1]) + event_count(&scenes[at]))
-                } else {
-                    None
-                }
-            })
+            .or_else(|| (scenes.len() > *SCENE_COUNT.end()).then(|| scenes.len() - 1))
         else {
             break;
         };
@@ -3015,24 +3007,20 @@ pub fn fit_lenient_plan_shape(plan: &mut Value, remaining_chapter_capacity: i64)
         {
             list.extend(events);
         }
-        // LD-5: the folded scene takes the room estimated for both.
-        if let (Some(folded), Some(kept)) = (
-            scene["estimatedCharacters"].as_i64(),
-            into["estimatedCharacters"].as_i64(),
-        ) {
-            into["estimatedCharacters"] = json!(folded + kept);
-        }
     }
     let most = *SCENE_EVENTS.end();
     for scene in scenes.iter_mut() {
         let count = event_count(scene);
         if count > most {
+            // Round 10: a scene is one event; the rest wait for later
+            // chapters rather than come back as a list of actions.
             notes.push(format!(
-                "系统把场景「{}」的事件从 {count} 条删到 {most} 条",
-                text(&scene["place"])
+                "系统只留下场景「{}」的第一件事，另外 {} 件留给后面的章节",
+                text(&scene["place"]),
+                count - most
             ));
             if let Some(events) = scene["events"].as_array_mut() {
-                events.drain(most - 1..count - 1);
+                events.truncate(most);
             }
         }
     }

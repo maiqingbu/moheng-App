@@ -3075,7 +3075,7 @@ fn run_chapter_production_inner(
                 note_if_lenient(
                     lenient,
                     &mut problems,
-                    planner.check_craft(&plan, horizon_capacity, length_range),
+                    planner.check_craft(&plan, horizon_capacity),
                 )?;
                 problems.extend(planner.reminders(&plan));
                 if lenient {
@@ -3250,8 +3250,8 @@ fn run_chapter_production_inner(
 
     update_stage(manager, connection, &project_id, &job_id, "RENDER", &now)?;
     // LD-7 (real run 2026-11-01, round 11): a writer given each scene's
-    // estimate wrote about two thirds of it; the estimates only size the
-    // plan, and the writers aim for the chapter's range.
+    // estimate wrote about two thirds of it, so the writers aim for the
+    // chapter's range. Plans no longer estimate (round 10); older ones may.
     let mut writer_plan = plan_payload.clone();
     for scene in writer_plan
         .pointer_mut("/craft/scenes")
@@ -3832,12 +3832,15 @@ fn run_chapter_production_inner(
                     break;
                 }
                 let spans = crate::chapter_craft::sentence_spans(&body);
-                let cuttable = crate::chapter_length::cuttable_sentences(&body, &spans, &events);
+                let (groups, cuttable) = crate::chapter_length::cut_options(&body, &spans, &events);
+                // Round 10: the sentences of one conversation share its first
+                // number, so the cut chooses it whole or leaves it.
                 let sentences = spans.iter()
                     .enumerate()
                     .map(|(number, &(from, to))| json!({
                         "n":number,"chars":character_count(&body[from..to]),"text":&body[from..to],
-                        "canCut":cuttable[number]
+                        "canCut":cuttable[number],
+                        "conversation":(groups[number].len() > 1).then(|| groups[number][0])
                     }))
                     .collect::<Vec<_>>();
                 let (run_id, outcome) = craft_call(
@@ -10352,7 +10355,7 @@ mod tests {
         assert_eq!(kept["craft"], plan["craft"]);
         for problem in [
             "本章的地点（修复室）上一章都去过，至少换一个新地点",
-            "本章 15 条事件，2200 字最多写得开 14 条（每条 150 字以上）：删去或合并 1 条",
+            "第 1 场写了 3 件事：一场只写一件事（发生什么、谁和谁），动作和细节留给写手",
         ] {
             let replanned = previous_plan(&plan, &json!({"problems":[problem]})).unwrap();
             assert!(replanned["craft"].get("scenes").is_none(), "{problem}");

@@ -226,8 +226,7 @@ pub(crate) fn cut_sentences(
     events: &PlannedEvents,
 ) -> String {
     let spans = crate::chapter_craft::sentence_spans(body);
-    let groups = exchanges(body, &spans);
-    let cuttable = cuttable_sentences(body, &spans, events);
+    let (groups, cuttable) = cut_options(body, &spans, events);
     let mut removed = vec![false; spans.len()];
     let mut shortened = body.to_string();
     for &number in cut {
@@ -236,10 +235,14 @@ pub(crate) fn cut_sentences(
         }
         // Real run round 9: cutting single lines of an exchange left answers
         // without their questions; an exchange goes whole or not at all.
+        // Round 10: and only when most of it was chosen, so one dispensable
+        // line never takes a whole conversation with it.
         let Some(group) = groups.get(number) else {
             continue;
         };
-        if !cuttable[number] || group.iter().any(|&n| removed[n]) {
+        let chosen_lines = group.iter().filter(|n| cut.contains(n)).count();
+        if !cuttable[number] || group.iter().any(|&n| removed[n]) || chosen_lines * 2 < group.len()
+        {
             continue;
         }
         group.iter().for_each(|&n| removed[n] = true);
@@ -254,27 +257,16 @@ pub(crate) fn cut_sentences(
 }
 
 /// For each sentence, the sentences of the exchange it belongs to: those
-/// of the run of consecutive lines spoken in quotes around its line, or only
-/// itself when its line is not spoken.
-fn exchanges(body: &str, spans: &[(usize, usize)]) -> Vec<Vec<usize>> {
+/// of the lines with a quote in the conversation around its line, or only
+/// itself when its line has none. One line of narration between two such
+/// lines does not end the conversation (real run round 10: 小杨脚步停了一下
+/// split a question from its answer); it stays out of the exchange. A line
+/// that must stay (a planned event, by `single`) does end it.
+fn exchanges(body: &str, spans: &[(usize, usize)], single: &[bool]) -> Vec<Vec<usize>> {
     let lines = body.split('\n').collect::<Vec<_>>();
     // The run of spoken lines each line is in, blank lines between kept.
     let mut runs = vec![None; lines.len()];
     let mut run = 0;
-    let mut open = false;
-    for (index, line) in lines.iter().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let spoken = line.trim_start().starts_with(['“', '「']);
-        if spoken {
-            if !open {
-                run += 1;
-            }
-            runs[index] = Some(run);
-        }
-        open = spoken;
-    }
     let mut line = 0;
     let mut at = 0;
     let line_of = spans
@@ -285,6 +277,30 @@ fn exchanges(body: &str, spans: &[(usize, usize)]) -> Vec<Vec<usize>> {
             line
         })
         .collect::<Vec<_>>();
+    let kept_lines = line_of
+        .iter()
+        .zip(single)
+        .filter(|(_, cuttable)| !**cuttable)
+        .map(|(line, _)| *line)
+        .collect::<BTreeSet<_>>();
+    // Narration lines since the last spoken one; None before any.
+    let mut since_spoken = None;
+    for (index, line) in lines.iter().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if line.contains(['“', '「']) {
+            if !matches!(since_spoken, Some(0 | 1)) {
+                run += 1;
+            }
+            runs[index] = Some(run);
+            since_spoken = Some(0);
+        } else if kept_lines.contains(&index) {
+            since_spoken = None;
+        } else {
+            since_spoken = since_spoken.map(|lines: usize| lines + 1);
+        }
+    }
     (0..spans.len())
         .map(|number| match runs[line_of[number]] {
             Some(run) => (0..spans.len())
@@ -295,19 +311,27 @@ fn exchanges(body: &str, spans: &[(usize, usize)]) -> Vec<Vec<usize>> {
         .collect()
 }
 
-/// For each sentence of `body`, whether a cut may take it: it and every
-/// sentence of its exchange pass `can_cut_sentence`.
-pub(crate) fn cuttable_sentences(
+/// For each sentence of `body`, the exchange it belongs to (see
+/// `exchanges`) and whether a cut may take it: it and every sentence of its
+/// exchange pass `can_cut_sentence`.
+pub(crate) fn cut_options(
     body: &str,
     spans: &[(usize, usize)],
     events: &PlannedEvents,
-) -> Vec<bool> {
-    let single = (0..spans.len())
-        .map(|number| can_cut_sentence(body, spans, number, events))
-        .collect::<Vec<_>>();
-    exchanges(body, spans)
+) -> (Vec<Vec<usize>>, Vec<bool>) {
+    let single = single_cuts(body, spans, events);
+    let groups = exchanges(body, spans, &single);
+    let cuttable = groups
         .iter()
         .map(|group| group.iter().all(|&n| single[n]))
+        .collect();
+    (groups, cuttable)
+}
+
+/// For each sentence, whether `can_cut_sentence` lets it go on its own.
+fn single_cuts(body: &str, spans: &[(usize, usize)], events: &PlannedEvents) -> Vec<bool> {
+    (0..spans.len())
+        .map(|number| can_cut_sentence(body, spans, number, events))
         .collect()
 }
 
@@ -421,6 +445,34 @@ mod tests {
             "{shortened}"
         );
         assert!(shortened.contains("他先写2018"), "{shortened}");
+    }
+
+    /// The number of the sentence of `body` that starts with `text`.
+    fn sentence_at(body: &str, text: &str) -> usize {
+        crate::chapter_craft::sentence_spans(body)
+            .iter()
+            .position(|&(start, end)| body[start..end].trim_start().starts_with(text))
+            .unwrap()
+    }
+
+    #[test]
+    fn round100_a_conversation_goes_whole_and_only_when_most_of_it_was_chosen() {
+        // Real run round 10: the line before 用量？ went and left it alone,
+        // because a narration line split the conversation in two, and a
+        // line opening with narration (小吴没过来。“…”) was not counted as
+        // spoken at all.
+        let body = "第四张锡箔还在他手里。\n“水机在走廊尽头。”沈砚说，“顺便把今晚的用量记一下。”\n小杨脚步停了一下，回头看了他一眼。\n“用量？”\n小吴没过来。“沈哥，这得主任签字。”\n“锡箔片，七片。”\n第四张锡箔落下。";
+        let range = ChapterLengthRange { min: 10, max: 30 };
+        let first = sentence_at(body, "“水机");
+        let shortened = cut_sentences(body, &[first], range, &PlannedEvents::default());
+        assert!(shortened.contains("“用量？”"), "{shortened}");
+        assert!(shortened.contains("水机在走廊尽头"), "{shortened}");
+        let most = ["“水机", "“用量", "“锡箔"].map(|text| sentence_at(body, text));
+        let shortened = cut_sentences(body, &most, range, &PlannedEvents::default());
+        for line in ["水机", "用量", "主任签字", "锡箔片"] {
+            assert!(!shortened.contains(line), "{line}: {shortened}");
+        }
+        assert!(shortened.contains("第四张锡箔落下"), "{shortened}");
     }
 
     #[test]
