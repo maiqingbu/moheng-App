@@ -56,8 +56,7 @@
           },
           "reason": {
             "type": "string",
-            "minLength": 1,
-            "maxLength": 180
+            "minLength": 1
           },
           "hardEvidence": {
             "type": "object",

@@ -55,8 +55,7 @@
           },
           "reason": {
             "type": "string",
-            "minLength": 1,
-            "maxLength": 160
+            "minLength": 1
           }
         }
       }

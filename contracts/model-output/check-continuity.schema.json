@@ -50,7 +50,7 @@
           "currentQuote": { "type": "string", "minLength": 4, "maxLength": 180 },
           "priorQuote": { "type": "string", "minLength": 4, "maxLength": 180 },
           "kind": { "enum": ["REPEATED_EVENT", "STATE_CONFLICT"] },
-          "reason": { "type": "string", "minLength": 1, "maxLength": 180 },
+          "reason": { "type": "string", "minLength": 1 },
           "hardEvidence": {
             "type": "object",
             "required": ["relation", "priorOutcome", "currentOutcome"],

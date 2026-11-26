@@ -1232,9 +1232,9 @@ fn run_direction(
                     .collect::<Vec<_>>();
                 let corrected =
                     ground_opening_replays(&json!({"issues":requested}), stages, opening_prose)?;
-                if !corrected.unbound.is_empty() {
-                    found.push("开篇复核仍有引文无法定位。请改写对应阶段的小步，明确哪些结果已发生，本阶段要推进什么新后果。".into());
-                }
+                // Real run round 13: a replay the review still cannot quote
+                // is not proven (it was told to drop it), and the planner
+                // cannot fix the review's quotes; it is left out.
                 for original in &unbound {
                     if let Some(candidate) = corrected
                         .candidates
@@ -2178,6 +2178,7 @@ mod tests {
     struct DirectionGateway {
         original: Value,
         repair: Value,
+        review: Value,
         calls: std::sync::Mutex<Vec<(String, Value)>>,
     }
 
@@ -2188,6 +2189,7 @@ mod tests {
                 repair: json!({"pressureCorrections":[{
                     "stage":2,"pressure":"裴砚舟命守库的执事封住原账，陆照只能去找旧抄本。"
                 }]}),
+                review: json!({"issues":[]}),
                 calls: std::sync::Mutex::new(Vec::new()),
             }
         }
@@ -2219,7 +2221,7 @@ mod tests {
             let reply = match capability {
                 PLAN_BOOK_DIRECTION => self.original.clone(),
                 "REPAIR_BOOK_PRESSURE" => self.repair.clone(),
-                CHECK_BOOK_CONTINUATION => json!({"issues":[]}),
+                CHECK_BOOK_CONTINUATION => self.review.clone(),
                 _ => return Err(format!("unexpected capability {capability}")),
             };
             Ok(crate::production::ProductionModelResponse::deterministic(
@@ -2321,6 +2323,58 @@ mod tests {
             && input["planFeedback"]["problems"][0]
                 .as_str()
                 .is_some_and(|problem| problem.starts_with("反派裴砚舟只在"))));
+    }
+
+    #[test]
+    fn round130_a_replay_the_review_cannot_quote_is_dropped_not_charged_to_the_planner() {
+        // Real run round 13: the review named a replay twice without a quote
+        // in the opening, and the direction was sent back for it every round.
+        use crate::project_db::{paths::AppPaths, ProjectManager};
+
+        let mut gateway = DirectionGateway::new(direction());
+        gateway.review = json!({"issues":[{
+            "stage":1,"step":1,"plannedQuote":"陆照查清丹房的账·第一步","openingChapter":1,
+            "openingSentence":0,"openingQuote":"开篇里没有这一句","reason":"重复调查"
+        }]});
+        let temp = tempfile::tempdir().unwrap();
+        let manager = ProjectManager::new(AppPaths::new(temp.path()));
+        let now = "2026-09-13T12:00:00Z";
+        let db = manager.create("unquoted-replay", "方向复核", now).unwrap();
+        run_direction(
+            &db,
+            &gateway,
+            (
+                "unquoted-replay",
+                "unquoted-replay",
+                "unquoted-replay:key",
+                now,
+            ),
+            (PLAN_BOOK_DIRECTION, "book-direction"),
+            direction_input(),
+            &[],
+            problems,
+        )
+        .unwrap()
+        .unwrap();
+        let calls = gateway.calls.lock().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(name, _)| name == PLAN_BOOK_DIRECTION)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn round130_an_overlong_review_reason_is_not_refused() {
+        // Real run round 13: one English reason past 160 characters refused
+        // the whole review and failed the setup; a reason only explains.
+        let reply = json!({"issues":[{
+            "stage":1,"step":1,"plannedQuote":"陆照查清丹房的账","openingChapter":1,"openingSentence":0,
+            "openingQuote":"陆照翻开账本","reason":"x".repeat(400)
+        }]});
+        crate::model_output::check(CHECK_BOOK_CONTINUATION, &reply).unwrap();
     }
 
     #[test]
