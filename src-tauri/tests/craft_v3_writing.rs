@@ -59,11 +59,19 @@ struct CraftGateway {
     length_insertions: Vec<Value>,
 }
 
-/// The inputs of every call to `capability`, in call order.
+/// The inputs of every call to `capability`, in call order. The fixture
+/// writer's first draft is one sentence, so each chapter is drawn again
+/// for its length (round 11) before the adjustment writes it; those redraws
+/// are left out, the length suites cover them.
 fn inputs(calls: &[(String, Value)], capability: &str) -> Vec<Value> {
     calls
         .iter()
-        .filter(|(name, _)| name == capability)
+        .filter(|(name, input)| {
+            name == capability
+                && !input["outputFeedback"]["rejectedFor"]
+                    .as_str()
+                    .is_some_and(|error| error.starts_with("B08_RENDER_LENGTH_OUT_OF_RANGE"))
+        })
         .map(|(_, input)| input.clone())
         .collect()
 }

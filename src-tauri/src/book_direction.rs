@@ -37,6 +37,11 @@ const NO_CHAPTER_TABLE: &str = "不要写章表，也不要写“第 N 章”：
 const STAGE_COUNT: std::ops::RangeInclusive<usize> = 3..=8;
 /// VD-1h: how many steps a stage is split into, each one or two chapters.
 const STEP_COUNT: std::ops::RangeInclusive<usize> = 3..=5;
+/// Round 11 (owner decision 2026-11-26): the most characters a step is
+/// stated in. A step is where the story stands after it, not the actions
+/// that get there (real run round 11: 40-character steps scripted every
+/// chapter, and the chapters copied them).
+const STEP_CHARS: usize = 30;
 
 /// The direction step's input: the confirmed story, what the opening did,
 /// the signing conclusions and the first volume's size.
@@ -271,6 +276,11 @@ fn stage_problems(seed: &Value, bible: &Value, label: &str, room: (&str, i64)) -
             if says_a_line(step) {
                 problems.push(format!(
                     "{}「{step}」只写了一句台词：一步写的是结果，这一步之后人物能做、知道或决定什么",
+                    step_location(index, step_index as u64 + 1)
+                ));
+            } else if step.chars().count() > STEP_CHARS {
+                problems.push(format!(
+                    "{}「{step}」超过 {STEP_CHARS} 字：只写这一步之后的局面（谁知道了什么、能做什么、和谁站在一起或翻脸），动作和物件留给章节",
                     step_location(index, step_index as u64 + 1)
                 ));
             }
@@ -2474,6 +2484,38 @@ mod tests {
         assert!(
             found.contains(&"第 3 个阶段要分 3 到 5 步（steps），现在是 6 步".to_string()),
             "{found:?}"
+        );
+    }
+
+    #[test]
+    fn round110_a_step_written_out_as_actions_is_sent_back() {
+        // Real run round 11: steps scripted the chapters' actions, and the
+        // chapters copied them, so the hero went back to the same rust stain.
+        let mut direction = direction();
+        let scripted =
+            "沈砚将硬化的右手小指按在锈斑中心，指腹渗出的冷凝水沿纹路流向标记点，锈迹突然泛起蓝光";
+        direction["volumeIntentSeeds"][0]["stages"][1]["steps"] = json!([
+            scripted,
+            "陆照知道改约的人在执事堂里",
+            "柳漪答应在会审上作证"
+        ]);
+        let found = problems(&direction, &direction_input());
+        let location = format!("阶段 2 的第 1 步「{scripted}」");
+        assert!(
+            found
+                .iter()
+                .any(|problem| problem.starts_with(&location) && problem.contains("超过 30 字")),
+            "{found:?}"
+        );
+        assert!(
+            !found.iter().any(|p| p.starts_with("阶段 2 的第 2 步")),
+            "{found:?}"
+        );
+        let mut handed_back = direction.clone();
+        drop_replayed_steps(&mut handed_back, &json!({"problems":found}));
+        assert_eq!(
+            handed_back["volumeIntentSeeds"][0]["stages"][1]["steps"],
+            json!(["陆照知道改约的人在执事堂里", "柳漪答应在会审上作证"])
         );
     }
 

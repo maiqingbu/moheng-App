@@ -921,6 +921,10 @@ pub(crate) fn parse_provider_model_payload_for_capability(
     capability: &str,
 ) -> Result<Value, String> {
     match parse_provider_model_payload(value.clone()) {
+        Ok(mut payload) if capability == crate::craft_setup::GENERATE_STORY_BIBLE => {
+            crate::craft_setup::strip_style_quotes(&mut payload);
+            Ok(payload)
+        }
         Ok(payload) => Ok(payload),
         Err(error)
             if matches!(
@@ -3561,12 +3565,8 @@ fn run_chapter_production_inner(
             let normalized = crate::chapter_craft::normalize_typography(text.trim());
             signing_repetition(&normalized)
         };
-        // Owner decision 2026-11-25: cutting a draft this long left half of
-        // each conversation, so it is written again once instead.
-        let too_long_to_cut = |text: &str| {
-            gateway.enforces_chapter_length()
-                && length_range.is_too_long_to_cut(character_count(text))
-        };
+        let sized = gateway.enforces_chapter_length();
+        let length = character_count(&body);
         // LD-2 (real runs rounds 22 and 26): a chapter barely broken into
         // paragraphs is written again once, told to break it up.
         let render_recovery = if copies_prior_chapter(&body) {
@@ -3580,21 +3580,32 @@ fn run_chapter_production_inner(
                     "instruction":"该短语在本章和已提交的开篇中累计出现三次或更多。保留本章章纲和新情节，重写这些句子，只把已发生的结果作为前提。"
                 }),
             ))
-        } else if too_long_to_cut(&body) {
+        } else if sized && length_range.is_far_off(length) {
+            // Round 11 (owner decision 2026-11-26): cutting a quarter of a
+            // draft orphaned its lines, and padding one a quarter short
+            // repeated a conversation, so either is written again once.
+            let (suffix, how) = if length > length_range.max {
+                (
+                    "render-too-long",
+                    "只写章纲列出的事件，每件写一次；前几章写过的场面和对话只作前提，不再演一遍；一场对话只留推动结果的几句",
+                )
+            } else {
+                (
+                    "render-too-short",
+                    "把章纲的每件事写足：谁做了什么、说了什么、对方怎么回应、付出什么代价；不加新事件，不靠景物描写凑字",
+                )
+            };
             Some((
-                "render-too-long",
+                suffix,
                 json!({
                     "rejectedFor":length_error(&body),
                     "instruction":format!(
-                        "上一稿有 {} 字，要求 {}–{} 字。重写这一章：只写章纲列出的事件，每件写一次；前几章写过的场面和对话只作前提，不再演一遍；一场对话只留推动结果的几句。",
-                        character_count(&body), length_range.min, length_range.max
+                        "上一稿有 {length} 字，要求 {}–{} 字（不算空格和换行）。重写这一章：{how}。",
+                        length_range.min, length_range.max
                     )
                 }),
             ))
-        } else if gateway.enforces_chapter_length()
-            && character_count(&body) >= length_range.min
-            && crate::chapter_craft::is_unbroken(&body)
-        {
+        } else if sized && length >= length_range.min && crate::chapter_craft::is_unbroken(&body) {
             Some((
                 "render-paragraphs",
                 json!({
@@ -3614,7 +3625,9 @@ fn run_chapter_production_inner(
             if copies_prior_chapter(&body) {
                 return Err(PRIOR_CHAPTER_COPY_ERROR.into());
             }
-            if too_long_to_cut(&body) {
+            // Owner decision 2026-11-25: a second draft still this long is
+            // not cut down; the chapter fails.
+            if sized && length_range.is_too_long_to_cut(character_count(&body)) {
                 return Err(length_error(&body));
             }
             // A repeat the second draft kept is left to the rewrite; the check

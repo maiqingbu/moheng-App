@@ -98,30 +98,53 @@ fn next_generation(
     )
 }
 
+/// The style descriptions of `bible`, each as its label and JSON pointer.
+fn style_fields(bible: &Value) -> Vec<(String, String)> {
+    let mut fields = ["humorStyle", "innerVoiceStyle"]
+        .map(|field| {
+            (
+                format!("protagonist.{field}"),
+                format!("/protagonist/{field}"),
+            )
+        })
+        .to_vec();
+    let cast = bible["cast"].as_array().map_or(0, Vec::len);
+    fields.extend((0..cast).map(|index| {
+        (
+            format!("cast[{index}].speechStyle"),
+            format!("/cast/{index}/speechStyle"),
+        )
+    }));
+    fields
+}
+
 /// Style descriptions must stay descriptions: a quoted line in them is copied
 /// verbatim into chapters (CRAFT_V3_DESIGN §4.1).
 fn ready_sentence_path(bible: &Value) -> Option<String> {
-    let mut fields = vec![
-        (
-            "protagonist.humorStyle".to_string(),
-            &bible["protagonist"]["humorStyle"],
-        ),
-        (
-            "protagonist.innerVoiceStyle".to_string(),
-            &bible["protagonist"]["innerVoiceStyle"],
-        ),
-    ];
-    for (index, member) in bible["cast"].as_array().into_iter().flatten().enumerate() {
-        fields.push((format!("cast[{index}].speechStyle"), &member["speechStyle"]));
-    }
-    fields
+    style_fields(bible)
         .into_iter()
-        .find(|(_, value)| {
-            value
-                .as_str()
+        .find(|(_, pointer)| {
+            bible
+                .pointer(pointer)
+                .and_then(Value::as_str)
                 .is_some_and(|text| text.contains(QUOTE_MARKS))
         })
-        .map(|(path, _)| path)
+        .map(|(label, _)| label)
+}
+
+/// Round 11: the quote marks a model puts in the style descriptions of its
+/// bibles are taken out when its reply is read, instead of refusing all
+/// three bibles (real run round 11: an inner voice quoting an old book).
+pub(crate) fn strip_style_quotes(output: &mut Value) {
+    for bible in output["bibles"].as_array_mut().into_iter().flatten() {
+        for (_, pointer) in style_fields(bible) {
+            if let Some(Value::String(text)) = bible.pointer_mut(&pointer) {
+                if text.contains(QUOTE_MARKS) {
+                    *text = text.replace(QUOTE_MARKS, "");
+                }
+            }
+        }
+    }
 }
 
 fn checked_bible(bible: Value) -> Result<Value, String> {
@@ -762,6 +785,30 @@ mod tests {
             "../../contracts/fixtures/valid/narrative-story-bible-r1.json"
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn round110_quote_marks_in_a_style_are_taken_out_instead_of_refusing_the_bibles() {
+        // Real run round 11: an inner voice quoting a book refused all three
+        // bibles twice and stopped the run before chapter 1.
+        let mut style = with_fields(json!({}), &bible(), STORY_BIBLE.fields);
+        style["protagonist"]["innerVoiceStyle"] =
+            json!("冷静的考据体，例如“曝书须择庚辛日”这样引古籍");
+        style["cast"][0]["speechStyle"] = json!("开口先说「依我看」");
+        let raw = json!({"choices":[{"message":{"content":
+            json!({"bibles":[style.clone(), style.clone(), style]}).to_string()}}]});
+        let parsed = crate::production::parse_provider_model_payload_for_capability(
+            raw,
+            GENERATE_STORY_BIBLE,
+        )
+        .unwrap();
+        crate::model_output::check(GENERATE_STORY_BIBLE, &parsed).unwrap();
+        let first = &parsed["bibles"][0];
+        assert_eq!(
+            first["protagonist"]["innerVoiceStyle"],
+            "冷静的考据体，例如曝书须择庚辛日这样引古籍"
+        );
+        assert_eq!(ready_sentence_path(first), None);
     }
 
     #[test]

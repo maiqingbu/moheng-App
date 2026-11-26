@@ -132,7 +132,7 @@ fn final_word_count(state: &KernelState, project_id: &str, chapter_id: &str) -> 
 
 #[test]
 fn fx18_a_chapter_brought_into_the_range_by_its_adjustment_is_kept() {
-    let gateway = Arc::new(LengthGateway::new(&[800, 900, 700], &[900, 2500]));
+    let gateway = Arc::new(LengthGateway::new(&[800, 900, 700], &[1800, 2500]));
     let (_temp, state, chapter_id, result) =
         start(gateway.clone(), "p-fx18-adjusted", json!({}), None);
     result.unwrap();
@@ -144,7 +144,7 @@ fn fx18_a_chapter_brought_into_the_range_by_its_adjustment_is_kept() {
     );
     let adjust = gateway.inputs("ADJUST_CHAPTER_LENGTH");
     assert_eq!(adjust.len(), 1);
-    assert_eq!(adjust[0]["currentChars"], 900);
+    assert_eq!(adjust[0]["currentChars"], 1800);
     assert_eq!(adjust[0]["targetChars"], 2024);
     assert_eq!(adjust[0]["patchOnly"], true);
     assert_eq!(
@@ -155,12 +155,12 @@ fn fx18_a_chapter_brought_into_the_range_by_its_adjustment_is_kept() {
 
 #[test]
 fn fx18_chapter_still_outside_the_range_after_its_adjustment_is_not_committed() {
-    let gateway = Arc::new(LengthGateway::new(&[800, 900, 700], &[600]));
+    let gateway = Arc::new(LengthGateway::new(&[800, 900, 700], &[1750]));
     let (_temp, state, chapter_id, result) =
         start(gateway.clone(), "p-fx18-still-short", json!({}), None);
     let error = result.unwrap_err();
     assert!(
-        error.starts_with("B08_RENDER_LENGTH_OUT_OF_RANGE:600:2000-3000"),
+        error.starts_with("B08_RENDER_LENGTH_OUT_OF_RANGE:1750:2000-3000"),
         "{error}"
     );
     assert_eq!(gateway.inputs("RENDER_CHAPTER").len(), 1);
@@ -356,7 +356,10 @@ fn fx18_long_form_production_uses_the_range_saved_when_its_plan_was_compiled() {
 
 #[test]
 fn fx18_opening_retry_keeps_the_range_chosen_for_the_chapter() {
-    let gateway = Arc::new(LengthGateway::new(&[1200, 1300, 1000], &[600, 600, 3500]));
+    let gateway = Arc::new(LengthGateway::new(
+        &[1200, 1300, 1000],
+        &[2600, 2600, 2600, 3500],
+    ));
     let project_id = "p-fx18-retry-range";
     let (_temp, state, chapter_id, result) = start(
         gateway.clone(),

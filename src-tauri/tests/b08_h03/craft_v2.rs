@@ -264,7 +264,7 @@ fn craft_v2_plan_without_a_role_is_replanned_once_with_the_reason() {
 
 #[test]
 fn craft_v2_a_chapter_is_written_once_and_sized_by_one_adjustment() {
-    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[1200, 2500]));
+    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[1800, 2500]));
     let project_id = "p-craft-adjust";
     let (_temp, state, chapter_id, result) = produce(gateway.clone(), project_id);
     result.unwrap();
@@ -273,7 +273,7 @@ fn craft_v2_a_chapter_is_written_once_and_sized_by_one_adjustment() {
     assert!(renders[0].get("part").is_none() && renders[0].get("beatTargets").is_none());
     let adjust = gateway.inputs("ADJUST_CHAPTER_LENGTH");
     assert_eq!(adjust.len(), 1);
-    assert_eq!(adjust[0]["currentChars"], 1200);
+    assert_eq!(adjust[0]["currentChars"], 1800);
     assert_eq!(adjust[0]["targetChars"], 2024);
     assert_eq!(adjust[0]["patchOnly"], true);
     assert_eq!(committed_word_count(&state, project_id, &chapter_id), 2500);
@@ -345,6 +345,26 @@ fn round75_a_draft_far_too_long_is_written_again_instead_of_cut() {
     assert!(gateway.inputs("CUT_CHAPTER").is_empty());
 }
 
+#[test]
+fn round110_a_draft_far_off_the_range_is_written_again_with_its_count() {
+    // Real run round 11: a draft 25% short was padded with insertions that
+    // repeated a conversation, and one 25% long was cut to orphaned lines.
+    for (first, kept_out) in [(1200, "ADJUST_CHAPTER_LENGTH"), (3600, "CUT_CHAPTER")] {
+        let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[first, 2500]));
+        let project_id = format!("p-far-off-{first}");
+        let (_temp, state, chapter_id, result) = produce(gateway.clone(), &project_id);
+        result.unwrap();
+        let renders = gateway.inputs("RENDER_CHAPTER");
+        assert_eq!(renders.len(), 2, "{first}");
+        assert!(renders[1]["outputFeedback"]["instruction"]
+            .as_str()
+            .unwrap()
+            .contains(&first.to_string()));
+        assert!(gateway.inputs(kept_out).is_empty(), "{first}");
+        assert_eq!(committed_word_count(&state, &project_id, &chapter_id), 2500);
+    }
+}
+
 fn distinct_cuttable_sentences() -> String {
     (0..60)
         .map(|n| {
@@ -361,17 +381,17 @@ fn distinct_cuttable_sentences() -> String {
 fn ld4_a_cut_that_leaves_the_chapter_too_long_is_followed_by_one_more() {
     // Real run 2026-11-01 (round 10): the writer chose sentences for 70% of
     // what had to go.
-    let mut gateway = CraftGateway::new(vec![good_plan()], &[3600]);
+    let mut gateway = CraftGateway::new(vec![good_plan()], &[3440]);
     gateway.inject = vec![distinct_cuttable_sentences()];
-    gateway.first_cut = Some(10);
+    gateway.first_cut = Some(5);
     let gateway = Arc::new(gateway);
     let project_id = "p-ld4-cut-twice";
     let (_temp, state, chapter_id, result) = produce(gateway.clone(), project_id);
     result.unwrap();
     let cut = gateway.inputs("CUT_CHAPTER");
     assert_eq!(cut.len(), 2);
-    // Ten sentences of 18 characters.
-    assert_eq!(cut[1]["currentChars"], 3420);
+    // Five sentences of 18 characters.
+    assert_eq!(cut[1]["currentChars"], 3350);
     let committed = committed_word_count(&state, project_id, &chapter_id);
     assert!((2000..=3300).contains(&committed), "{committed}");
 }
@@ -380,13 +400,13 @@ fn ld4_a_cut_that_leaves_the_chapter_too_long_is_followed_by_one_more() {
 fn ld7_an_expansion_that_leaves_the_chapter_too_short_is_followed_by_one_more() {
     // Real run 2026-11-01 (round 11): one expansion added 100-300
     // characters to chapters 300-600 short.
-    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[1200, 1700, 2500]));
+    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[1750, 1900, 2500]));
     let project_id = "p-ld7-expand-twice";
     let (_temp, state, chapter_id, result) = produce(gateway.clone(), project_id);
     result.unwrap();
     let adjust = gateway.inputs("ADJUST_CHAPTER_LENGTH");
     assert_eq!(adjust.len(), 2);
-    assert_eq!(adjust[1]["currentChars"], 1700);
+    assert_eq!(adjust[1]["currentChars"], 1900);
     assert_eq!(committed_word_count(&state, project_id, &chapter_id), 2500);
 }
 
@@ -405,7 +425,10 @@ fn committed_word_count(state: &KernelState, project_id: &str, chapter_id: &str)
 
 #[test]
 fn craft_v2_retry_expands_the_saved_draft() {
-    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[600, 600, 600, 2500]));
+    let gateway = Arc::new(CraftGateway::new(
+        vec![good_plan()],
+        &[1750, 1750, 1750, 2500],
+    ));
     let project_id = "p-craft-retry";
     let (_temp, state, chapter_id, result) = produce(gateway.clone(), project_id);
     assert!(result
@@ -436,7 +459,7 @@ fn craft_v2_retry_expands_the_saved_draft() {
     assert_eq!(gateway.inputs("RENDER_CHAPTER").len(), 1);
     assert_eq!(
         gateway.inputs("ADJUST_CHAPTER_LENGTH")[2]["currentChars"],
-        600
+        1750
     );
 }
 

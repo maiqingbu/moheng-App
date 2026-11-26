@@ -277,46 +277,30 @@ fn generating_story_bible_commits_three_candidates_without_a_head() {
 }
 
 #[test]
-fn story_bible_candidates_with_ready_sentences_are_rejected_without_writes() {
+fn round110_a_quoted_style_is_kept_without_its_quote_marks() {
+    // Real run round 11 (owner decision 2026-11-26): one quoted inner voice
+    // refused all three bibles twice and stopped the run; the quote marks
+    // are taken out instead.
     let fixture = project_with_story_setup();
     fixture.gateway.ready_sentence.store(true, Ordering::SeqCst);
-    let revision = fixture
-        .manager
-        .project_revision(&fixture.project_id)
-        .unwrap();
 
-    let error = command(
+    command(
         &fixture,
         "story_bible_generate",
-        "craft:bible-bad",
+        "craft:bible-quoted",
         json!({}),
     )
-    .unwrap_err();
+    .unwrap();
 
-    // Since 2026-10-30 the reply spec catches the quoted line (and asks once
-    // more) before the setup check would.
-    assert!(
-        error.contains("P01_MODEL_OUTPUT_SPEC") && error.contains("innerVoiceStyle"),
-        "{error}"
-    );
-    assert_eq!(
-        fixture.gateway.bible_inputs.lock().unwrap().len(),
-        2,
-        "generated again once before giving up"
-    );
-    assert_eq!(
-        fixture
-            .manager
-            .project_revision(&fixture.project_id)
-            .unwrap(),
-        revision
-    );
+    assert_eq!(fixture.gateway.bible_inputs.lock().unwrap().len(), 1);
+    let candidates = setup(&fixture)["storyBible"]["candidates"].clone();
+    assert_eq!(candidates.as_array().unwrap().len(), 3);
     assert_eq!(
         count(
             &fixture,
-            "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='StoryBible'"
+            "SELECT COUNT(*) FROM artifact_payloads p JOIN artifacts a USING(artifact_id, version) WHERE a.project_id=?1 AND a.artifact_type='StoryBible' AND json_extract(p.payload_json,'$.protagonist.innerVoiceStyle')='常对自己说：这笔账我记下了。'"
         ),
-        0
+        1
     );
 }
 

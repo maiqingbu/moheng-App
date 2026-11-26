@@ -114,6 +114,13 @@ impl ChapterLengthRange {
         characters * 10 > self.ceiling() * 13
     }
 
+    /// Round 11 (owner decision 2026-11-26): whether a draft is more than
+    /// 15% past the maximum or short of the minimum, too far off to cut or
+    /// pad without harm, so it is written again.
+    pub fn is_far_off(&self, characters: i64) -> bool {
+        characters * 20 > self.max * 23 || characters * 20 < self.min * 17
+    }
+
     /// The length a chapter aims for: the middle of the range.
     pub fn target(&self) -> i64 {
         (self.min + self.max) / 2
