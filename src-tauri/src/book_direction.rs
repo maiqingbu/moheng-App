@@ -43,6 +43,19 @@ const STEP_COUNT: std::ops::RangeInclusive<usize> = 3..=5;
 /// chapter, and the chapters copied them).
 const STEP_CHARS: usize = 30;
 
+/// The problem of a step longer than `STEP_CHARS`, and whether a problem is
+/// one: round 12, the planner left a few steps a little long round after
+/// round, so on the last round they no longer fail the direction.
+fn too_long_step_problem(location: &str, step: &str) -> String {
+    format!(
+        "{location}「{step}」超过 {STEP_CHARS} 字：只写这一步之后的局面（谁知道了什么、能做什么、和谁站在一起或翻脸），动作和物件留给章节"
+    )
+}
+
+fn is_too_long_step(problem: &str) -> bool {
+    problem.contains(&format!("」超过 {STEP_CHARS} 字："))
+}
+
 /// The direction step's input: the confirmed story, what the opening did,
 /// the signing conclusions and the first volume's size.
 pub fn input(
@@ -279,9 +292,9 @@ fn stage_problems(seed: &Value, bible: &Value, label: &str, room: (&str, i64)) -
                     step_location(index, step_index as u64 + 1)
                 ));
             } else if step.chars().count() > STEP_CHARS {
-                problems.push(format!(
-                    "{}「{step}」超过 {STEP_CHARS} 字：只写这一步之后的局面（谁知道了什么、能做什么、和谁站在一起或翻脸），动作和物件留给章节",
-                    step_location(index, step_index as u64 + 1)
+                problems.push(too_long_step_problem(
+                    &step_location(index, step_index as u64 + 1),
+                    step,
                 ));
             }
         }
@@ -1099,7 +1112,15 @@ fn run_direction(
     let accepted_repair_run = Cell::new(None);
     let accept = |mut direction: Value, lenient: bool| {
         tidy(&mut direction, &input);
-        let mut found = check(&direction, &input);
+        // On the last round a step that is only too long is let through.
+        let checked = |direction: &Value| {
+            let mut found = check(direction, &input);
+            if lenient {
+                found.retain(|problem| !is_too_long_step(problem));
+            }
+            found
+        };
+        let mut found = checked(&direction);
         let mut repair_run = None;
         if review_profile.is_some() && found.len() == 1 {
             let antagonist = text(&input["storyBible"]["antagonist"]["name"]);
@@ -1144,7 +1165,7 @@ fn run_direction(
                         .ok_or_else(|| {
                             format!("{BOOK_PRESSURE_REPAIR_REQUIRED}:{}", gap.problem)
                         })?;
-                    found = check(&direction, &input);
+                    found = checked(&direction);
                     if !found.is_empty() {
                         return Err(format!(
                             "{BOOK_PRESSURE_REPAIR_REQUIRED}:{}",
@@ -2131,57 +2152,66 @@ mod tests {
         })
     }
 
+    /// A planner that always returns `original`, a review finding nothing and
+    /// the pressure repair below; every call is kept.
+    struct DirectionGateway {
+        original: Value,
+        calls: std::sync::Mutex<Vec<(String, Value)>>,
+    }
+
+    impl DirectionGateway {
+        fn new(original: Value) -> Self {
+            Self {
+                original,
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ProductionModelGateway for DirectionGateway {
+        fn checks_book_continuation(&self) -> bool {
+            true
+        }
+
+        fn resolve_profile(&self) -> Result<crate::production::ResolvedProviderProfile, String> {
+            Ok(crate::production::ResolvedProviderProfile {
+                provider: "direction-fixture".into(),
+                model: "fixed".into(),
+                endpoint: "fixture://direction".into(),
+                timeout_ms: 1_000,
+            })
+        }
+
+        fn invoke(
+            &self,
+            capability: &str,
+            input: &Value,
+        ) -> Result<crate::production::ProductionModelResponse, String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((capability.into(), input.clone()));
+            let reply = match capability {
+                PLAN_BOOK_DIRECTION => self.original.clone(),
+                "REPAIR_BOOK_PRESSURE" => json!({"pressureCorrections":[{
+                    "stage":2,"pressure":"裴砚舟命守库的执事封住原账，陆照只能去找旧抄本。"
+                }]}),
+                CHECK_BOOK_CONTINUATION => json!({"issues":[]}),
+                _ => return Err(format!("unexpected capability {capability}")),
+            };
+            Ok(crate::production::ProductionModelResponse::deterministic(
+                reply,
+            ))
+        }
+    }
+
     #[test]
     fn a_lone_pressure_gap_repairs_only_missing_pressure_before_opening_review() {
-        use crate::production::{ProductionModelResponse, ResolvedProviderProfile};
         use crate::project_db::{paths::AppPaths, ProjectManager};
-        use std::sync::Mutex;
-
-        struct Gateway {
-            original: Value,
-            calls: Mutex<Vec<(String, Value)>>,
-        }
-        impl ProductionModelGateway for Gateway {
-            fn checks_book_continuation(&self) -> bool {
-                true
-            }
-
-            fn resolve_profile(&self) -> Result<ResolvedProviderProfile, String> {
-                Ok(ResolvedProviderProfile {
-                    provider: "direction-fixture".into(),
-                    model: "fixed".into(),
-                    endpoint: "fixture://direction".into(),
-                    timeout_ms: 1_000,
-                })
-            }
-
-            fn invoke(
-                &self,
-                capability: &str,
-                input: &Value,
-            ) -> Result<ProductionModelResponse, String> {
-                self.calls
-                    .lock()
-                    .unwrap()
-                    .push((capability.into(), input.clone()));
-                let reply = match capability {
-                    PLAN_BOOK_DIRECTION => self.original.clone(),
-                    "REPAIR_BOOK_PRESSURE" => json!({"pressureCorrections":[{
-                        "stage":2,"pressure":"裴砚舟命守库的执事封住原账，陆照只能去找旧抄本。"
-                    }]}),
-                    CHECK_BOOK_CONTINUATION => json!({"issues":[]}),
-                    _ => return Err(format!("unexpected capability {capability}")),
-                };
-                Ok(ProductionModelResponse::deterministic(reply))
-            }
-        }
 
         let mut original = direction();
         original["volumeIntentSeeds"][0]["stages"][1]["pressure"] = json!("宗门断了丹房的炭");
-        let gateway = Gateway {
-            original: original.clone(),
-            calls: Mutex::new(Vec::new()),
-        };
+        let gateway = DirectionGateway::new(original.clone());
         let temp = tempfile::tempdir().unwrap();
         let manager = ProjectManager::new(AppPaths::new(temp.path()));
         let now = "2026-09-13T12:00:00Z";
@@ -2225,6 +2255,39 @@ mod tests {
         assert_eq!(
             response["pressureCorrections"][0]["pressure"],
             expected["volumeIntentSeeds"][0]["stages"][1]["pressure"]
+        );
+    }
+
+    #[test]
+    fn round120_a_step_still_too_long_on_the_last_round_is_accepted() {
+        // Real run round 12: every round left two or three steps a little
+        // past 30 characters, and the whole setup failed for it.
+        use crate::project_db::{paths::AppPaths, ProjectManager};
+
+        let long = "陆照把丹房三年的旧账一页页翻完，找出被改过的那一页并抄下改动人的签名和日期";
+        let mut original = direction();
+        original["volumeIntentSeeds"][0]["stages"][1]["steps"][1] = json!(long);
+        let gateway = DirectionGateway::new(original);
+        let temp = tempfile::tempdir().unwrap();
+        let manager = ProjectManager::new(AppPaths::new(temp.path()));
+        let now = "2026-09-13T12:00:00Z";
+        let db = manager
+            .create("long-step-fixture", "方向复核", now)
+            .unwrap();
+        let (accepted, _) = run_direction(
+            &db,
+            &gateway,
+            ("long-step-fixture", "long-step", "long-step:key", now),
+            (PLAN_BOOK_DIRECTION, "book-direction"),
+            direction_input(),
+            &[],
+            problems,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            accepted["volumeIntentSeeds"][0]["stages"][1]["steps"][1],
+            json!(long)
         );
     }
 
