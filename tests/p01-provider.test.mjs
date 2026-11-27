@@ -93,7 +93,7 @@ test('P01 formal provider evidence is source-bound to raw, unknown, and budget p
   assert.match(provider, /pub raw_response: String/)
   assert.doesNotMatch(provider, /let body_value: Value = serde_json::from_str/)
   assert.match(production, /fn invoke_typed\(/)
-  assert.match(production, /invoke_typed\(self\.capability, &self\.input\)/)
+  assert.match(production, /invoke_typed_with_diagnostic\(self\.capability, &self\.input, self\.profile\)/)
   assert.match(production, /execute_production_model/)
   assert.match(production, /budget_id: Some\(production_budget_id/)
   assert.match(production, /fn priced_model_run_spec/)

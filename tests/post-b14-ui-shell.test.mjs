@@ -12,12 +12,18 @@ test('Post-B14 shell uses task-oriented IA and a real assistant dock', () => {
   const dock = read('src/ui/components/ProjectAssistantDock.vue')
   const overview = read('src/ui/pages/ProjectOverview.vue')
   assert.match(shell, /ProjectAssistantDock/)
-  for (const label of ['总览', '创作', '规划', '当前卷', '待处理', '长篇健康', '资料', '完结准备']) assert.match(shell, new RegExp(label))
+  // 2026-11-27 (owner approved the redesign): five task areas, decisions in the top bar.
+  const areas = read('src/ui/presentation/workspaceAreas.ts')
+  assert.match(shell, /WORKSPACE_AREAS/)
+  for (const label of ['首页', '写作', '故事', '稿件', '资料库']) assert.match(areas, new RegExp(`label: '${label}', icon`))
+  assert.match(shell, /件事等你决定/)
+  // No button may promise what it does not do (the old search only opened the library).
+  assert.doesNotMatch(shell, /⌘K 搜索/)
   assert.doesNotMatch(shell, /label:\s*['"]项目助手['"]|<span>项目助手<\/span>/)
   assert.match(dock, /supportSession/)
   assert.match(dock, /presentAssistantSession/)
   assert.match(dock, /确认|正式修改|查询/) 
-  for (const marker of ['prototype-pagehead', 'prototype-grid3', 'prototype-grid', '继续创作', '需要处理', '长篇状态']) assert.match(overview, new RegExp(marker))
+  for (const marker of ['prototype-pagehead', 'prototype-grid3', 'prototype-grid', '下一步', '待决定', '作品状况']) assert.match(overview, new RegExp(marker))
 })
 
 test('Post-B14 shell does not introduce a frontend authority or browser fallback', () => {

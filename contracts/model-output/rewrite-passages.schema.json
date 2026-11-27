@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "passage rewrites",
+  "type": "object",
+  "required": ["edits"],
+  "properties": {
+    "edits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["quote", "replacement"],
+        "properties": {
+          "quote": { "type": "string", "minLength": 1 },
+          "replacement": { "type": "string" }
+        }
+      }
+    }
+  }
+}

@@ -168,11 +168,12 @@ for (const query of ['queryProjectOverview', 'queryChapterList', 'queryChapterFi
   if (!store.includes(query)) errors.push(`项目 Store 未通过细粒度查询：${query}`)
 }
 
-const appShell = read('ui/components/AppShell.vue')
+const appShell = `${read('ui/components/AppShell.vue')}\n${read('ui/presentation/workspaceAreas.ts')}`
 // Post-B14 / Pre-B15 productization collapses the frozen legacy workspaces into
 // task-oriented IA labels. The underlying routes remain frozen above; only the
-// user-facing navigation grouping changes.
-for (const label of ['总览', '创作', '规划', '当前卷', '待处理', '资料', '长篇健康', '完结准备', '作品设置']) {
+// user-facing navigation grouping changes. 2026-11-27 (owner approved): five
+// areas, each former workspace a tab inside one of them.
+for (const label of ['首页', '写作', '故事', '稿件', '资料库', '待决定', '分卷', '版本记录', '长篇健康', '完结准备', '作品设置']) {
   if (!appShell.includes(label)) errors.push(`侧栏缺少工作区：${label}`)
 }
 

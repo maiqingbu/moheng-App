@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "chapter length adjustment",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["body"],
+      "properties": {
+        "body": { "type": "string", "minLength": 1 }
+      },
+      "not": { "required": ["insertions"] }
+    },
+    {
+      "type": "object",
+      "required": ["insertions"],
+      "additionalProperties": false,
+      "properties": {
+        "insertions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "required": ["afterSentence", "text"],
+            "additionalProperties": false,
+            "properties": {
+              "afterSentence": { "type": "integer", "minimum": 0 },
+              "text": { "type": "string", "minLength": 1, "maxLength": 600 }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

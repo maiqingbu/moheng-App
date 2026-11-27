@@ -130,7 +130,7 @@ test('REAL-WIRE-A01 project entry uses the current provider ModelRun owner', () 
 
 test('REAL-WIRE-A02 formal project entry has no demo seed values or fake platform recommendation', () => {
   assert.match(creationLaunch, /const idea = ref\('\s*'\)/)
-  assert.match(creationLaunch, /const platform = ref\('待判断'\)/)
+  assert.match(creationLaunch, /const platform = ref\(''\)/)
   assert.doesNotMatch(creationLaunch, /const idea = ref\('\s*一个少年带着一柄来历不明的断剑/)
   assert.doesNotMatch(creationLaunch, /番茄小说（AI 推荐）/)
 })

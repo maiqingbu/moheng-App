@@ -5,13 +5,14 @@ import PageHeader from '../components/PageHeader.vue'
 import BaseModal from '../components/BaseModal.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
 import { useProjectLibraryStore } from '../stores/projectLibraryStore'
+import { PLATFORM_CHAPTER_TARGETS } from '../presentation/chapterLength'
 
 const router = useRouter()
 const store = useProjectLibraryStore()
 const projectTitle = ref('')
 const idea = ref('')
 const mode = ref<'AUTO'|'DIRECTOR'>('DIRECTOR')
-const platform = ref('待判断')
+const platform = ref('')
 const length = ref('AI 推荐')
 const forbidden = ref('')
 const selectedTags = ref<string[]>([])
@@ -24,12 +25,13 @@ const createKey = 'project-create'
 const marketDiscovery = computed(() => store.market)
 const market = computed(() => store.market.opportunities)
 onMounted(() => store.loadMarket())
-const platforms = ['待判断','番茄小说','起点中文网','晋江文学城','其他']
+const platforms = PLATFORM_CHAPTER_TARGETS
 const tags = ['武侠','悬疑','成长','志怪','群像','复仇','轻喜','慢热']
 const createState = computed(()=>store.commandState(createKey))
 const createInFlight = computed(() => ['submitting','accepted','processing'].includes(createState.value.status))
+const canCreateFromIdea = computed(() => Boolean(idea.value.trim() && platform.value) && !createInFlight.value)
 const inference = computed(() => [
-  ['目标平台', platform.value],
+  ['目标平台', platform.value || '未选择'],
   ['题材方向', selectedTags.value.join(' · ') || '待判断'],
   ['目标篇幅', length.value],
   ['创作模式', mode.value === 'AUTO' ? '全自动模式' : '导演模式'],
@@ -55,13 +57,13 @@ function canCreateFromMarket() {
     && selected.metricsBasis === 'OFFICIAL_PUBLICATION_SAMPLE'
     && selected.stale !== true
   const manualMaterial = marketSource.value.trim().length > 0 && marketMaterial.value.trim().length > 0
-  return Boolean(selectedOfficial || manualMaterial)
+  return Boolean(platform.value && (selectedOfficial || manualMaterial))
 }
 
 const selectedMarketItem = computed(() => market.value.find(item => item.id === selectedMarket.value) ?? null)
 
 async function createFromIdea(){
-  if (createInFlight.value || !idea.value.trim()) return
+  if (!canCreateFromIdea.value) return
   try {
     const receipt = await store.runCommand(createKey,{type:'project_create_from_idea',payload:{title:projectTitle.value,idea:idea.value,mode:mode.value,platform:platform.value,length:length.value,forbidden:forbidden.value,tags:selectedTags.value}})
     if (receipt.finalStatus==='committed' && receipt.projectId) router.push(`/projects/${receipt.projectId}/directions?generate=1`)
@@ -115,12 +117,12 @@ async function createFromMarket(){
             <button class="btn soft" @click="showMarket=true">从市场机会开始</button>
             <span class="muted" style="font-size:11px">支持一句话、梗概、人物设想、旧稿片段</span>
           </div>
-          <button class="btn primary large" :aria-disabled="!idea.trim() || createInFlight" @click="createFromIdea">生成三份故事方向</button>
+          <button class="btn primary large" :aria-disabled="!canCreateFromIdea" @click="createFromIdea">生成三份故事方向</button>
         </div>
       </div>
       <CommandFeedback :state="createState" />
       <div class="entry-paths" style="display:flex;gap:12px;margin-top:14px;flex-wrap:wrap">
-        <button class="btn primary" :aria-disabled="!idea.trim() || createInFlight" @click="createFromIdea">我已经有故事想法</button>
+        <button class="btn primary" :aria-disabled="!canCreateFromIdea" @click="createFromIdea">我已经有故事想法</button>
         <button class="btn soft" @click="showMarket=true">帮我找值得写的方向</button>
       </div>
     </section>
@@ -135,7 +137,7 @@ async function createFromMarket(){
             <span class="help">全自动模式会尽量减少询问；导演模式只在关键选择点请求你的决定。</span>
           </div>
           <div class="setting-grid">
-            <label class="field"><span class="field-label">目标平台</span><select v-model="platform" class="select"><option v-for="p in platforms" :key="p">{{ p }}</option></select></label>
+            <label class="field"><span class="field-label">目标平台（必选）</span><select v-model="platform" class="select"><option value="" disabled>请选择目标平台</option><option v-for="p in platforms" :key="p.name" :value="p.name">{{ p.name }}（每章约 {{ p.target }} 字）</option></select><span class="help">每章字数按平台目标上下浮动 10%。</span></label>
             <label class="field"><span class="field-label">期望篇幅</span><select v-model="length" class="select"><option>AI 推荐</option><option>40–80 万字</option><option>80–120 万字</option><option>120–180 万字</option><option>180 万字以上</option></select></label>
           </div>
           <div class="field"><span class="field-label">偏好的阅读体验</span><div class="chip-row"><button v-for="tag in tags" :key="tag" class="chip" :class="{active:selectedTags.includes(tag)}" @click="toggleTag(tag)">{{ tag }}</button></div></div>

@@ -11,7 +11,7 @@ use ai_novel_production_system_core::narrative::{
     GoalContractField,
 };
 use ai_novel_production_system_core::production::{
-    ProductionModelGateway, ProductionModelResponse, ResolvedProviderProfile,
+    new_audit_item_id, ProductionModelGateway, ProductionModelResponse, ResolvedProviderProfile,
 };
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::repositories::narrative::NarrativeRepository;
@@ -62,12 +62,23 @@ fn signing_fixture_body(chapter_no: usize, reality_variant: &str) -> String {
 }
 
 fn full_signing_items(input: &Value) -> Value {
+    // Real run 2026-10-25: without a definition the model read C0-2 as the
+    // AI declaration.
+    assert!(
+        input["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("C0-2 是通用内容禁区"),
+        "the evaluation prompt defines C0-2"
+    );
     let chapters = input
         .pointer("/taskContext/chapters")
         .and_then(Value::as_array)
         .expect("signing chapters");
     let chapter = &chapters[0];
-    let body = chapter["body"].as_str().expect("chapter body");
+    let body = chapter["sentences"][0]["text"]
+        .as_str()
+        .expect("first chapter sentence");
     let quote = body.chars().take(40).collect::<String>();
     let range_end = quote.chars().count();
     let mut ids = vec![
@@ -238,7 +249,17 @@ impl ProductionModelGateway for B02Gateway {
                     knowledge_candidates.push(json!({
                         "knowledgeId":"knowledge:b02:linzhou-ledger",
                         "knowerId":"entity:b02:linzhou",
-                        "factId":"fact:b02:opening:1",
+                        // Chapter 1's fact, by the id it was committed with.
+                        "factId":input
+                            .pointer("/authorityContext/state/facts")
+                            .and_then(Value::as_array)
+                            .and_then(|facts| facts.iter().find(|fact| {
+                                fact["subjectId"] == "entity:b02:linzhou"
+                                    && fact["predicate"] != "distrusts"
+                                    && fact["predicate"] != "allied_with"
+                            }))
+                            .and_then(|fact| fact["factId"].as_str())
+                            .unwrap_or("fact:b02:opening:1"),
                         "epistemicState":"KNOWS",
                         "visibilityScope":"CHARACTER:entity:b02:linzhou",
                         "acquiredStoryTime":"2026-01-02T00:00:00Z",
@@ -1098,6 +1119,20 @@ fn f03_formal_context_projection_carries_three_openings_through_long_form_and_re
     let project_id = create_opening_project(&state);
     let opening_productions = commit_three_opening_chapters_with_outputs(&state, &project_id);
 
+    // LD-1.2: chapter 1's audit facts carry system ids, in audit order.
+    let chapter_one: String = state
+        .manager
+        .open(&project_id, "", NOW)
+        .unwrap()
+        .query_row(
+            "SELECT chapter_id FROM chapters WHERE project_id=?1 AND chapter_no=1",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let opening_one = new_audit_item_id("canon", &chapter_one, 1);
+    let guqing = new_audit_item_id("canon", &chapter_one, 2);
+    let relation_anchor = new_audit_item_id("canon", &chapter_one, 3);
     let opening_contexts = gateway.planning_contexts.lock().unwrap();
     assert_eq!(opening_contexts.len(), 3);
     assert_eq!(opening_contexts[0]["selectedEvidence"], json!([]));
@@ -1129,9 +1164,9 @@ fn f03_formal_context_projection_carries_three_openings_through_long_form_and_re
         .iter()
         .filter_map(|fact| fact["factId"].as_str())
         .collect::<std::collections::BTreeSet<_>>();
-    assert!(opening_two_fact_ids.contains("fact:b02:opening:1"));
-    assert!(opening_two_fact_ids.contains("fact:b02:guqing"));
-    assert!(opening_two_fact_ids.contains("fact:b02:relation-anchor"));
+    assert!(opening_two_fact_ids.contains(opening_one.as_str()));
+    assert!(opening_two_fact_ids.contains(guqing.as_str()));
+    assert!(opening_two_fact_ids.contains(relation_anchor.as_str()));
     assert_eq!(
         opening_contexts[1]["selectedEvidence"]
             .as_array()
@@ -1181,9 +1216,9 @@ fn f03_formal_context_projection_carries_three_openings_through_long_form_and_re
                 &connection,
                 &project_id,
                 &[
-                    "fact:b02:opening:1",
-                    "fact:b02:guqing",
-                    "fact:b02:relation-anchor",
+                    opening_one.as_str(),
+                    guqing.as_str(),
+                    relation_anchor.as_str(),
                 ],
                 100,
             )
@@ -2577,6 +2612,230 @@ fn b6_rv32_second_volume_chapters_one_through_three_do_not_stale_signing() {
 }
 
 #[test]
+fn a_later_unverified_relationship_transition_keeps_signing_fail_closed() {
+    // 假如开篇已签约，当后续关系更新没有正文证据时，那么签约不能继续作为当前有效依据。
+    let (state, _temp) = state(true);
+    let project_id = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project_id);
+    command(
+        &state,
+        &project_id,
+        "quality:signing",
+        "opening_evaluate",
+        json!({}),
+    );
+    command(
+        &state,
+        &project_id,
+        "quality:confirm",
+        "signing_confirm",
+        json!({"platformId":"FANQIE"}),
+    );
+    b6_rv32_fixture::commit_second_volume_chapters(&state, &project_id);
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let receipt = NarrativeRepository::canonical_project_head_ref(
+        &connection,
+        &project_id,
+        "SimulatedSigningReceipt",
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        ai_novel_production_system_core::signing::signing_evaluation_is_current_in_project(
+            &connection,
+            &project_id,
+            &receipt
+        )
+        .unwrap()
+    );
+    let later_chapter: String = connection.query_row(
+        "SELECT c.chapter_id FROM chapters c JOIN volumes v ON v.volume_id=c.volume_id WHERE c.project_id=?1 AND v.volume_no=2 AND c.chapter_no=1", [&project_id], |row| row.get(0),
+    ).unwrap();
+    let bundle: CommitBundle = serde_json::from_value(json!({
+        "commitId":"commit:quality:later-relation","projectId":project_id,
+        "commandId":"cmd:quality:later-relation","idempotencyKey":"key:quality:later-relation",
+        "expectedProjectRevision":revision(&state, &project_id),"contractVersion":"m0a.v1","createdAt":NOW,
+        "artifacts":[],"canonDelta":[{"factId":"fact:quality:later-relation",
+            "subjectId":"entity:b02:linzhou","predicate":"allied_with",
+            "objectJson":{"objectId":"entity:b02:guqing","state":"结盟"},
+            "relationId":"relation:b02:linzhou-guqing","validFromChapterId":later_chapter,
+            "authorityLevel":"C","payloadJson":{"chapterId":later_chapter}}]
+    })).unwrap();
+    CommitService::commit(&connection, &bundle, NOW).unwrap();
+    let current: String = connection.query_row("SELECT predicate FROM canon_relations WHERE project_id=?1 AND relation_id='relation:b02:linzhou-guqing'", [&project_id], |row| row.get(0)).unwrap();
+    assert_eq!(current, "allied_with");
+    assert!(
+        !ai_novel_production_system_core::signing::signing_evaluation_is_current_in_project(
+            &connection,
+            &project_id,
+            &receipt
+        )
+        .unwrap()
+    );
+}
+
+#[test]
+fn a_later_evidenced_relationship_transition_keeps_the_signed_opening_current() {
+    // 假如开篇已签约，当后续正式章节有证据地推进同向关系时，
+    // 那么开篇签约仍有效，当前关系反映新章节，回执可在重新打开后验证。
+    let (state, _temp) = state(true);
+    let project_id = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project_id);
+    command(
+        &state,
+        &project_id,
+        "quality:signing:evidenced",
+        "opening_evaluate",
+        json!({}),
+    );
+    command(
+        &state,
+        &project_id,
+        "quality:confirm:evidenced",
+        "signing_confirm",
+        json!({"platformId":"FANQIE"}),
+    );
+    b6_rv32_fixture::commit_second_volume_chapters_with_relation(&state, &project_id);
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let current: String = connection.query_row("SELECT predicate FROM canon_relations WHERE project_id=?1 AND relation_id='relation:b02:linzhou-guqing'", [&project_id], |row| row.get(0)).unwrap();
+    assert_eq!(current, "allied_with");
+    let receipt = NarrativeRepository::canonical_project_head_ref(
+        &connection,
+        &project_id,
+        "SimulatedSigningReceipt",
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        ai_novel_production_system_core::signing::signing_evaluation_is_current_in_project(
+            &connection,
+            &project_id,
+            &receipt
+        )
+        .unwrap()
+    );
+    drop(connection);
+    let reopened = state.manager.open(&project_id, "", NOW).unwrap();
+    assert!(
+        ai_novel_production_system_core::signing::signing_evaluation_is_current_in_project(
+            &reopened,
+            &project_id,
+            &receipt
+        )
+        .unwrap()
+    );
+}
+
+#[test]
+fn a_tampered_later_relationship_quote_makes_signing_stale() {
+    let (state, _temp) = state(true);
+    let project_id = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project_id);
+    command(
+        &state,
+        &project_id,
+        "quality:signing:tamper",
+        "opening_evaluate",
+        json!({}),
+    );
+    command(
+        &state,
+        &project_id,
+        "quality:confirm:tamper",
+        "signing_confirm",
+        json!({"platformId":"FANQIE"}),
+    );
+    b6_rv32_fixture::commit_second_volume_chapters_with_relation(&state, &project_id);
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let receipt = NarrativeRepository::canonical_project_head_ref(
+        &connection,
+        &project_id,
+        "SimulatedSigningReceipt",
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        ai_novel_production_system_core::signing::signing_evaluation_is_current_in_project(
+            &connection,
+            &project_id,
+            &receipt
+        )
+        .unwrap()
+    );
+    connection.execute("UPDATE canon_evidence SET quote='伪造的证据' WHERE evidence_id='evidence:quality:later-relation'", []).unwrap();
+    assert!(
+        !ai_novel_production_system_core::signing::signing_evaluation_is_current_in_project(
+            &connection,
+            &project_id,
+            &receipt
+        )
+        .unwrap()
+    );
+}
+
+#[test]
+fn a_reversed_relation_id_is_rolled_back_without_invalidating_signing() {
+    let (state, _temp) = state(true);
+    let project_id = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project_id);
+    command(
+        &state,
+        &project_id,
+        "quality:signing:reverse",
+        "opening_evaluate",
+        json!({}),
+    );
+    command(
+        &state,
+        &project_id,
+        "quality:confirm:reverse",
+        "signing_confirm",
+        json!({"platformId":"FANQIE"}),
+    );
+    b6_rv32_fixture::commit_second_volume_chapters(&state, &project_id);
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let receipt = NarrativeRepository::canonical_project_head_ref(
+        &connection,
+        &project_id,
+        "SimulatedSigningReceipt",
+    )
+    .unwrap()
+    .unwrap();
+    let before = revision(&state, &project_id);
+    let bundle: CommitBundle = serde_json::from_value(json!({
+        "commitId":"commit:quality:reverse","projectId":project_id,
+        "commandId":"cmd:quality:reverse","idempotencyKey":"key:quality:reverse",
+        "expectedProjectRevision":before,"contractVersion":"m0a.v1","createdAt":NOW,
+        "artifacts":[],"canonDelta":[{"factId":"fact:quality:reverse",
+            "subjectId":"entity:b02:guqing","predicate":"distrusts",
+            "objectJson":{"objectId":"entity:b02:linzhou"},
+            "relationId":"relation:b02:linzhou-guqing","authorityLevel":"C"}]
+    }))
+    .unwrap();
+    assert!(CommitService::commit(&connection, &bundle, NOW)
+        .unwrap_err()
+        .to_string()
+        .contains("RELATION_IDENTITY_CONFLICT"));
+    assert_eq!(revision(&state, &project_id), before);
+    let count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM canon_facts WHERE fact_id='fact:quality:reverse'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0);
+    assert!(
+        ai_novel_production_system_core::signing::signing_evaluation_is_current_in_project(
+            &connection,
+            &project_id,
+            &receipt
+        )
+        .unwrap()
+    );
+}
+
+#[test]
 fn b6_rv32_change_to_opening_chapter_two_final_makes_signing_stale() {
     let (state, _temp) = state(true);
     let project_id = create_opening_project(&state);
@@ -3453,4 +3712,351 @@ fn b02_book_plan_runtime_phases_are_backend_projected_with_one_active_step() {
     println!(
         "B02_PLAN_PHASE_RESULT ordered=PASS backend_active=PASS terminal_zero=PASS status=PASS"
     );
+}
+
+#[test]
+fn b3b_signing_evaluation_runs_after_chapter_one_used_its_whole_run_quota() {
+    let (state, _temp) = state(true);
+    let project_id = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project_id);
+    // Chapter 1 has used every model run its production budget allows.
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    connection
+        .execute(
+            "UPDATE chapter_production_budgets SET hard_max_model_runs=(SELECT COUNT(*) FROM model_runs JOIN jobs ON jobs.job_id=model_runs.job_id WHERE jobs.chapter_id=chapter_production_budgets.chapter_id), soft_max_model_runs=0 WHERE chapter_id=(SELECT chapter_id FROM chapters WHERE project_id=?1 AND chapter_no=1)",
+            [&project_id],
+        )
+        .unwrap();
+    drop(connection);
+
+    let evaluation = command(
+        &state,
+        &project_id,
+        "b3b:signing:after-quota",
+        "opening_evaluate",
+        json!({}),
+    );
+
+    assert!(evaluation["result"]["modelRunId"].as_str().is_some());
+}
+
+/// A real run (2026-10-19) compiled chapter 4 without a scope selection: the
+/// plan's own task pulls an opening-reality rule into the state digest, so
+/// the plan must carry the digest of the state it was planned against.
+#[test]
+fn f03_chapter_four_plan_without_scope_selection_is_not_stale() {
+    let temp = tempfile::tempdir().expect("F03 app-data directory");
+    let gateway = Arc::new(LongEvidenceGateway::new());
+    let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway);
+    let project_id = create_opening_project(&state);
+    commit_three_opening_chapters_with_outputs(&state, &project_id);
+    command(
+        &state,
+        &project_id,
+        "f03s:evaluate",
+        "opening_evaluate",
+        json!({}),
+    );
+    command(
+        &state,
+        &project_id,
+        "f03s:book-plan",
+        "book_plan_revise",
+        json!({}),
+    );
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let volume_id: String = connection
+        .query_row(
+            "SELECT c.volume_id FROM chapters c JOIN volumes v ON v.project_id=c.project_id AND v.volume_id=c.volume_id WHERE c.project_id=?1 AND v.volume_no=1 AND c.chapter_no=1",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(connection);
+    for (id, kind) in [
+        ("f03s:volume-intent", "planning_create_volume_intent"),
+        ("f03s:volume-plan", "planning_create_volume_plan"),
+    ] {
+        command(&state, &project_id, id, kind, json!({"volumeId":volume_id}));
+    }
+    let prepared = command(
+        &state,
+        &project_id,
+        "f03s:chapter-4-prepare",
+        "planning_prepare_next_chapter",
+        json!({"volumeId":volume_id}),
+    );
+    let chapter_four = prepared["chapter"]["chapterId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let compiled = command(
+        &state,
+        &project_id,
+        "f03s:chapter-4-plan",
+        "planning_compile_chapter_plan",
+        json!({"chapterId":chapter_four}),
+    );
+    assert_eq!(compiled["finalStatus"], "committed");
+}
+
+/// The first signing reply is broken JSON (as a real run returned on
+/// 2026-10-19); later replies are well formed.
+struct BrokenSigningOnceGateway {
+    inner: B02Gateway,
+    signings: std::sync::atomic::AtomicUsize,
+}
+
+impl ProductionModelGateway for BrokenSigningOnceGateway {
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        if capability == "OPENING_SIGNING_EVALUATION"
+            && self
+                .signings
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 0
+        {
+            return Ok(ProductionModelResponse {
+                output: Value::Null,
+                raw_response: Some(
+                    json!({"choices":[{"message":{"content":"{\"items\":[{\"itemId\":\"R2-1\" \"result\""},"finish_reason":"stop"}]})
+                        .to_string(),
+                ),
+                usage: ProductionModelResponse::deterministic(Value::Null).usage,
+            });
+        }
+        self.inner.invoke(capability, input)
+    }
+}
+
+#[test]
+fn b3b_broken_signing_json_is_resent_once() {
+    let gateway = Arc::new(BrokenSigningOnceGateway {
+        inner: B02Gateway::new(true, "A"),
+        signings: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let (state, _temp) = state_with_custom_gateway(gateway.clone());
+    let project_id = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project_id);
+    let evaluation = command(
+        &state,
+        &project_id,
+        "b3b:signing:broken-json",
+        "opening_evaluate",
+        json!({}),
+    );
+    assert_eq!(evaluation["result"]["status"], "PASS");
+    assert_eq!(
+        gateway.signings.load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
+}
+
+struct InvalidSigningOnceGateway {
+    inner: B02Gateway,
+    signing_inputs: Mutex<Vec<Value>>,
+    invalidate: fn(&mut Vec<Value>, usize),
+}
+
+impl ProductionModelGateway for InvalidSigningOnceGateway {
+    fn resolve_profile(&self) -> Result<ResolvedProviderProfile, String> {
+        self.inner.resolve_profile()
+    }
+
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        if capability == "OPENING_SIGNING_EVALUATION" {
+            let mut inputs = self.signing_inputs.lock().unwrap();
+            inputs.push(input.clone());
+            let mut output = full_signing_items(input);
+            (self.invalidate)(
+                output["payload"]["signingEvaluationItems"]
+                    .as_array_mut()
+                    .unwrap(),
+                inputs.len(),
+            );
+            return Ok(ProductionModelResponse::deterministic(output));
+        }
+        self.inner.invoke(capability, input)
+    }
+}
+
+#[test]
+fn qc1_a_quote_the_chapters_do_not_have_is_asked_for_once_more() {
+    // Acceptance 2026-11-01 (seventh run): E3-8 quoted two places of
+    // chapter 1 joined together, and Fanqie came back unverified.
+    let gateway = Arc::new(InvalidSigningOnceGateway {
+        inner: B02Gateway::new(true, "A"),
+        signing_inputs: Mutex::new(Vec::new()),
+        invalidate: |items, attempt| {
+            if attempt == 1 {
+                items
+                    .iter_mut()
+                    .find(|item| item["itemId"] == "E3-8")
+                    .unwrap()["evidence"][0]["exactQuote"] = json!("林舟说完就走，顾清没有拦他。");
+            }
+        },
+    });
+    let (state, _temp) = state_with_custom_gateway(gateway.clone());
+    let project_id = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project_id);
+    let evaluation = command(
+        &state,
+        &project_id,
+        "qc1:signing:stitched",
+        "opening_evaluate",
+        json!({}),
+    );
+    assert_eq!(evaluation["result"]["status"], "PASS", "{evaluation}");
+    let inputs = gateway.signing_inputs.lock().unwrap();
+    assert_eq!(inputs.len(), 2);
+    let feedback = inputs[1]["outputFeedback"].to_string();
+    assert!(feedback.contains("E3-8"), "{feedback}");
+}
+
+#[test]
+fn a_missing_signing_item_is_requested_again_and_the_receipt_names_the_accepted_run() {
+    let gateway = Arc::new(InvalidSigningOnceGateway {
+        inner: B02Gateway::new(true, "A"),
+        signing_inputs: Mutex::new(Vec::new()),
+        invalidate: |items, attempt| {
+            if attempt == 1 {
+                items.retain(|item| item["itemId"] != "R2-5");
+            } else {
+                items
+                    .iter_mut()
+                    .find(|item| item["itemId"] == "E3-8")
+                    .unwrap()["evidence"][0]["exactQuote"] = json!("林舟说完就走，顾清没有拦他。");
+            }
+        },
+    });
+    let (state, _temp) = state_with_custom_gateway(gateway.clone());
+    let project = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project);
+    let evaluation = command(
+        &state,
+        &project,
+        "qc1:signing:missing-item",
+        "opening_evaluate",
+        json!({}),
+    );
+    assert_eq!(evaluation["result"]["status"], "PASS");
+    let inputs = gateway.signing_inputs.lock().unwrap();
+    assert_eq!(inputs.len(), 2);
+    assert!(inputs[1]["outputFeedback"].to_string().contains("R2-5"));
+    let connection = state.manager.open(&project, "", NOW).unwrap();
+    let (attempt, status): (i64, String) = connection
+        .query_row(
+            "SELECT attempt_no,status FROM model_runs WHERE project_id=?1 AND model_run_id=?2",
+            libsql_rusqlite::params![
+                project,
+                evaluation["result"]["modelRunId"].as_str().unwrap()
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((attempt, status.as_str()), (2, "COMPLETED"));
+    let items = evaluation["result"]["itemResults"].as_array().unwrap();
+    let item = |id: &str| items.iter().find(|item| item["itemId"] == id).unwrap();
+    assert_eq!(
+        item("R2-5")["modelRunId"],
+        evaluation["result"]["modelRunId"]
+    );
+    assert!(item("E3-8")["modelRunId"].is_string());
+    assert_ne!(item("E3-8")["modelRunId"], item("R2-5")["modelRunId"]);
+}
+
+/// Real run 2026-11-26: 15 items came back twice, word for word, and the
+/// reply asked for instead left one out.
+#[test]
+fn signing_items_returned_twice_word_for_word_count_once() {
+    let gateway = Arc::new(InvalidSigningOnceGateway {
+        inner: B02Gateway::new(true, "A"),
+        signing_inputs: Mutex::new(Vec::new()),
+        invalidate: |items, _| items.extend(items.clone()),
+    });
+    let (state, _temp) = state_with_custom_gateway(gateway.clone());
+    let project = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project);
+    let evaluation = command(
+        &state,
+        &project,
+        "qc1:signing:word-for-word",
+        "opening_evaluate",
+        json!({}),
+    );
+    assert_eq!(evaluation["result"]["status"], "PASS", "{evaluation}");
+    assert_eq!(gateway.signing_inputs.lock().unwrap().len(), 1);
+}
+
+/// Real run 2026-11-25: items came back twice and the opening ended
+/// unverified without asking again.
+#[test]
+fn signing_items_returned_twice_are_requested_again() {
+    let gateway = Arc::new(InvalidSigningOnceGateway {
+        inner: B02Gateway::new(true, "A"),
+        signing_inputs: Mutex::new(Vec::new()),
+        invalidate: |items, attempt| {
+            if attempt == 1 {
+                let mut again = items
+                    .iter()
+                    .find(|item| item["itemId"] == "E3-8")
+                    .unwrap()
+                    .clone();
+                again["result"] = json!("FAIL");
+                items.push(again);
+            }
+        },
+    });
+    let (state, _temp) = state_with_custom_gateway(gateway.clone());
+    let project = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project);
+    let evaluation = command(
+        &state,
+        &project,
+        "qc1:signing:returned-twice",
+        "opening_evaluate",
+        json!({}),
+    );
+    assert_eq!(evaluation["result"]["status"], "PASS", "{evaluation}");
+    let inputs = gateway.signing_inputs.lock().unwrap();
+    assert_eq!(inputs.len(), 2);
+    let feedback = inputs[1]["outputFeedback"].to_string();
+    assert!(feedback.contains("E3-8（重复）"), "{feedback}");
+}
+
+#[test]
+fn signing_sentence_numbers_bind_the_exact_committed_prose() {
+    let gateway = Arc::new(InvalidSigningOnceGateway {
+        inner: B02Gateway::new(true, "A"),
+        signing_inputs: Mutex::new(Vec::new()),
+        invalidate: |items, _| {
+            for item in items {
+                item["evidence"] = json!([{"chapterNo":1,"sentence":0}]);
+            }
+        },
+    });
+    let (state, _temp) = state_with_custom_gateway(gateway.clone());
+    let project = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project);
+    let evaluation = command(
+        &state,
+        &project,
+        "qc1:signing:numbered",
+        "opening_evaluate",
+        json!({}),
+    );
+    assert_eq!(evaluation["result"]["status"], "PASS");
+    let inputs = gateway.signing_inputs.lock().unwrap();
+    assert_eq!(inputs.len(), 1);
+    let first = &inputs[0]["taskContext"]["chapters"][0]["sentences"][0];
+    assert_eq!(first["number"], 0);
+    let item = evaluation["result"]["itemResults"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["itemId"] == "R2-5")
+        .unwrap();
+    let evidence = &item["evidence"][0];
+    assert_eq!(evidence["exactQuote"], first["text"]);
+    assert_eq!(evidence["rangeStart"], 0);
+    assert!(evidence["finalChapterRef"]["payloadHash"].is_string());
 }

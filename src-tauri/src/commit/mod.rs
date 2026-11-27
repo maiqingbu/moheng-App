@@ -1,7 +1,7 @@
 use crate::generated::schema_versions::CONTRACT_VERSION;
 use crate::generated::types::{
-    ArtifactRef, CommitBundle, CommitReceipt, DomainReceipt, HeadChange, ProjectCommandReceipt,
-    ProjectCommandReceiptControlResult,
+    ArtifactEnvelope, ArtifactRef, CommitBundle, CommitReceipt, DomainReceipt, HeadChange,
+    ProjectCommandReceipt, ProjectCommandReceiptControlResult,
 };
 use crate::generated::types::{ArtifactScopeLevel, ArtifactType};
 use crate::generated::validators::validate_commit_bundle;
@@ -54,6 +54,10 @@ pub enum CommitError {
     Artifact(#[from] ArtifactError),
     #[error("sqlite: {0}")]
     Sqlite(#[from] libsql_rusqlite::Error),
+    /// A constraint a delta broke, with which delta it was (real run round
+    /// 30: "FOREIGN KEY constraint failed" alone named nothing).
+    #[error("sqlite: {0}")]
+    DeltaConstraint(String),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
 }
@@ -445,6 +449,7 @@ impl CommitService {
         advance_revision: bool,
     ) -> Result<CommitReceipt, CommitError> {
         final_gate::validate(connection, bundle)?;
+        let mut replaced_finals = Vec::new();
         let artifacts_before: i64 = connection.query_row(
             "SELECT COUNT(*) FROM artifacts WHERE project_id = ?1",
             [&bundle.project_id],
@@ -456,6 +461,7 @@ impl CommitService {
             |row| row.get(0),
         )?;
         connection.execute("INSERT INTO commands(project_id, command_id, idempotency_key, request_digest, status, created_at) VALUES (?1, ?2, ?3, ?4, 'PREPARED', ?5)", libsql_rusqlite::params![bundle.project_id, bundle.command_id, bundle.idempotency_key, bundle_digest, bundle.created_at])?;
+        let mut narrative_events = 0;
         for artifact in &bundle.artifacts {
             if !matches!(
                 artifact.artifact_status,
@@ -489,6 +495,13 @@ impl CommitService {
                 let chapter_id = artifact.scope.chapter_id.as_deref().ok_or_else(|| {
                     CommitError::ContractInvalid("B08 FinalChapter scope missing chapterId".into())
                 })?;
+                let previous: Option<(String, i64)> = connection.query_row(
+                    "SELECT final_artifact_id,final_version FROM chapters WHERE project_id=?1
+                     AND chapter_id=?2 AND status='COMMITTED' AND final_artifact_id IS NOT NULL AND final_version IS NOT NULL",
+                    libsql_rusqlite::params![bundle.project_id,chapter_id],
+                    |row| Ok((row.get(0)?,row.get(1)?)),
+                ).optional()?;
+                replaced_finals.extend(previous);
                 let word_count = artifact
                     .payload
                     .get("wordCount")
@@ -498,7 +511,7 @@ impl CommitService {
                             .payload
                             .get("body")
                             .and_then(|value| value.as_str())
-                            .map(|body| body.chars().count() as i64)
+                            .map(crate::chapter_length::character_count)
                     })
                     .unwrap_or(0);
                 let updated = connection.execute(
@@ -510,7 +523,13 @@ impl CommitService {
                         "B08 FinalChapter chapter row not found".into(),
                     ));
                 }
-                materialize_b08_evidence(connection, bundle, artifact, chapter_id, committed_at)?;
+                narrative_events += materialize_b08_evidence(
+                    connection,
+                    bundle,
+                    artifact,
+                    chapter_id,
+                    committed_at,
+                )?;
             }
         }
         if let Some(heads) = &bundle.head_updates {
@@ -541,7 +560,7 @@ impl CommitService {
             .artifacts
             .first()
             .map(|artifact| (artifact.artifact_id.as_str(), artifact.version));
-        let delta_counts = deltas::apply_all(
+        let mut delta_counts = deltas::apply_all(
             connection,
             bundle.canon_delta.as_ref(),
             bundle.obligation_delta.as_ref(),
@@ -554,7 +573,21 @@ impl CommitService {
             bundle.reader_desire_delta.as_ref(),
             committed_at,
             fallback_artifact,
+            bundle
+                .receipt_draft
+                .as_ref()
+                .is_some_and(|draft| draft.domain == "B08_CHAPTER_PRODUCTION"),
         )?;
+        *delta_counts.entry("canon".into()).or_default() += narrative_events;
+        let (reopened, affected_volumes) = deltas::reopen_stage_steps_with_replaced_proof(
+            connection,
+            &bundle.project_id,
+            &replaced_finals,
+            committed_at,
+        )?;
+        if reopened > 0 {
+            *delta_counts.entry("state".into()).or_default() += reopened;
+        }
         crate::repositories::ops::SearchService::apply_commit_delta_in_transaction(
             connection,
             &bundle.artifacts,
@@ -570,6 +603,15 @@ impl CommitService {
             if updated != 1 {
                 return Err(CommitError::RevisionConflict);
             }
+        }
+        for volume_id in affected_volumes {
+            crate::repositories::health::HealthRepository::mark_b09_rebuild_pending(
+                connection,
+                &bundle.project_id,
+                &volume_id,
+                committed_at,
+            )
+            .map_err(|error| CommitError::ProjectCommandApply(error.to_string()))?;
         }
         connection.execute(
             "INSERT INTO project_settings(project_id, setting_key, setting_value, updated_at) VALUES (?1, 'fts.indexedSourceRevision', ?2, ?3) ON CONFLICT(project_id, setting_key) DO UPDATE SET setting_value=excluded.setting_value, updated_at=excluded.updated_at",
@@ -770,7 +812,7 @@ fn materialize_b08_evidence(
     final_chapter: &crate::generated::types::ArtifactEnvelope,
     chapter_id: &str,
     committed_at: &str,
-) -> Result<(), CommitError> {
+) -> Result<i64, CommitError> {
     let records = final_chapter
         .payload
         .get("validatedEvidence")
@@ -783,6 +825,7 @@ fn materialize_b08_evidence(
         .and_then(serde_json::Value::as_str)
         .map(|body| body.chars().count() as i64)
         .unwrap_or(0);
+    let mut narrative_events = 0;
     for record in &records {
         let evidence_id = record
             .get("evidenceId")
@@ -795,6 +838,17 @@ fn materialize_b08_evidence(
             return Err(CommitError::ContractInvalid(
                 "B08 exact evidence range invalid".into(),
             ));
+        }
+        if record.get("eventType").is_some() {
+            materialize_main_event(
+                connection,
+                bundle,
+                final_chapter,
+                chapter_id,
+                record,
+                committed_at,
+            )?;
+            narrative_events += 1;
         }
         connection.execute(
             "INSERT INTO canon_evidence(evidence_id,project_id,fact_id,relation_id,event_id,final_chapter_id,source_artifact_id,source_version,evidence_type,quote,range_start,range_end,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
@@ -849,6 +903,132 @@ fn materialize_b08_evidence(
             ],
         )?;
     }
+    Ok(narrative_events)
+}
+
+fn materialize_main_event(
+    connection: &Connection,
+    bundle: &CommitBundle,
+    chapter: &ArtifactEnvelope,
+    chapter_id: &str,
+    record: &serde_json::Value,
+    committed_at: &str,
+) -> Result<(), CommitError> {
+    use serde_json::json;
+    let invalid = || CommitError::ContractInvalid("B08 main event evidence invalid".into());
+    let event_type = record["eventType"]
+        .as_str()
+        .filter(|value| crate::production::is_main_event_type(value))
+        .ok_or_else(invalid)?;
+    let run_id = record["modelRunId"].as_str().ok_or_else(invalid)?;
+    let job_id = chapter.provenance.job_id.as_deref().ok_or_else(invalid)?;
+    let quote = record["quote"].as_str().ok_or_else(invalid)?;
+    let outcome = record["outcomeQuote"].as_str().ok_or_else(invalid)?;
+    let body = chapter.payload["body"].as_str().ok_or_else(invalid)?;
+    let (start, end) = (
+        record["rangeStart"].as_u64().ok_or_else(invalid)?,
+        record["rangeEnd"].as_u64().ok_or_else(invalid)?,
+    );
+    let binding = record["factId"]
+        .as_str()
+        .map(|fact_id| {
+            bundle
+                .canon_delta
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .find(|delta| {
+                    delta.fact_id == fact_id
+                        && delta.valid_from_chapter_id.as_deref() == Some(chapter_id)
+                        && delta.event_type.is_none()
+                        && record["relationId"] == json!(delta.relation_id)
+                        && delta.payload_json.as_ref().is_some_and(|payload| {
+                            payload.get("eventId") == Some(&json!(format!("event:{fact_id}")))
+                                && payload.get("evidenceRange").is_some_and(|span| {
+                                    span["start"] == start
+                                        && span["end"] == end
+                                        && span["quote"] == quote
+                                })
+                        })
+                })
+                .ok_or_else(invalid)
+        })
+        .transpose()?;
+    let event_id = binding.map_or_else(
+        || format!("event:{}:main", chapter.artifact_id),
+        |delta| format!("event:{}", delta.fact_id),
+    );
+    if record["eventId"] != event_id
+        || (binding.is_none() && (!record["factId"].is_null() || !record["relationId"].is_null()))
+        || !(4..=160).contains(&outcome.chars().count())
+        || !quote.contains(outcome)
+        || !(1..=400).contains(&end.saturating_sub(start))
+        || body
+            .chars()
+            .skip(start as usize)
+            .take((end - start) as usize)
+            .collect::<String>()
+            != quote
+        || bundle
+            .receipt_draft
+            .as_ref()
+            .is_none_or(|draft| draft.domain != "B08_CHAPTER_PRODUCTION")
+    {
+        return Err(invalid());
+    }
+    let mut selected = json!({"eventId":event_id,"eventType":event_type,"modelRunId":run_id,
+        "outcomeQuote":outcome,"evidence":{"start":start,"end":end,"quote":quote}});
+    if let Some(delta) = binding {
+        selected["factId"] = json!(delta.fact_id);
+    }
+    let audit_ref = &chapter.payload["auditRef"];
+    let bound = bundle.artifacts.iter().any(|audit| {
+        audit.artifact_type == ArtifactType::ReviewReport
+            && audit_ref["artifactId"] == audit.artifact_id
+            && audit_ref["version"] == audit.version
+            && audit_ref["payloadHash"] == audit.payload_hash
+            && audit
+                .payload
+                .pointer("/audit/normalization/mainEventSelection")
+                == Some(&selected)
+    });
+    let run_recorded: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM model_runs WHERE project_id=?1 AND model_run_id=?2 AND job_id=?3 AND capability='SELECT_MAIN_EVENT' AND status='COMPLETED')",
+        libsql_rusqlite::params![bundle.project_id, run_id, job_id],
+        |row| row.get(0),
+    )?;
+    if !bound || !run_recorded {
+        return Err(invalid());
+    }
+    let staged_payload = binding.and_then(|delta| delta.payload_json.as_ref());
+    let mut annotation = staged_payload
+        .and_then(|payload| payload.get("event"))
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    annotation.insert("eventTypeSource".into(), json!("model_selection"));
+    annotation.insert("modelRunId".into(), json!(run_id));
+    annotation.insert("outcomeQuote".into(), json!(outcome));
+    let mut payload = staged_payload.map_or_else(|| json!({}), |staged| json!(staged));
+    payload["event"] = json!(annotation);
+    payload["evidenceRange"] = selected["evidence"].clone();
+    let object = binding
+        .and_then(|delta| delta.object_json.as_ref())
+        .map(serde_json::to_string)
+        .transpose()?
+        .unwrap_or_else(|| "{}".into());
+    let subject = binding.and_then(|delta| delta.subject_id.as_deref());
+    let story_time = staged_payload
+        .and_then(|payload| payload.get("storyTime"))
+        .and_then(serde_json::Value::as_str);
+    let story_time_end = staged_payload
+        .and_then(|payload| payload.get("storyTimeEnd"))
+        .and_then(serde_json::Value::as_str)
+        .or(story_time);
+    connection.execute(
+        "INSERT INTO canon_events(event_id,project_id,chapter_id,event_type,subject_id,object_json,story_time,story_time_end,payload_json,source_artifact_id,source_version,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+        libsql_rusqlite::params![event_id, bundle.project_id, chapter_id, event_type, subject, object, story_time, story_time_end, payload.to_string(), chapter.artifact_id, chapter.version, committed_at],
+    )?;
     Ok(())
 }
 

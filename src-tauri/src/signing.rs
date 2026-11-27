@@ -15,7 +15,7 @@ use crate::project_db::connection::open_connection;
 use crate::project_db::paths::AppPaths;
 use crate::project_db::ProjectManager;
 use crate::repositories::narrative::{
-    NarrativeRepository, OpeningActualState, OpeningEvaluationSnapshot,
+    NarrativeRepository, OpeningActualRelation, OpeningActualState, OpeningEvaluationSnapshot,
 };
 use crate::repositories::runtime::{
     DurableJobService, DurableModelRunner, ModelRunSpec, B02_OPENING_EVALUATION_KIND,
@@ -253,7 +253,7 @@ fn model_item_result(
         return empty_model_item(item_id, reason);
     }
     let Some(value) = value else {
-        return empty_model_item(item_id, "模型未返回该必评项。");
+        return empty_model_item(item_id, MISSING_MODEL_ITEM);
     };
     let result = value.get("result").and_then(Value::as_str).unwrap_or("");
     let reason = value
@@ -294,27 +294,131 @@ fn model_item_result(
         else {
             return empty_model_item(item_id, "引用章节不属于本次黄金三章。");
         };
-        if range_start >= range_end
-            || crate::production::exact_quote_span(
+        if let Some(sentence) = evidence_item.get("sentence") {
+            let spans = crate::chapter_craft::sentence_spans(&chapter.body);
+            let Some(&(start, end)) = sentence
+                .as_u64()
+                .and_then(|number| usize::try_from(number).ok())
+                .and_then(|index| spans.get(index))
+            else {
+                return empty_model_item(item_id, UNLOCATED_QUOTE);
+            };
+            let quote = &chapter.body[start..end];
+            let range_start = chapter.body[..start].chars().count();
+            checked_evidence.push(json!({
+                "chapterNo":chapter.chapter_no,"chapterId":chapter.chapter_id,
+                "finalChapterRef":ref_value(&chapter.final_ref),"exactQuote":quote,
+                "rangeStart":range_start,"rangeEnd":range_start + quote.chars().count()
+            }));
+            continue;
+        }
+        let offsets_match = range_start < range_end
+            && crate::production::exact_quote_span(
                 &chapter.body,
                 range_start,
                 range_end,
                 exact_quote,
             )
-            .is_err()
-        {
-            return empty_model_item(item_id, "引用原文或起止位置与已提交正文不完全一致。");
-        }
-        checked_evidence.push(json!({
-            "chapterNo":chapter_no,
+            .is_ok();
+        // A quote located in its chapter (verbatim, or loosely as audit
+        // evidence is) is bound to where it actually is; one located in
+        // exactly one other chapter of the three is bound to that chapter
+        // (owner decision 2026-10-25); anything else is unverified.
+        // Verbatim first in every chapter, then loosely, so a loose match in
+        // the labelled chapter never wins over a verbatim one elsewhere.
+        let find = |locate: fn(&str, &str) -> Option<(usize, usize)>| {
+            locate(&chapter.body, exact_quote)
+                .map(|span| (chapter, span))
+                .or_else(|| {
+                    let mut found = chapters
+                        .iter()
+                        .filter(|other| other.chapter_no != chapter_no)
+                        .filter_map(|other| {
+                            locate(&other.body, exact_quote).map(|span| (other, span))
+                        });
+                    found.next().filter(|_| found.next().is_none())
+                })
+        };
+        let located = offsets_match
+            .then_some((chapter, (range_start, range_end)))
+            .or_else(|| find(crate::production::locate_unique_quote))
+            .or_else(|| find(crate::production::locate_quote_span));
+        let Some((chapter, (range_start, range_end))) = located else {
+            return empty_model_item(item_id, UNLOCATED_QUOTE);
+        };
+        let supplied_quote = exact_quote;
+        let exact_quote = chapter
+            .body
+            .chars()
+            .skip(range_start)
+            .take(range_end - range_start)
+            .collect::<String>();
+        let mut checked = json!({
+            "chapterNo":chapter.chapter_no,
             "chapterId":chapter.chapter_id,
             "finalChapterRef":ref_value(&chapter.final_ref),
             "rangeStart":range_start,
             "rangeEnd":range_end,
             "exactQuote":exact_quote
-        }));
+        });
+        // LD-1.3: a quote a few characters off is bound to its passage and
+        // the model's wording is kept beside it.
+        if supplied_quote != exact_quote {
+            checked["suppliedQuote"] = json!(supplied_quote);
+        }
+        checked_evidence.push(checked);
     }
     json!({"itemId":item_id,"result":result,"reason":reason,"evidence":checked_evidence})
+}
+
+/// Why an item whose quote is in none of the chapters is unverified.
+const UNLOCATED_QUOTE: &str = "引用原文或起止位置与已提交正文不完全一致。";
+const MISSING_MODEL_ITEM: &str = "模型未返回该必评项。";
+const DUPLICATE_MODEL_ITEM: &str = "模型重复返回该评估项。";
+const ITEM_RESULTS_ERROR: &str = "S35 item results:";
+
+/// What S35 puts in its payload for signing.
+const S35_PAYLOAD_FIELDS: [&str; 7] = [
+    "quality_vector",
+    "findings",
+    "promise_coverage",
+    "desire_state",
+    "repetition",
+    "signing_recommendation",
+    "signingEvaluationItems",
+];
+
+/// Payload lists signing never reads: a left-out one is empty.
+const S35_OPTIONAL_PAYLOAD_LISTS: [&str; 1] = ["repair_scope"];
+
+/// QC-1 (acceptance 2026-10-30, sixth run): payload fields the model put
+/// beside the payload instead of in it are moved in, word for word; a field
+/// already in the payload stays. A tolerance for a misplaced level only:
+/// anything else still fails the envelope and is asked for again.
+fn lift_misplaced_payload_fields(value: &mut Value) {
+    let Some(envelope) = value.as_object_mut() else {
+        return;
+    };
+    let mut payload = match envelope.remove("payload") {
+        Some(Value::Object(payload)) => payload,
+        _ => serde_json::Map::new(),
+    };
+    for field in S35_PAYLOAD_FIELDS.iter().chain(&S35_OPTIONAL_PAYLOAD_LISTS) {
+        if !payload.contains_key(*field) {
+            if let Some(moved) = envelope.remove(*field) {
+                payload.insert((*field).to_string(), moved);
+            }
+        }
+    }
+    envelope.insert("payload".into(), Value::Object(payload));
+}
+
+/// What a reply's payload lacks of `S35_PAYLOAD_FIELDS`.
+fn missing_payload_fields(value: &Value) -> Vec<&'static str> {
+    S35_PAYLOAD_FIELDS
+        .into_iter()
+        .filter(|field| value.pointer(&format!("/payload/{field}")).is_none())
+        .collect()
 }
 
 fn valid_s35_signing_envelope(value: &Value, expected_input: &Value) -> bool {
@@ -323,31 +427,29 @@ fn valid_s35_signing_envelope(value: &Value, expected_input: &Value) -> bool {
         && value.get("bundleDigest") == expected_input.get("bundleDigest")
         && value.get("taskId") == expected_input.pointer("/taskContext/taskId")
         && value.get("status").and_then(Value::as_str) == Some("OK")
-        && value.get("sourceRefs").and_then(Value::as_array).is_some()
-        && value.get("assumptions").and_then(Value::as_array).is_some()
-        && value.get("findings").and_then(Value::as_array).is_some()
-        && value.get("contextRefs").and_then(Value::as_array).is_some()
-        && value
-            .get("runtimeCheckRequests")
-            .and_then(Value::as_array)
-            .is_some()
-        && value.get("confidence").and_then(Value::as_f64).is_some()
-        && value
-            .get("nextSkillHints")
-            .and_then(Value::as_array)
-            .is_some()
+        // A bookkeeping list the model left out is empty; one of another
+        // type is still malformed.
         && [
-            "quality_vector",
+            "sourceRefs",
+            "assumptions",
             "findings",
-            "promise_coverage",
-            "desire_state",
-            "repetition",
-            "signing_recommendation",
-            "repair_scope",
-            "signingEvaluationItems",
+            "contextRefs",
+            "runtimeCheckRequests",
+            "nextSkillHints",
         ]
         .iter()
-        .all(|field| value.pointer(&format!("/payload/{field}")).is_some())
+        .all(|field| value.get(*field).is_none_or(Value::is_array))
+        && value.get("confidence").and_then(Value::as_f64).is_some()
+        && S35_PAYLOAD_FIELDS
+            .iter()
+            .all(|field| value.pointer(&format!("/payload/{field}")).is_some())
+        && S35_OPTIONAL_PAYLOAD_LISTS
+            .iter()
+            .all(|field| {
+                value
+                    .pointer(&format!("/payload/{field}"))
+                    .is_none_or(Value::is_array)
+            })
 }
 
 fn model_results(
@@ -380,7 +482,9 @@ fn model_results(
                 unknown = true;
                 continue;
             }
-            if by_id.insert(item_id.to_string(), item).is_some() {
+            // The same item word for word says nothing new.
+            let earlier = by_id.insert(item_id.to_string(), item);
+            if earlier.is_some_and(|earlier| earlier != item) {
                 duplicates.insert(item_id.to_string());
             }
         }
@@ -390,11 +494,7 @@ fn model_results(
         .map(|item_id| {
             let forced = envelope_failure
                 .or_else(|| unknown.then_some("模型输出包含未知评估项，未按其结果判定。"))
-                .or_else(|| {
-                    duplicates
-                        .contains(item_id)
-                        .then_some("模型重复返回该评估项。")
-                });
+                .or_else(|| duplicates.contains(item_id).then_some(DUPLICATE_MODEL_ITEM));
             model_item_result(by_id.get(item_id).copied(), item_id, chapters, forced)
         })
         .collect()
@@ -459,7 +559,10 @@ fn read_originality_corpus(
             CatalogRepository::list_projects(&catalog).map_err(|error| error.to_string())
         }) {
         Ok(projects) => {
-            for project in projects {
+            for project in projects
+                .into_iter()
+                .filter(|project| matches!(project.lifecycle.as_str(), "ACTIVE" | "ARCHIVED"))
+            {
                 if project.project_id == project_id {
                     found_current = true;
                     match NarrativeRepository::canonical_final_head_refs(
@@ -536,7 +639,6 @@ fn read_originality_corpus(
 }
 
 fn has_duplicate_long_span(chapters: &[ChapterInput], corpus: &OriginalityCorpus) -> bool {
-    const MIN_SPAN: usize = 100;
     let current_ids = chapters
         .iter()
         .map(|chapter| chapter.final_ref.artifact_id.as_str())
@@ -545,24 +647,12 @@ fn has_duplicate_long_span(chapters: &[ChapterInput], corpus: &OriginalityCorpus
         .bodies
         .iter()
         .filter(|(artifact_id, _)| !current_ids.contains(artifact_id.as_str()))
-        .map(|(_, body)| body.chars().collect::<Vec<_>>())
-        .collect::<Vec<_>>();
-    let mut seen = BTreeSet::<String>::new();
-    for body in &external {
-        for window in body.windows(MIN_SPAN) {
-            seen.insert(window.iter().collect());
-        }
-    }
-    for chapter in chapters {
-        let chars = chapter.body.chars().collect::<Vec<_>>();
-        for window in chars.windows(MIN_SPAN) {
-            if seen.contains(&window.iter().collect::<String>()) {
-                return true;
-            }
-            seen.insert(window.iter().collect());
-        }
-    }
-    false
+        .map(|(_, body)| body.as_str());
+    crate::chapter_craft::originality_duplicate(
+        external,
+        chapters.iter().map(|chapter| chapter.body.as_str()),
+    )
+    .is_some()
 }
 
 fn punctuation_or_layout_findings(body: &str) -> Vec<String> {
@@ -577,6 +667,17 @@ fn punctuation_or_layout_findings(body: &str) -> Vec<String> {
     }) {
         findings.push("连续重复标点".to_string());
     }
+    // A decimal point or clock colon between digits is a number separator,
+    // not punctuation.
+    let punctuation_use = |half: char| {
+        chars.iter().enumerate().any(|(index, character)| {
+            *character == half
+                && !(matches!(half, '.' | ':')
+                    && index > 0
+                    && chars[index - 1].is_ascii_digit()
+                    && chars.get(index + 1).is_some_and(char::is_ascii_digit))
+        })
+    };
     for (full, half) in [
         ('，', ','),
         ('。', '.'),
@@ -585,7 +686,7 @@ fn punctuation_or_layout_findings(body: &str) -> Vec<String> {
         ('：', ':'),
         ('；', ';'),
     ] {
-        if body.contains(full) && body.contains(half) {
+        if body.contains(full) && punctuation_use(half) {
             findings.push(format!("全半角标点混用:{full}{half}"));
         }
     }
@@ -614,11 +715,15 @@ fn outline_findings(body: &str) -> Vec<String> {
                 .chars()
                 .take_while(|character| character.is_ascii_digit())
                 .count();
+            let mut after = trimmed.chars().skip(numbered);
+            // A digit after the mark makes a date or a decimal, not a list.
             if numbered > 0
-                && trimmed
-                    .chars()
-                    .nth(numbered)
+                && after
+                    .next()
                     .is_some_and(|character| matches!(character, '.' | '、' | ')' | '）'))
+                && !after
+                    .next()
+                    .is_some_and(|character| character.is_ascii_digit())
             {
                 return Some(trimmed.to_string());
             }
@@ -648,17 +753,22 @@ fn max_recap_overlap(current: &str, previous: &str) -> usize {
 }
 
 fn repeated_phrase_count(chapters: &[ChapterInput]) -> usize {
-    let mut counts = BTreeMap::<String, usize>::new();
-    for chapter in chapters {
-        let chars = chapter.body.chars().collect::<Vec<_>>();
-        for window in chars.windows(12) {
-            *counts.entry(window.iter().collect()).or_default() += 1;
-        }
-    }
-    counts.values().filter(|count| **count >= 3).count()
+    crate::chapter_craft::signing_repeated_phrase_windows(
+        chapters.iter().map(|chapter| chapter.body.as_str()),
+    )
+    .len()
 }
 
-fn deterministic_results(chapters: &[ChapterInput], corpus: &OriginalityCorpus) -> Vec<Value> {
+/// Characters an opening chapter needs at least, unless its platform's range
+/// starts lower (LD-1.5: 番茄 and 七猫 chapters run from 1800).
+const OPENING_CHAPTER_MIN_CHARACTERS: usize = 2000;
+const OPENING_CHAPTER_MAX_CHARACTERS: usize = 5000;
+
+fn deterministic_results(
+    chapters: &[ChapterInput],
+    corpus: &OriginalityCorpus,
+    min_characters: usize,
+) -> Vec<Value> {
     let complete_chapters = chapters.len()
         == crate::repositories::project_entry::OPENING_CHAPTER_COUNT as usize
         && chapters
@@ -667,12 +777,13 @@ fn deterministic_results(chapters: &[ChapterInput], corpus: &OriginalityCorpus) 
             .all(|(index, chapter)| chapter.chapter_no == index as i64 + 1);
     let length_metrics = chapters
         .iter()
-        .map(|chapter| json!({"chapterNo":chapter.chapter_no,"titlePresent":!chapter.title.trim().is_empty(),"characters":chapter.body.chars().count()}))
+        .map(|chapter| json!({"chapterNo":chapter.chapter_no,"titlePresent":!chapter.title.trim().is_empty(),"characters":crate::chapter_length::character_count(&chapter.body)}))
         .collect::<Vec<_>>();
     let length_fail = !complete_chapters
         || chapters.iter().any(|chapter| {
-            let count = chapter.body.chars().count();
-            chapter.title.trim().is_empty() || !(2000..=5000).contains(&count)
+            let count = crate::chapter_length::character_count(&chapter.body) as usize;
+            chapter.title.trim().is_empty()
+                || !(min_characters..=OPENING_CHAPTER_MAX_CHARACTERS).contains(&count)
         });
     let formatting = chapters
         .iter()
@@ -706,7 +817,8 @@ fn deterministic_results(chapters: &[ChapterInput], corpus: &OriginalityCorpus) 
             } else {
                 "与可读取的已提交正文未发现至少 100 字连续重复。"
             },
-            json!({"corpusDigest":corpus.digest,"complete":corpus.complete,"minimumDuplicateSpanChars":100}),
+            json!({"corpusDigest":corpus.digest,"complete":corpus.complete,
+                "minimumDuplicateSpanChars":crate::chapter_craft::ORIGINALITY_SPAN_CHARS}),
         ),
         status_result(
             "F1-1",
@@ -1154,7 +1266,11 @@ fn signing_model_input(
         "projectId":project_id,
         "runtimeStage":"SIGNING_REVIEW",
         "boundedRefs":sources.iter().map(|(kind,reference)| json!({"kind":kind,"reference":ref_value(reference)})).collect::<Vec<_>>(),
-        "chapters":chapters.iter().map(|chapter| json!({"chapterNo":chapter.chapter_no,"chapterId":chapter.chapter_id,"finalChapterRef":ref_value(&chapter.final_ref),"title":chapter.title,"body":chapter.body})).collect::<Vec<_>>(),
+        "chapters":chapters.iter().map(|chapter| json!({
+            "chapterNo":chapter.chapter_no,"chapterId":chapter.chapter_id,
+            "finalChapterRef":ref_value(&chapter.final_ref),"title":chapter.title,
+            "sentences":crate::chapter_craft::numbered_body_sentences(&chapter.body)
+        })).collect::<Vec<_>>(),
         "storySeed":book_seed,
         "storyConstitution":constitution,
         "mainContract":main_contract,
@@ -1162,6 +1278,13 @@ fn signing_model_input(
         "openingCanonRefs":snapshot.opening_canon_refs,
         "signingEvidenceRefs":snapshot.signing_evidence_refs,
         "sourceEvidence":snapshot.chapters.iter().map(|chapter| json!({"chapterNo":chapter.chapter_no,"evidence":chapter.evidence.iter().map(|evidence| json!({"evidenceId":evidence.evidence_id,"quote":evidence.quote,"rangeStart":evidence.range_start,"rangeEnd":evidence.range_end})).collect::<Vec<_>>()})).collect::<Vec<_>>()
+    });
+    let mut transport_schema = output_schema.clone();
+    transport_schema["properties"]["payload"]["properties"]["signingEvaluationItems"]["items"]
+        ["properties"]["evidence"]["items"] = json!({
+        "type":"object","required":["chapterNo","sentence"],"additionalProperties":false,
+        "properties":{"chapterNo":{"type":"integer","minimum":1,"maximum":3},
+                      "sentence":{"type":"integer","minimum":0}}
     });
     let skill_input = json!({
         "skillId":selection.primary.id,
@@ -1175,8 +1298,8 @@ fn signing_model_input(
         "ruleSetVersion":SIGNING_RULESET_VERSION,
         "commonCoreRules":core,
         "platformProfiles":profiles,
-        "outputSchema":output_schema,
-        "prompt":"执行 S35 黄金三章 SigningReview。确定性规则已由 Runtime 完成；逐项评估 C0-2、R2-1 至 R2-6、E3-1 至 E3-9、E3-11，以及五个平台各自的 E3-10。按 outputSchema 返回完整 S35 SkillResultEnvelope，并将评估项放入 payload.signingEvaluationItems。每个项目都必须提供正文中的 exactQuote、chapterNo、rangeStart、rangeEnd；引用必须逐字复制，不得改写、纠正或推测位置。不得评估或生成规避 AI 检测的内容。不得把 C0-4 计入分数，只提示投稿前如实声明。"
+        "outputSchema":transport_schema,
+        "prompt":"执行 S35 黄金三章 SigningReview。确定性规则已由 Runtime 完成；逐项评估 C0-2、R2-1 至 R2-6、E3-1 至 E3-9、E3-11，以及五个平台各自的 E3-10。C0-2 是通用内容禁区：正文是否含违法犯罪教唆、色情、血腥暴力细节、歧视或对真实人物的诽谤等各平台通用的禁止内容，没有则 PASS，并引用一段最能代表全文尺度的正文；它与 AI 声明无关（AI 声明是 C0-4）。按 outputSchema 返回完整 S35 SkillResultEnvelope。每条证据只返回 chapterNo 和该章 sentences 中明确给出的 sentence 编号，由 Runtime 从已提交正文回填逐字引文和范围。不得评估或生成规避 AI 检测的内容。不得把 C0-4 计入分数，只提示投稿前如实声明。"
     });
     let context_digest =
         sha256_canonical(&skill_task_context).map_err(|error| error.to_string())?;
@@ -1400,7 +1523,19 @@ pub fn execute_opening_evaluation_with_observer(
     let (binding, binding_digest, corpus, readiness, profiles) = current_binding(&signing_context)?;
     let core = core_rules()?;
     let schema = model_output_schema()?;
-    let deterministic = deterministic_results(&chapters, &corpus);
+    let work_settings = crate::repositories::provider::ProviderSettingsRepository::read_project(
+        &handle,
+        &project_id,
+    )
+    .map_err(|error| error.to_string())?;
+    let min_characters =
+        crate::chapter_length::work_platform(&handle, &project_id, &work_settings)?
+            .as_deref()
+            .and_then(crate::chapter_length::ChapterLengthRange::for_platform)
+            .map_or(OPENING_CHAPTER_MIN_CHARACTERS, |range| {
+                (range.min as usize).min(OPENING_CHAPTER_MIN_CHARACTERS)
+            });
+    let deterministic = deterministic_results(&chapters, &corpus, min_characters);
     let missing_committed_canon = !readiness
         .get("openingCanonCommitted")
         .and_then(Value::as_bool)
@@ -1461,13 +1596,9 @@ pub fn execute_opening_evaluation_with_observer(
             return Ok((model_results(None, &chapters, Some(reason), None), None));
         }
         let profile = gateway.resolve_profile()?;
-        let first_chapter_id = chapters
-            .first()
-            .map(|chapter| chapter.chapter_id.as_str())
-            .ok_or_else(|| "B02_OPENING_THREE_CHAPTERS_REQUIRED".to_string())?;
-        let budget_id =
-            DurableModelRunner::chapter_budget_id(&handle, &project_id, first_chapter_id)
-                .map_err(|error| error.to_string())?;
+        // The evaluation belongs to the project, not to chapter 1's
+        // production quota, which a hard-won chapter may have used up.
+        let budget_id = DurableModelRunner::project_budget_id(&project_id);
         let run_id = StableIdentityFactory::from_command(
             StableIdKind::ModelRun,
             &format!("{command_id}:signing-evaluation"),
@@ -1499,23 +1630,116 @@ pub fn execute_opening_evaluation_with_observer(
             "bundleDigest":input["bundleDigest"],
             "taskContext":{"taskId":input.pointer("/taskContext/taskId")}
         });
-        let outcome = execute_production_model(
-            &handle,
-            gateway,
+        // QC-1 (sixth acceptance run): a reply whose envelope is off the
+        // S35 schema, after misplaced payload fields are moved in, is asked
+        // for once more with what was wrong; a second one is evaluated as
+        // it is (its model items NOT_VERIFIED). Seventh run: so is a reply
+        // with items quoting what none of the chapters has (two places
+        // joined together).
+        let mut first_checked = Vec::new();
+        let (outcome, accepted_run_id) = crate::production::resend_once_on_invalid_json(
             &spec,
-            SIGNING_EVALUATION_CAPABILITY,
-            input,
-            &now,
+            |spec, resend| {
+                if spec.attempt_no > 1 {
+                    DurableJobService::reopen_b02_phase_job_for_resend(
+                        &handle,
+                        &project_id,
+                        &job_id,
+                        worker_id,
+                        &now,
+                    )
+                    .map_err(|error| error.to_string())?;
+                }
+                let mut input = input.clone();
+                if let crate::production::Resend::OffSpec(error) = resend {
+                    let instruction = match error.split_once(ITEM_RESULTS_ERROR) {
+                    Some((_, items)) => format!(
+                        "上一次回复里这些评估项缺失、重复或原文不可核验：{items}。逐项检查完整编号清单，每项刚好一次。引用使用所选章节实际给出的句子编号，返回完整回复。"
+                    ),
+                    None => format!(
+                        "上一次回复不符合 S35 输出信封：skillId、skillVersion、bundleDigest、taskId、status、confidence 放在最外层，{} 放进 payload，返回完整回复。",
+                        S35_PAYLOAD_FIELDS.join("、")
+                    ),
+                };
+                    input["outputFeedback"] =
+                        json!({"rejectedFor":error,"instruction":instruction});
+                }
+                let mut outcome = execute_production_model(
+                    &handle,
+                    gateway,
+                    spec,
+                    SIGNING_EVALUATION_CAPABILITY,
+                    input,
+                    &now,
+                )?;
+                if let Some(parsed) = outcome.parsed.as_mut() {
+                    lift_misplaced_payload_fields(parsed);
+                    let error = if spec.attempt_no > 1 {
+                        None
+                    } else if !valid_s35_signing_envelope(parsed, &expected_s35) {
+                        Some(format!(
+                            "{}:S35 envelope off its schema; payload lacks {:?}",
+                            crate::model_output::OFF_SPEC,
+                            missing_payload_fields(parsed)
+                        ))
+                    } else {
+                        let checked =
+                            model_results(Some(parsed), &chapters, None, Some(&expected_s35));
+                        let issues = checked
+                            .iter()
+                            .filter_map(|item| {
+                                let issue = match item["reason"].as_str()? {
+                                    MISSING_MODEL_ITEM => "缺失",
+                                    DUPLICATE_MODEL_ITEM => "重复",
+                                    UNLOCATED_QUOTE => "引用无法定位",
+                                    _ => return None,
+                                };
+                                Some(format!("{}（{issue}）", item["itemId"].as_str()?))
+                            })
+                            .collect::<Vec<_>>();
+                        (!issues.is_empty()).then(|| {
+                            first_checked = checked;
+                            format!(
+                                "{}:{ITEM_RESULTS_ERROR} {}",
+                                crate::model_output::OFF_SPEC,
+                                issues.join("、")
+                            )
+                        })
+                    };
+                    if let Some(error) = error {
+                        DurableModelRunner::mark_model_payload_parse_failure(
+                            &handle, spec, &error, &now,
+                        )
+                        .map_err(|error| error.to_string())?;
+                        return Err(error);
+                    }
+                }
+                Ok((outcome, spec.model_run_id.clone()))
+            },
         )?;
-        Ok((
-            model_results(
-                outcome.parsed.as_ref(),
-                &chapters,
-                None,
-                Some(&expected_s35),
-            ),
-            Some(run_id),
-        ))
+        let mut items = model_results(
+            outcome.parsed.as_ref(),
+            &chapters,
+            None,
+            Some(&expected_s35),
+        );
+        let has_evidence = |item: &Value| {
+            item["evidence"]
+                .as_array()
+                .is_some_and(|refs| !refs.is_empty())
+        };
+        for item in &mut items {
+            if let Some(previous) = first_checked
+                .iter()
+                .find(|previous| previous["itemId"] == item["itemId"] && has_evidence(previous))
+            {
+                *item = previous.clone();
+                item["modelRunId"] = json!(run_id);
+            } else if has_evidence(item) {
+                item["modelRunId"] = json!(accepted_run_id);
+            }
+        }
+        Ok((items, Some(accepted_run_id)))
     })();
     let (model_items, model_run_id) = match model_evaluation {
         Ok(result) => result,
@@ -1549,8 +1773,8 @@ pub fn execute_opening_evaluation_with_observer(
     let core_verdict = core_status(&items);
     let word_count = chapters
         .iter()
-        .map(|chapter| chapter.body.chars().count())
-        .sum::<usize>();
+        .map(|chapter| crate::chapter_length::character_count(&chapter.body))
+        .sum::<i64>() as usize;
     let matrix = platform_matrix(&items, &profiles, core_verdict, word_count);
     let overall = if missing_committed_canon {
         "NOT_VERIFIED"
@@ -1587,6 +1811,7 @@ pub fn execute_opening_evaluation_with_observer(
         "openingChapterRefs":snapshot.chapters.iter().map(|chapter| chapter.chapter_id.clone()).collect::<Vec<_>>(),
         "openingCanonRefs":snapshot.opening_canon_refs,
         "signingEvidenceRefs":snapshot.signing_evidence_refs,
+        "openingRelations":actual_state.relations,
         "chapterEvidence":chapters.iter().map(|chapter| json!({"chapterId":chapter.chapter_id,"chapterNo":chapter.chapter_no,"finalChapterRef":ref_value(&chapter.final_ref)})).collect::<Vec<_>>(),
         "sourceRefs":source_refs_value(&sources),
         "modelRunId":model_run_id,
@@ -1709,6 +1934,55 @@ fn load_current_binding(
     Ok((binding, digest))
 }
 
+fn binding_with_evidenced_later_relations(
+    connection: &Connection,
+    project_id: &str,
+    payload: &Value,
+) -> Result<Option<(Value, String)>, String> {
+    let Some(saved) = payload.get("openingRelations") else {
+        return Ok(None);
+    };
+    let signed: Vec<OpeningActualRelation> =
+        serde_json::from_value(saved.clone()).map_err(|error| error.to_string())?;
+    let snapshot = NarrativeRepository::opening_evaluation_snapshot(connection, project_id)
+        .map_err(|error| error.to_string())?;
+    let Some(last) = snapshot.chapters.last() else {
+        return Ok(None);
+    };
+    let mut actual = NarrativeRepository::opening_actual_state(connection, project_id, &snapshot)
+        .map_err(|error| error.to_string())?;
+    if actual.relations.iter().any(|current| {
+        !signed
+            .iter()
+            .any(|old| old.relation_id == current.relation_id)
+    }) {
+        return Ok(None);
+    }
+    for old in &signed {
+        if actual.relations.iter().any(|current| current == old) {
+            continue;
+        }
+        if !NarrativeRepository::later_relation_change_is_evidenced(
+            connection,
+            project_id,
+            &last.chapter_id,
+            old,
+        )
+        .map_err(|error| error.to_string())?
+        {
+            return Ok(None);
+        }
+    }
+    actual.relations = signed;
+    actual.semantic_digest.clear();
+    actual.semantic_digest =
+        sha256_canonical(&serde_json::to_value(&actual).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    let sources = source_refs(connection, project_id)?;
+    let (binding, digest, _) = source_binding(&snapshot, &actual, &sources)?;
+    Ok(Some((binding, digest)))
+}
+
 /// Rebuilds the current signing input binding for receipt verification and
 /// deterministic fixture construction. This read-only helper does not mutate
 /// project state or authorize a signing result.
@@ -1799,10 +2073,17 @@ pub fn signing_evaluation_is_current_in_project(
         Ok(binding) => binding,
         Err(_) => return Ok(false),
     };
+    let matches = |binding: &Value, digest: &str| {
+        payload.get("sourceDigest").and_then(Value::as_str) == Some(digest)
+            && payload.get("binding") == Some(binding)
+            && payload.get("ruleSetDigest") == binding.get("ruleSetDigest")
+    };
+    if matches(&current_binding, &current_digest) {
+        return Ok(true);
+    }
     Ok(
-        payload.get("sourceDigest").and_then(Value::as_str) == Some(current_digest.as_str())
-            && payload.get("binding") == Some(&current_binding)
-            && payload.get("ruleSetDigest") == current_binding.get("ruleSetDigest"),
+        binding_with_evidenced_later_relations(connection, project_id, &payload)?
+            .is_some_and(|(binding, digest)| matches(&binding, &digest)),
     )
 }
 
@@ -1844,7 +2125,36 @@ pub fn require_current_signing_for_long_form_if_present(
     if !signing_receipt_is_current_and_confirmed_in_project(connection, project_id, &receipt_ref)? {
         return Err("SIGNING_EVALUATION_STALE".into());
     }
+    if let Some(book_plan_ref) = approved_book_plan_ref(connection, project_id)? {
+        if !NarrativeRepository::book_plan_uses_signing(
+            connection,
+            project_id,
+            &book_plan_ref,
+            &receipt_ref,
+        )
+        .map_err(|error| error.to_string())?
+        {
+            return Err("BOOK_PLAN_SIGNING_REAPPROVAL_REQUIRED".into());
+        }
+    }
     Ok(())
+}
+
+pub(crate) fn approved_book_plan_ref(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<Option<ArtifactRef>, String> {
+    let Some(reference) =
+        NarrativeRepository::canonical_project_head_ref(connection, project_id, "BookPlan")
+            .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    let payload = NarrativeRepository::artifact_payload_by_ref(connection, project_id, &reference)
+        .map_err(|error| error.to_string())?;
+    Ok(payload
+        .filter(|plan| plan["planningMaturity"] == "APPROVED")
+        .map(|_| reference))
 }
 
 /// Records a separate, explicit user platform confirmation by advancing the
@@ -2049,6 +2359,20 @@ pub fn confirm_signing_platform(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn f1_2_number_separators_are_not_mixed_punctuation() {
+        assert!(punctuation_or_layout_findings("峰值0.87，时间00:07，日期2013.08.17。").is_empty());
+        assert!(!punctuation_or_layout_findings("他走了.她留下。").is_empty());
+    }
+
+    #[test]
+    fn f1_3_a_line_opening_on_a_date_is_not_a_numbered_list() {
+        // Real run 2026-11-01 (round 10): the scene opened on a time stamp.
+        assert!(outline_findings("2041.08.17 06:14:22，城东第三养老院B栋203室。").is_empty());
+        assert!(!outline_findings("1.调查档案馆\n2、找到证人").is_empty());
+    }
+
     use super::*;
 
     fn fixture_chapter(chapter_no: i64, body: &str) -> ChapterInput {
@@ -2100,6 +2424,205 @@ mod tests {
     }
 
     #[test]
+    fn signing_verbatim_unique_quote_with_wrong_offsets_is_located() {
+        let chapter = fixture_chapter(1, "雨夜里，林舟找到一页旧账。");
+        let result = model_item_result(
+            Some(&json!({
+                "itemId":"R2-5",
+                "result":"PASS",
+                "reason":"表述清晰",
+                "evidence":[{"chapterNo":1,"rangeStart":0,"rangeEnd":2,"exactQuote":"林舟找到一页旧账"}]
+            })),
+            "R2-5",
+            &[chapter],
+            None,
+        );
+        assert_eq!(result["result"], "PASS");
+        assert_eq!(result["evidence"][0]["rangeStart"], 4);
+        assert_eq!(result["evidence"][0]["rangeEnd"], 12);
+        assert_eq!(result["evidence"][0]["exactQuote"], "林舟找到一页旧账");
+    }
+
+    #[test]
+    fn signing_verbatim_quote_under_the_wrong_chapter_is_bound_to_its_chapter() {
+        // Real run 2026-10-25: verbatim chapter-2 quotes were labelled 1 and 3.
+        let chapters = [
+            fixture_chapter(1, "雨夜里，林舟找到一页旧账。"),
+            fixture_chapter(2, "他走进地铁站，闸机亮着绿灯。"),
+            fixture_chapter(3, "楼门口也亮着绿灯。"),
+        ];
+        let item = |quote: &str| {
+            model_item_result(
+                Some(&json!({
+                    "itemId":"R2-6","result":"PASS","reason":"语体稳定",
+                    "evidence":[{"chapterNo":1,"rangeStart":0,"rangeEnd":2,"exactQuote":quote}]
+                })),
+                "R2-6",
+                &chapters,
+                None,
+            )
+        };
+        let bound = item("闸机亮着绿灯");
+        assert_eq!(bound["result"], "PASS");
+        assert_eq!(bound["evidence"][0]["chapterNo"], 2);
+        assert_eq!(bound["evidence"][0]["chapterId"], "chapter:2");
+        assert_eq!(bound["evidence"][0]["rangeStart"], 7);
+        // A quote found in more than one other chapter cannot be bound.
+        assert_eq!(item("亮着绿灯")["result"], "NOT_VERIFIED");
+    }
+
+    #[test]
+    fn signing_quote_a_character_off_is_bound_to_its_sentence() {
+        // Real run 2026-10-25: R2-5 quoted 沈砚低头看饼干 for 他低头看饼干.
+        let chapters = [fixture_chapter(
+            1,
+            "雨停了。他低头看饼干。油渍在纸袋底洇成一个不规则的圆，像一枚被压扁的铃铛。",
+        )];
+        let quote = "沈砚低头看饼干。油渍在纸袋底洇成一个不规则的圆，像一枚被压扁的铃铛。";
+        let bound = model_item_result(
+            Some(&json!({
+                "itemId":"R2-5","result":"PASS","reason":"表述清晰",
+                "evidence":[{"chapterNo":1,"rangeStart":0,"rangeEnd":2,"exactQuote":quote}]
+            })),
+            "R2-5",
+            &chapters,
+            None,
+        );
+        assert_eq!(bound["result"], "PASS");
+        assert_eq!(
+            bound["evidence"][0]["exactQuote"],
+            "他低头看饼干。油渍在纸袋底洇成一个不规则的圆，像一枚被压扁的铃铛。"
+        );
+        assert_eq!(bound["evidence"][0]["suppliedQuote"], quote);
+    }
+
+    #[test]
+    fn signing_verbatim_quote_elsewhere_wins_over_a_loose_one_in_the_labelled_chapter() {
+        let chapters = [
+            fixture_chapter(1, "他推开门，看见院子里有一棵老树。"),
+            fixture_chapter(2, "她推开门，看见院子里有一棵老树。"),
+        ];
+        let bound = model_item_result(
+            Some(&json!({
+                "itemId":"R2-6","result":"PASS","reason":"语体稳定",
+                "evidence":[{"chapterNo":1,"rangeStart":0,"rangeEnd":2,"exactQuote":"她推开门，看见院子里有一棵老树。"}]
+            })),
+            "R2-6",
+            &chapters,
+            None,
+        );
+        assert_eq!(bound["evidence"][0]["chapterNo"], 2);
+        assert!(bound["evidence"][0].get("suppliedQuote").is_none());
+    }
+
+    #[test]
+    fn signing_numbered_evidence_cannot_cite_a_missing_sentence() {
+        let chapters = [fixture_chapter(1, "林舟翻开账册。")];
+        let bound = model_item_result(
+            Some(&json!({"result":"PASS","reason":"有物证",
+                         "evidence":[{"chapterNo":1,"sentence":1}]})),
+            "R2-5",
+            &chapters,
+            None,
+        );
+        assert_eq!(bound["result"], "NOT_VERIFIED");
+        assert_eq!(bound["evidence"], json!([]));
+    }
+
+    #[test]
+    fn repeated_identifiers_are_not_repeated_phrases() {
+        // Real run 2026-10-24: an archive number and an account name came
+        // back three times each, as the plot needed them.
+        let coded = fixture_chapter(
+            1,
+            &"他调出档案B-4-1998-07-22，登录账号ZhouYQ-0724。".repeat(3),
+        );
+        assert_eq!(repeated_phrase_count(&[coded]), 0);
+        let prose = fixture_chapter(1, &"他把那张泛黄的旧照片翻过来看了很久。".repeat(3));
+        assert!(repeated_phrase_count(&[prose]) > 0);
+    }
+
+    #[test]
+    fn qc1_payload_fields_put_beside_the_payload_are_moved_into_it() {
+        // Acceptance 2026-10-30 (sixth run): the evaluation put
+        // signingEvaluationItems and five other payload fields at the top
+        // level, and every model item came back NOT_VERIFIED.
+        let expected = json!({"skillVersion":"1.2.0","bundleDigest":"sha256:x","taskContext":{"taskId":"task:1"}});
+        let mut envelope = json!({
+            "skillId":"S35","skillVersion":"1.2.0","bundleDigest":"sha256:x","taskId":"task:1",
+            "status":"OK","confidence":0.9,"findings":[],
+            "payload":{"quality_vector":{},"findings":[]},
+            "promise_coverage":{},"desire_state":{},"repetition":{},
+            "signing_recommendation":"PASS","signingEvaluationItems":[{"itemId":"E3-1"}]
+        });
+        assert!(!valid_s35_signing_envelope(&envelope, &expected));
+        lift_misplaced_payload_fields(&mut envelope);
+        assert!(valid_s35_signing_envelope(&envelope, &expected));
+        assert_eq!(
+            envelope["payload"]["signingEvaluationItems"][0]["itemId"],
+            "E3-1"
+        );
+        assert!(envelope.get("signingEvaluationItems").is_none());
+        assert!(missing_payload_fields(&envelope).is_empty());
+        // A field already in the payload is left as it is.
+        assert_eq!(envelope["payload"]["findings"], json!([]));
+    }
+
+    #[test]
+    fn signing_envelope_treats_a_missing_bookkeeping_list_as_empty() {
+        let expected = json!({"skillVersion":"1.2.0","bundleDigest":"sha256:x","taskContext":{"taskId":"task:1"}});
+        let payload = json!({
+            "quality_vector":{},"findings":[],"promise_coverage":{},"desire_state":{},
+            "repetition":{},"signing_recommendation":"PASS","repair_scope":[],"signingEvaluationItems":[]
+        });
+        // Seen on 2026-10-18: the top-level findings list was left out.
+        let envelope = json!({
+            "skillId":"S35","skillVersion":"1.2.0","bundleDigest":"sha256:x","taskId":"task:1",
+            "status":"OK","sourceRefs":[],"assumptions":[],"contextRefs":[],
+            "runtimeCheckRequests":[],"confidence":0.9,"nextSkillHints":[],"payload":payload
+        });
+        assert!(valid_s35_signing_envelope(&envelope, &expected));
+        // Seen on 2026-10-24: the payload's repair_scope was left out.
+        let mut no_repair_scope = envelope.clone();
+        no_repair_scope["payload"]
+            .as_object_mut()
+            .unwrap()
+            .remove("repair_scope");
+        assert!(valid_s35_signing_envelope(&no_repair_scope, &expected));
+        let mut wrong_identity = envelope.clone();
+        wrong_identity["bundleDigest"] = json!("sha256:other");
+        assert!(!valid_s35_signing_envelope(&wrong_identity, &expected));
+        let mut no_items = envelope;
+        no_items["payload"]
+            .as_object_mut()
+            .unwrap()
+            .remove("signingEvaluationItems");
+        assert!(!valid_s35_signing_envelope(&no_items, &expected));
+    }
+
+    #[test]
+    fn ld3_a_chapter_at_its_platform_length_passes_the_length_rule() {
+        // LD-1.5: 番茄 chapters aim for 2000 and run from 1800.
+        let chapters = (1..=crate::repositories::project_entry::OPENING_CHAPTER_COUNT)
+            .map(|chapter_no| fixture_chapter(chapter_no, &"林".repeat(1900)))
+            .collect::<Vec<_>>();
+        let corpus = OriginalityCorpus {
+            bodies: Vec::new(),
+            digest: "b".repeat(64),
+            complete: true,
+        };
+        let f11 = |min| {
+            deterministic_results(&chapters, &corpus, min)
+                .into_iter()
+                .find(|item| item["itemId"] == "F1-1")
+                .unwrap()["result"]
+                .clone()
+        };
+        assert_eq!(f11(1800), "PASS");
+        assert_eq!(f11(2000), "FAIL");
+    }
+
+    #[test]
     fn first_layer_failure_blocks_model_evaluation() {
         let chapters = (1..=crate::repositories::project_entry::OPENING_CHAPTER_COUNT)
             .map(|chapter_no| fixture_chapter(chapter_no, "短正文"))
@@ -2109,7 +2632,8 @@ mod tests {
             digest: "b".repeat(64),
             complete: true,
         };
-        let deterministic = deterministic_results(&chapters, &corpus);
+        let deterministic =
+            deterministic_results(&chapters, &corpus, OPENING_CHAPTER_MIN_CHARACTERS);
         assert!(deterministic_model_gate(
             &deterministic,
             &chapters,
@@ -2134,8 +2658,64 @@ mod tests {
             digest: "f".repeat(64),
             complete: false,
         };
-        let results = deterministic_results(&chapters, &incomplete_corpus);
+        let results = deterministic_results(
+            &chapters,
+            &incomplete_corpus,
+            OPENING_CHAPTER_MIN_CHARACTERS,
+        );
         assert_eq!(result_for(&results, "C0-3"), "NOT_VERIFIED");
+    }
+
+    #[test]
+    fn originality_corpus_keeps_archived_projects_and_excludes_the_trash() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(temp.path());
+        let manager = ProjectManager::new(paths.clone());
+        let now = "2026-11-24T03:00:00Z";
+        let current = manager.create("prj:current", "Urban case", now).unwrap();
+        let initial = read_originality_corpus(&manager, &paths, &current, "prj:current", now);
+        assert!(initial.complete);
+
+        drop(manager.create("prj:earlier", "Earlier case", now).unwrap());
+        manager
+            .set_lifecycle("prj:earlier", "ARCHIVED", now)
+            .unwrap();
+        let archived = read_originality_corpus(&manager, &paths, &current, "prj:current", now);
+        assert!(archived.complete);
+        assert_ne!(archived.digest, initial.digest);
+
+        manager.delete_to_trash("prj:earlier", now).unwrap();
+        let cleaned = read_originality_corpus(&manager, &paths, &current, "prj:current", now);
+        assert!(cleaned.complete);
+        assert_eq!(cleaned.digest, initial.digest);
+    }
+
+    #[test]
+    fn signing_uses_the_same_hundred_character_boundary_as_expansion() {
+        let phrase = (0..100)
+            .map(|offset| char::from_u32(0x4e00 + offset).unwrap())
+            .collect::<String>();
+        let short = phrase.chars().take(99).collect::<String>();
+        let different_endings = format!("{short}，她回头。{short}。");
+        let exact = format!("{phrase}，她回头。{phrase}。");
+        assert!(crate::chapter_craft::duplicate_in_chapter(&different_endings).is_none());
+        assert_eq!(
+            crate::chapter_craft::duplicate_in_chapter(&exact),
+            Some(phrase.as_str())
+        );
+        let other_copy = OriginalityCorpus {
+            bodies: vec![("reference:4".into(), phrase.clone())],
+            digest: "a".repeat(64),
+            complete: true,
+        };
+        assert!(has_duplicate_long_span(
+            &[fixture_chapter(1, &phrase)],
+            &other_copy
+        ));
+        assert!(!has_duplicate_long_span(
+            &[fixture_chapter(1, &different_endings)],
+            &other_copy
+        ));
     }
 
     #[test]

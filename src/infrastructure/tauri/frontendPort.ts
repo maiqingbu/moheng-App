@@ -36,9 +36,15 @@ import type {
   SettingsProjection,
   ProviderSettingsInput,
   AssistantRepairPlan,
+  AssistantIntentResolution,
+  ProviderModelList,
+  SetupChangeDraftResult,
+  BackupEntry,
   OpeningReadyProjection,
   StoryDirectionProjection,
   StorySetupProjection,
+  CraftSetupProjection,
+  OwnerCorrection,
   VersionProjection,
   VolumeDetailProjection,
   VolumeProgressProjection,
@@ -90,6 +96,7 @@ export class TauriFrontendPort implements FrontendPort {
   queryCompletionQuality(request: ProjectQueryRequest): Promise<SoftCreativeAdviceProjection> { return invokeQuery(this.ipc, 'query_completion_quality', { request }) }
   supportSession(request: { projectId: string; question: string; mode?: 'INSPECT' | 'DIAGNOSE'; scope?: string } & NarrativeRuntimeQueryRequest): Promise<SupportSessionProjection> { return invokeQuery(this.ipc, 'support_session', { request }) }
   supportCheckpointResume(request: { projectId: string; checkpointId: string }): Promise<SupportCheckpointProjection> { return invokeQuery(this.ipc, 'support_checkpoint_resume', { request }) }
+  listProviderModels(settings: ProviderSettingsInput): Promise<ProviderModelList> { return invokeQuery<ProviderModelList>(this.ipc, 'provider_list_models', { settings }) }
   testProvider(settings: ProviderSettingsInput, onStatus?: (status: CommandStatus, message: string) => void): Promise<CommandReceipt> {
     onStatus?.('submitting', settings.apiKey ? '正在测试 Provider…' : '正在等待系统钥匙串授权')
     return invokeQuery<CommandReceipt>(this.ipc, 'test_provider', { settings }).then(receipt => {
@@ -100,8 +107,13 @@ export class TauriFrontendPort implements FrontendPort {
   queryMarketStrategy(request: ProjectQueryRequest) { return invokeQuery<MarketStrategyProjection>(this.ipc, 'query_market_strategy', { request }) }
   queryStoryDirections(request: ProjectQueryRequest) { return invokeQuery<StoryDirectionProjection>(this.ipc, 'query_story_directions', { request }) }
   queryStorySetup(request: ProjectQueryRequest) { return invokeQuery<StorySetupProjection>(this.ipc, 'query_story_setup', { request }) }
+  queryCraftSetup(request: ProjectQueryRequest) { return invokeQuery<CraftSetupProjection>(this.ipc, 'query_craft_setup', { request }) }
+  queryOwnerCorrections(request: ProjectQueryRequest) { return invokeQuery<{ items: OwnerCorrection[] }>(this.ipc, 'query_owner_corrections', { request }) }
   queryOpeningReady(request: ProjectQueryRequest) { return invokeQuery<OpeningReadyProjection>(this.ipc, 'query_opening_ready', { request }) }
   queryAssistantRepairPlan(request: ProjectQueryRequest & { question: string }) { return invokeQuery<AssistantRepairPlan>(this.ipc, 'query_assistant_repair_plan', { request }) }
+  queryBackups(request: ProjectQueryRequest) { return invokeQuery<{ projectId: string; backups: BackupEntry[] }>(this.ipc, 'query_backups', { request }) }
+  classifyAssistantIntent(request: ProjectQueryRequest & { question: string; entry: 'DIAGNOSE' | 'CHANGE' | 'REPAIR' }) { return invokeQuery<AssistantIntentResolution>(this.ipc, 'classify_assistant_intent', { request }) }
+  draftSetupChange(request: ProjectQueryRequest & { question: string; requestedAt?: string }) { return invokeQuery<SetupChangeDraftResult>(this.ipc, 'draft_setup_change', { request }) }
   queryProductionCenter(request: ProjectQueryRequest) { return invokeQuery<ProductionCenterProjection>(this.ipc, 'query_production_center', { request }) }
   queryVolumeList(request: ProjectQueryRequest) { return invokeQuery<PageResult<VolumeSummary>>(this.ipc, 'query_volume_list', { request }) }
   queryVolumeDetail(request: Parameters<FrontendPort['queryVolumeDetail']>[0]) { return invokeQuery<VolumeDetailProjection>(this.ipc, 'query_volume_detail', { request }) }

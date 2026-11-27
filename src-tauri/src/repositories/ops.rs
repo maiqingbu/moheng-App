@@ -618,6 +618,51 @@ pub struct IntegrityReport {
     pub failures: Vec<String>,
 }
 
+/// FX-22: the work's backups, newest first, with the revision each backup
+/// file holds (a restore expects it); unreadable files are marked.
+pub fn list_backups(
+    connection: &Connection,
+    project_id: &str,
+    limit: i64,
+) -> Result<Vec<serde_json::Value>, OpsError> {
+    let mut statement = connection.prepare(
+        "SELECT backup_path, checksum_sha256, created_at FROM backup_manifests WHERE project_id=?1 ORDER BY created_at DESC, rowid DESC LIMIT ?2",
+    )?;
+    let rows = statement
+        .query_map(libsql_rusqlite::params![project_id, limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(path, checksum, created_at)| {
+            let path = std::path::PathBuf::from(path);
+            let name = path.file_name()?.to_str()?.to_owned();
+            let size_bytes = std::fs::metadata(&path).map(|meta| meta.len()).ok();
+            let revision = Connection::open_with_flags(
+                &path,
+                libsql_rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .and_then(|backup| {
+                backup.query_row(
+                    "SELECT revision FROM project_meta WHERE project_id=?1",
+                    [project_id],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .ok();
+            Some(serde_json::json!({
+                "backupName":name,"checksumSha256":checksum,"createdAt":created_at,
+                "revision":revision,"sizeBytes":size_bytes,"available":revision.is_some()
+            }))
+        })
+        .collect())
+}
+
 pub fn deep_integrity_check(
     connection: &Connection,
     project_id: &str,
@@ -682,7 +727,9 @@ pub fn deep_integrity_check(
     // normalized Canon. The check is conditional on a committed FinalChapter so
     // candidate work and historical planning artifacts remain valid.
     let mut final_chapters = connection.prepare(
-        "SELECT scope_key FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter' AND artifact_status='COMMITTED'",
+        // FX-19: chapter scope keys are canonical JSON ({"chapterId":..,
+        // "level":"CHAPTER"}); canon_evidence stores the bare chapter id.
+        "SELECT CASE WHEN json_valid(scope_key) THEN COALESCE(json_extract(scope_key,'$.chapterId'), scope_key) ELSE scope_key END FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter' AND artifact_status='COMMITTED'",
     )?;
     let final_chapter_ids = final_chapters
         .query_map([project_id], |row| row.get::<_, String>(0))?
@@ -1709,6 +1756,373 @@ type SingleChapterRow = (
     String,
     String,
 );
+
+/// A chapter's number and what the committed chapters before it did.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChapterHistory {
+    pub chapter_no: Option<i64>,
+    /// Newest first: `{chapterNo, chapterGoal, ending}`.
+    pub recent: Vec<serde_json::Value>,
+    /// Newest first: the full bodies of the same chapters.
+    pub bodies: Vec<String>,
+    /// Recent event citations from committed chapters for planning and writing.
+    pub actual_events: Vec<serde_json::Value>,
+    /// QC-1.4: the catchphrases the continuity check named in these
+    /// chapters, for the writer to leave out.
+    pub catchphrases: Vec<String>,
+    /// QC-1 (2026-10-30): the details these chapters kept writing, for the
+    /// writer to mention sparingly.
+    pub overused_details: Vec<String>,
+}
+
+pub(crate) struct ContinuityChapter {
+    pub chapter_id: String,
+    pub chapter_no: i64,
+    pub final_ref: crate::generated::types::ArtifactRef,
+    pub body: String,
+    pub outcome_end: Option<usize>,
+}
+
+/// The full-text projection only nominates chapters. The lookup returns the
+/// original body of the current committed head, never text from that projection.
+pub(crate) fn continuity_chapters_for_anchors(
+    connection: &Connection,
+    project_id: &str,
+    before_chapter: i64,
+    anchors: &[String],
+    covered_chapters: &[&str],
+) -> Result<Vec<ContinuityChapter>, OpsError> {
+    let phrases = anchors
+        .iter()
+        .filter(|anchor| {
+            anchor.chars().count() == 4 && anchor.chars().all(crate::chapter_craft::is_han)
+        })
+        .map(|anchor| {
+            format!(
+                "\"{}\"",
+                fts_text(anchor)
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        })
+        .collect::<Vec<_>>();
+    if phrases.is_empty() {
+        return Ok(Vec::new());
+    }
+    let query = format!("body : ({})", phrases.join(" OR "));
+    let mut statement = connection.prepare(
+        "SELECT c.chapter_id,c.chapter_no,h.artifact_id,h.version,h.payload_hash,json_extract(p.payload_json,'$.body') \
+         FROM search_documents_fts f \
+         JOIN chapters c ON c.project_id=f.project_id \
+           AND c.chapter_id=json_extract(CASE WHEN json_valid(f.chapter_id) THEN f.chapter_id END,'$.chapterId') \
+         JOIN canonical_heads h ON h.project_id=c.project_id AND h.artifact_type='FinalChapter' \
+           AND h.artifact_id=c.final_artifact_id AND h.version=c.final_version AND h.scope_key=f.chapter_id \
+         JOIN artifacts a ON a.project_id=h.project_id AND a.artifact_id=h.artifact_id \
+           AND a.version=h.version AND a.payload_hash=h.payload_hash AND a.artifact_status='COMMITTED' \
+         JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version AND p.payload_hash=h.payload_hash \
+         WHERE f.project_id=?1 AND search_documents_fts MATCH ?2 AND f.kind='FinalChapter' \
+           AND f.doc_id='artifact:'||h.artifact_id||':'||h.version AND c.status='COMMITTED' AND c.chapter_no<?3 \
+           AND json_type(p.payload_json,'$.body')='text' \
+           AND c.chapter_id NOT IN (SELECT value FROM json_each(?4)) \
+         ORDER BY bm25(search_documents_fts), c.chapter_no DESC, c.chapter_id LIMIT 16",
+    )?;
+    let covered = serde_json::to_string(covered_chapters)?;
+    let rows = statement.query_map(
+        libsql_rusqlite::params![project_id, query, before_chapter, covered],
+        |row| {
+            Ok(ContinuityChapter {
+                chapter_id: row.get(0)?,
+                chapter_no: row.get(1)?,
+                final_ref: crate::generated::types::ArtifactRef {
+                    artifact_id: row.get(2)?,
+                    version: row.get(3)?,
+                    payload_hash: row.get(4)?,
+                },
+                body: row.get(5)?,
+                outcome_end: None,
+            })
+        },
+    )?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+pub(crate) fn continuity_chapters_with_outcomes(
+    connection: &Connection,
+    project_id: &str,
+    before_chapter: i64,
+    covered_chapters: &[&str],
+) -> Result<Vec<ContinuityChapter>, OpsError> {
+    let mut statement = connection.prepare(
+        "WITH recent AS (
+            SELECT chapter_id,chapter_no,final_artifact_id,final_version FROM chapters
+            WHERE project_id=?1 AND status='COMMITTED' AND chapter_no<?2
+              AND chapter_id NOT IN (SELECT value FROM json_each(?3))
+            ORDER BY chapter_no DESC,chapter_id LIMIT 6
+         ), sources AS (
+            SELECT c.chapter_id,c.chapter_no,h.artifact_id,h.version,h.payload_hash,
+                   json_extract(p.payload_json,'$.body') AS body
+            FROM recent c JOIN canonical_heads h
+              ON h.project_id=?1 AND h.artifact_type='FinalChapter' AND h.scope_level='CHAPTER'
+              AND h.scope_key=json_object('chapterId',c.chapter_id,'level','CHAPTER')
+              AND h.artifact_id=c.final_artifact_id AND h.version=c.final_version
+            JOIN artifacts a ON a.project_id=h.project_id AND a.artifact_id=h.artifact_id
+              AND a.version=h.version AND a.payload_hash=h.payload_hash AND a.artifact_status='COMMITTED'
+            JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version AND p.payload_hash=h.payload_hash
+            WHERE json_type(p.payload_json,'$.body')='text'
+         )
+         SELECT s.*,
+           (SELECT json_extract(e.payload_json,'$.evidenceRange.end') FROM canon_events e
+            WHERE e.project_id=?1 AND e.chapter_id=s.chapter_id
+              AND json_extract(e.payload_json,'$.event.eventTypeSource')='model_selection'
+              AND e.source_artifact_id=s.artifact_id AND e.source_version=s.version
+              AND json_type(e.payload_json,'$.evidenceRange.start')='integer'
+              AND json_type(e.payload_json,'$.evidenceRange.end')='integer'
+              AND json_extract(e.payload_json,'$.evidenceRange.start')>=0
+              AND json_extract(e.payload_json,'$.evidenceRange.end')>json_extract(e.payload_json,'$.evidenceRange.start')
+              AND json_extract(e.payload_json,'$.evidenceRange.end')<=length(s.body)
+              AND length(json_extract(e.payload_json,'$.event.outcomeQuote'))>0
+              AND substr(
+                    s.body,
+                    json_extract(e.payload_json,'$.evidenceRange.start')+1,
+                    json_extract(e.payload_json,'$.evidenceRange.end')-json_extract(e.payload_json,'$.evidenceRange.start')
+                  )=json_extract(e.payload_json,'$.evidenceRange.quote')
+              AND substr(json_extract(e.payload_json,'$.evidenceRange.quote'),
+                         -length(json_extract(e.payload_json,'$.event.outcomeQuote')))
+                  =json_extract(e.payload_json,'$.event.outcomeQuote')
+            ORDER BY e.event_ordinal,e.event_id LIMIT 1) AS outcome_end
+         FROM sources s WHERE outcome_end IS NOT NULL ORDER BY s.chapter_no",
+    )?;
+    let covered = serde_json::to_string(covered_chapters)?;
+    let rows = statement.query_map(
+        libsql_rusqlite::params![project_id, before_chapter, covered],
+        |row| {
+            Ok(ContinuityChapter {
+                chapter_id: row.get(0)?,
+                chapter_no: row.get(1)?,
+                final_ref: crate::generated::types::ArtifactRef {
+                    artifact_id: row.get(2)?,
+                    version: row.get(3)?,
+                    payload_hash: row.get(4)?,
+                },
+                body: row.get(5)?,
+                outcome_end: row
+                    .get::<_, Option<i64>>(6)?
+                    .and_then(|end| usize::try_from(end).ok()),
+            })
+        },
+    )?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+impl ChapterHistory {
+    pub fn number(&self) -> Option<u32> {
+        self.chapter_no
+            .and_then(|number| u32::try_from(number).ok())
+    }
+
+    pub(crate) fn extend_continuation_input(&self, input: &mut serde_json::Value) {
+        const MAX_BODY_CHARS: usize = 2_500;
+        input["recentActualEvents"] = json!(self.actual_events);
+        input["recentCommittedProse"] = json!(self
+            .recent
+            .iter()
+            .zip(&self.bodies)
+            .map(|(chapter, body)| {
+                // The end is what the next chapter continues from.
+                let dropped = body.chars().count().saturating_sub(MAX_BODY_CHARS);
+                let excerpt = body.chars().skip(dropped).collect::<String>();
+                json!({"chapterNo":chapter["chapterNo"],"body":excerpt,
+                       "truncated":excerpt.len() < body.len()})
+            })
+            .collect::<Vec<_>>());
+    }
+}
+
+/// Goals and closing passages (last 200 characters) of the last `limit`
+/// committed chapters before `chapter_id`, so the planner continues the
+/// story instead of repeating it.
+pub fn chapter_history(
+    connection: &Connection,
+    project_id: &str,
+    chapter_id: &str,
+    limit: i64,
+) -> Result<ChapterHistory, OpsError> {
+    let chapter_no: Option<i64> = connection
+        .query_row(
+            "SELECT chapter_no FROM chapters WHERE project_id=?1 AND chapter_id=?2",
+            libsql_rusqlite::params![project_id, chapter_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(number) = chapter_no else {
+        return Ok(ChapterHistory {
+            chapter_no,
+            recent: Vec::new(),
+            bodies: Vec::new(),
+            actual_events: Vec::new(),
+            catchphrases: Vec::new(),
+            overused_details: Vec::new(),
+        });
+    };
+    chapter_history_before(connection, project_id, number, None, limit)
+}
+
+pub(crate) fn volume_chapter_history(
+    connection: &Connection,
+    project_id: &str,
+    volume_id: &str,
+    limit: i64,
+) -> Result<ChapterHistory, OpsError> {
+    chapter_history_before(connection, project_id, i64::MAX, Some(volume_id), limit)
+}
+
+fn chapter_history_before(
+    connection: &Connection,
+    project_id: &str,
+    number: i64,
+    volume_id: Option<&str>,
+    limit: i64,
+) -> Result<ChapterHistory, OpsError> {
+    let mut statement = connection.prepare(
+        "SELECT c.chapter_no, substr(json_extract(f.payload_json,'$.body'), -200), json_extract(p.payload_json,'$.chapterGoal'), json_extract(f.payload_json,'$.body'), json_extract(p.payload_json,'$.chapterRole'), (SELECT json_group_array(json_extract(scene.value,'$.sceneType')) FROM json_each(p.payload_json,'$.sceneExecution') scene), \
+         (SELECT json_array(json_extract(r.payload_json,'$.craftSkills.continuity.catchphrases'), json_extract(r.payload_json,'$.craftSkills.proseReview.overusedDetails')) FROM artifacts ra JOIN artifact_payloads r ON r.artifact_id=ra.artifact_id AND r.version=ra.version WHERE ra.project_id=c.project_id AND ra.artifact_type='ProductionReceipt' AND json_extract(r.payload_json,'$.finalChapterRef.artifactId')=c.final_artifact_id LIMIT 1) \
+         , c.chapter_id, c.final_artifact_id, c.final_version \
+         FROM chapters c JOIN artifact_payloads f ON f.artifact_id=c.final_artifact_id AND f.version=c.final_version \
+         LEFT JOIN artifact_payloads p ON p.artifact_id=json_extract(f.payload_json,'$.chapterPlanRef.artifactId') AND p.version=json_extract(f.payload_json,'$.chapterPlanRef.version') \
+         WHERE c.project_id=?1 AND c.chapter_no<?2 AND c.status='COMMITTED' AND (?4 IS NULL OR c.volume_id=?4) ORDER BY c.chapter_no DESC LIMIT ?3",
+    )?;
+    let rows = statement
+        .query_map(libsql_rusqlite::params![project_id, number, limit, volume_id], |row| {
+            Ok((
+                json!({
+                    "chapterNo":row.get::<_, i64>(0)?,
+                    "chapterId":row.get::<_, String>(7)?,
+                    "chapterGoal":row.get::<_, Option<String>>(2)?,
+                    "ending":row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    "chapterRole":row.get::<_, Option<String>>(4)?,
+                    "sceneTypes":row
+                        .get::<_, Option<String>>(5)?
+                        .and_then(|types| serde_json::from_str::<serde_json::Value>(&types).ok())
+                        .unwrap_or_else(|| json!([]))
+                }),
+                row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(6)?
+                    .and_then(|lists| serde_json::from_str::<[Option<Vec<String>>; 2]>(&lists).ok())
+                    .unwrap_or_default(),
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, i64>(9)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut catchphrases = Vec::new();
+    let mut overused_details = Vec::new();
+    let mut recent = Vec::new();
+    let mut bodies = Vec::new();
+    let mut actual_events = Vec::new();
+    let mut events = connection.prepare(
+        "SELECT e.event_type, COALESCE(json_extract(e.payload_json,'$.event.outcomeQuote'),x.quote) FROM canon_events e JOIN canon_evidence x \
+         ON x.project_id=e.project_id AND x.event_id=e.event_id AND x.final_chapter_id=e.chapter_id \
+         WHERE e.project_id=?1 AND e.chapter_id=?2 AND x.source_artifact_id=?3 AND x.source_version=?4 \
+         AND x.quote IS NOT NULL AND length(x.quote)>0 \
+         AND length(COALESCE(json_extract(e.payload_json,'$.event.outcomeQuote'),x.quote))<=180 \
+         AND COALESCE(json_extract(e.payload_json,'$.event.eventTypeSource'),'')<>'fallback_fact' \
+         AND NOT (e.event_type='SITUATION_CHANGE' AND COALESCE(json_type(e.payload_json,'$.event.description'),'')='text') \
+         ORDER BY x.range_start, e.event_id LIMIT 4",
+    )?;
+    for (summary, body, [named, overused], chapter, final_id, version) in rows {
+        for event in events.query_map(
+            libsql_rusqlite::params![project_id, chapter, final_id, version],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )? {
+            let (event, quote) = event?;
+            if body.contains(&quote) {
+                actual_events.push(
+                    json!({"chapterNo":summary["chapterNo"],"eventType":event,"quote":quote}),
+                );
+            }
+        }
+        recent.push(summary);
+        bodies.push(body);
+        for (list, phrases) in [
+            (&mut catchphrases, named),
+            (&mut overused_details, overused),
+        ] {
+            for phrase in phrases.unwrap_or_default() {
+                if !list.contains(&phrase) {
+                    list.push(phrase);
+                }
+            }
+        }
+    }
+    Ok(ChapterHistory {
+        chapter_no: volume_id.is_none().then_some(number),
+        recent,
+        bodies,
+        actual_events,
+        catchphrases,
+        overused_details,
+    })
+}
+
+/// QC-1: the chapter number each fact, relation or knowledge item among
+/// `ids` was recorded in, for trimming a context oldest first.
+pub fn source_chapter_numbers(
+    connection: &Connection,
+    project_id: &str,
+    ids: &[&str],
+) -> Result<std::collections::BTreeMap<String, i64>, OpsError> {
+    let ids = serde_json::to_string(ids).unwrap_or_default();
+    let mut statement = connection.prepare(
+        "SELECT f.fact_id, c.chapter_no FROM canon_facts f JOIN chapters c ON c.project_id=f.project_id AND c.chapter_id=COALESCE(f.source_chapter_id, f.valid_from_chapter_id) WHERE f.project_id=?1 AND f.fact_id IN (SELECT value FROM json_each(?2)) \
+         UNION ALL SELECT r.relation_id, c.chapter_no FROM canon_relations r JOIN chapters c ON c.project_id=r.project_id AND c.chapter_id=r.valid_from_chapter_id WHERE r.project_id=?1 AND r.relation_id IN (SELECT value FROM json_each(?2)) \
+         UNION ALL SELECT k.knowledge_id, c.chapter_no FROM canon_knowledge k JOIN chapters c ON c.project_id=k.project_id AND c.chapter_id=k.from_chapter_id WHERE k.project_id=?1 AND k.knowledge_id IN (SELECT value FROM json_each(?2))",
+    )?;
+    let rows = statement
+        .query_map(libsql_rusqlite::params![project_id, ids], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
+}
+
+/// QC-1.5: the ledger's current facts about `subjects`, newest chapter
+/// first, as `{chapter, subject, predicate, value}`.
+pub fn subject_facts(
+    connection: &Connection,
+    project_id: &str,
+    subjects: &[String],
+    limit: i64,
+) -> Result<Vec<serde_json::Value>, OpsError> {
+    if subjects.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut statement = connection.prepare(
+        "SELECT c.chapter_no, f.subject_id, f.predicate, f.object_json FROM canon_facts f \
+         LEFT JOIN chapters c ON c.project_id=f.project_id AND c.chapter_id=f.source_chapter_id \
+         WHERE f.project_id=?1 AND f.superseded_by IS NULL AND f.subject_id IN (SELECT value FROM json_each(?2)) \
+         ORDER BY c.chapter_no DESC LIMIT ?3",
+    )?;
+    let subjects = serde_json::to_string(subjects).unwrap_or_else(|_| "[]".into());
+    let rows = statement
+        .query_map(
+            libsql_rusqlite::params![project_id, subjects, limit],
+            |row| {
+                Ok(json!({
+                    "chapter":row.get::<_, Option<i64>>(0)?,
+                    "subject":row.get::<_, String>(1)?,
+                    "predicate":row.get::<_, String>(2)?,
+                    "value":row
+                        .get::<_, String>(3)
+                        .ok()
+                        .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+                }))
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
 
 /// Formal reader query for one chapter. It returns authority metadata and the
 /// body from the chapter's committed FinalChapter artifact when available.

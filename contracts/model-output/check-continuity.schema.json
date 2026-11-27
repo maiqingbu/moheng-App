@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "chapter continuity check",
+  "description": "QC-1.4/1.5: sentences contradicting an earlier fact, cited by number, and which phrase candidates are catchphrases; RP-1: which motif candidates are overused images.",
+  "type": "object",
+  "required": [
+    "contradictions",
+    "catchphrases"
+  ],
+  "properties": {
+    "contradictions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "sentence",
+          "fact",
+          "conflict",
+          "impossibleTogether"
+        ],
+        "properties": {
+          "sentence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "fact": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "conflict": {
+            "type": "string",
+            "minLength": 1
+          },
+          "impossibleTogether": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "narrativeIssues": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "required": ["sentence", "chapter", "priorSentence", "currentQuote", "priorQuote", "kind", "reason"],
+        "properties": {
+          "sentence": { "type": "integer", "minimum": 0 },
+          "chapter": { "type": ["integer", "null"], "minimum": 1 },
+          "priorSentence": { "type": "integer", "minimum": 0 },
+          "currentQuote": { "type": "string", "minLength": 4, "maxLength": 180 },
+          "priorQuote": { "type": "string", "minLength": 4, "maxLength": 180 },
+          "kind": { "enum": ["REPEATED_EVENT", "STATE_CONFLICT"] },
+          "reason": { "type": "string", "minLength": 1 },
+          "hardEvidence": {
+            "type": "object",
+            "required": ["relation", "priorOutcome", "currentOutcome"],
+            "properties": {
+              "relation": { "enum": ["COMPLETED_OUTCOME_REPLAYED", "INCOMPATIBLE_STATES"] },
+              "priorOutcome": { "type": "string", "minLength": 4, "maxLength": 180 },
+              "currentOutcome": { "type": "string", "minLength": 4, "maxLength": 180 }
+            }
+          }
+        }
+      }
+    },
+    "catchphrases": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "motifs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}

@@ -708,8 +708,8 @@ fn retained_external_injection_stays_in_market_data_and_does_not_expand_provider
     let user_message = provider_payload["messages"][1]["content"].as_str().unwrap();
     assert!(!system_message.contains(ATTACK));
     let source_input = user_message
-        .split_once("Input: ")
-        .map(|(_, input)| serde_json::from_str::<Value>(input).unwrap())
+        .split_once("\n\n")
+        .map(|(_, data)| serde_json::from_str::<Value>(data).unwrap()["input"].clone())
         .unwrap();
     assert!(source_input["sourceText"]
         .as_str()

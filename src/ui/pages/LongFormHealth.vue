@@ -109,7 +109,7 @@ function openDestination(destination: string) {
 <template>
   <div class="page">
     <PageHeader title="长篇健康" subtitle="依据当前正式记录，帮助你及时发现长期推进中的风险与趋势。">
-      <button class="btn" :disabled="loading" @click="refresh">重新检查</button>
+      <button class="btn" :disabled="loading" :aria-busy="loading" @click="refresh">{{ loading ? '正在检查…' : '重新检查' }}</button>
     </PageHeader>
 
     <div v-if="loading" class="card pad section" role="status">正在检查长篇健康，请稍候。</div>
@@ -137,8 +137,8 @@ function openDestination(destination: string) {
             <div class="card-head"><div><span class="badge" :class="factor.severity === 'risk' ? 'danger' : factor.severity === 'attention' ? 'warning' : 'success'">{{ severityLabel(factor.severity) }}</span><h3 style="margin:8px 0 4px">{{ factorLabel(factor.factorCode) }}</h3></div><small class="muted">{{ truthClassLabel(factor.truthClass) }}</small></div>
             <p class="card-subtitle">{{ factor.summary }}</p>
             <p class="muted" style="font-size:12px">{{ factor.detail }}</p>
-            <p class="muted health-source-count">
-              可核验来源：{{ factorSourceCount(factor) }} 项
+            <p v-if="factorSourceCount(factor) > 0" class="muted health-source-count">
+              依据：{{ factorSourceCount(factor) }} 条记录
               <span v-if="factor.sourceRefsTruncated">（当前列出前 {{ factor.sourceRefs.length }} 项，完整来源可按页查看）</span>
             </p>
             <div v-if="factorSourceCount(factor) > 0" class="health-source-control">

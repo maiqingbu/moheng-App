@@ -33,6 +33,21 @@
       "version": "r1.chapter-plan.v1"
     },
     {
+      "name": "chapter-plan-r2",
+      "path": "schemas/narrative/chapter-plan-r2.schema.json",
+      "version": "r2.chapter-plan.v1"
+    },
+    {
+      "name": "story-bible-r1",
+      "path": "schemas/narrative/story-bible-r1.schema.json",
+      "version": "r1.story-bible.v1"
+    },
+    {
+      "name": "style-card-r1",
+      "path": "schemas/narrative/style-card-r1.schema.json",
+      "version": "r1.style-card.v1"
+    },
+    {
       "name": "chapter-exit-state-r1",
       "path": "schemas/narrative/chapter-exit-state-r1.schema.json",
       "version": "r1.chapter-exit-state.v1"

@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { CommandUiState } from '../stores/projectStore'
-import { commandMessage, statusLabel } from '../presentation/productLanguage'
+import { commandMessage, isInFlight, statusLabel } from '../presentation/productLanguage'
 const props = defineProps<{ state: CommandUiState; onConfirm?: () => unknown }>()
 const label = computed(() => props.state.confirmation === 'pending' ? '结果待确认' : statusLabel(props.state.status, ''))
 const message = computed(() => commandMessage(props.state))
+const inFlight = computed(() => isInFlight(props.state.status))
 // Loaded on demand so rendering feedback never initializes the project store.
 const retry = async () => {
   if (!props.state.retryKey) return
@@ -31,6 +32,7 @@ const sourceName = (source: NonNullable<CommandUiState['contextBudget']>['source
 </script>
 <template>
   <div v-if="state.status !== 'idle'" class="command-feedback" :class="state.confirmation === 'pending' ? 'blocked' : state.status" role="status" aria-live="polite">
+    <span v-if="inFlight" class="spinner" aria-hidden="true" />
     <strong>{{ label }}</strong>
     <span v-if="message"> · {{ message }}</span>
     <ul v-if="state.contextBudget?.sourceSizes.length" class="context-budget-sources" data-context-budget-sources>

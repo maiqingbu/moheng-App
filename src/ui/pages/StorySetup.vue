@@ -52,7 +52,7 @@ async function saveAndContinue() {
         },
       },
     })
-    if (receipt.finalStatus === 'committed' && store.commandState('story-setup-save').confirmation !== 'pending') router.push(`/projects/${store.currentProjectId ?? ''}/opening`)
+    if (receipt.finalStatus === 'committed' && store.commandState('story-setup-save').confirmation !== 'pending') router.push(`/projects/${store.currentProjectId ?? ''}/craft`)
   } catch { /* CommandFeedback preserves the command outcome. */ }
 }
 </script>
@@ -84,7 +84,7 @@ async function saveAndContinue() {
         <label class="field"><span class="field-label">叙述风格</span><input v-model="core.style" class="input" /></label>
         <label class="field"><span class="field-label">可扩展方向（每行一条）</span><textarea v-model="core.expandableDirections" class="textarea" /></label>
       </div>
-      <div class="banner info" style="margin-top:16px"><div><div class="banner-title">下一步只准备开篇</div><div class="banner-copy">系统会为第一章建立最小的正式规划，后续卷章仍按既有规划链路逐步创建。</div></div></div>
+      <div class="banner info" style="margin-top:16px"><div><div class="banner-title">下一步：故事底稿与风格卡</div><div class="banner-copy">保存后先确定故事底稿和写法风格，再为第一章建立最小的正式规划。</div></div></div>
       <CommandFeedback :state="state" @confirm="store.confirmCommandResult('story-setup-save')" />
       <div class="actions" style="justify-content:flex-end;margin-top:16px"><button class="btn primary" :disabled="!core.protagonist.trim() || !core.readerPromise.trim() || ['submitting','accepted','processing'].includes(state.status)" @click="saveAndContinue">保存故事核心并继续</button></div>
     </section>

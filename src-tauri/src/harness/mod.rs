@@ -397,13 +397,11 @@ pub struct SupportTaskPlan {
     pub new_plan_digest: Option<String>,
 }
 
-pub fn plan_support(
-    scope: &ProjectScope,
-    question: &str,
-    created_at: &str,
-) -> Result<SupportTaskPlan, String> {
+/// FX-21: the diagnosis a support question asks for, by keyword; the
+/// fallback when the model cannot classify the question.
+pub fn diagnose_keyword_intent(question: &str) -> &'static str {
     let lower = question.to_lowercase();
-    let capabilities = if [
+    if [
         "高潮",
         "required task",
         "未完成",
@@ -413,21 +411,58 @@ pub fn plan_support(
         "capacity",
         "容量",
         "planner",
-        "承诺",
+        // FX-20: "承诺" alone is a continuity question; a promise that
+        // constrains the next chapter is a planning question.
+        "约束",
         "任务",
         "规划",
     ]
     .iter()
     .any(|term| lower.contains(term))
     {
-        vec!["query_plan_route", "diagnose_planning_constraints"]
+        "PLANNING_CONSTRAINTS"
     } else if lower.contains("知道") || lower.contains("knowledge") {
-        vec!["query_knowledge", "query_events", "query_evidence"]
+        "KNOWLEDGE"
     } else if lower.contains("承诺") || lower.contains("promise") {
-        vec!["query_continuity", "query_events", "query_evidence"]
+        "CONTINUITY"
     } else {
-        vec!["query_project_meta", "query_context_manifest"]
+        "PROJECT_OVERVIEW"
+    }
+}
+
+pub fn plan_support(
+    scope: &ProjectScope,
+    question: &str,
+    created_at: &str,
+) -> Result<SupportTaskPlan, String> {
+    plan_support_for_intent(scope, diagnose_keyword_intent(question), created_at)
+}
+
+pub fn plan_support_for_intent(
+    scope: &ProjectScope,
+    intent: &str,
+    created_at: &str,
+) -> Result<SupportTaskPlan, String> {
+    plan_support_for_context(scope, intent, true, created_at)
+}
+
+/// FX-21: chapter events are queried only when the question carries a
+/// chapter; the assistant page asks at project scope without one.
+pub fn plan_support_for_context(
+    scope: &ProjectScope,
+    intent: &str,
+    has_chapter: bool,
+    created_at: &str,
+) -> Result<SupportTaskPlan, String> {
+    let mut capabilities = match intent {
+        "PLANNING_CONSTRAINTS" => vec!["query_plan_route", "diagnose_planning_constraints"],
+        "KNOWLEDGE" => vec!["query_knowledge", "query_events", "query_evidence"],
+        "CONTINUITY" => vec!["query_continuity", "query_events", "query_evidence"],
+        _ => vec!["query_project_meta", "query_context_manifest"],
     };
+    if !has_chapter {
+        capabilities.retain(|capability| *capability != "query_events");
+    }
     let steps = capabilities
         .into_iter()
         .enumerate()

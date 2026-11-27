@@ -1015,6 +1015,7 @@ fn b11_market_entry_requires_user_material_and_keeps_market_evidence_out_of_cano
         "requestedAt":NOW,
         "payload":{
             "title":"废丹进化录",
+            "platform":"起点中文网",
             "marketSource":"用户导入的起点题材观察表",
             "marketMaterial":"近期开篇偏好：强目标、明确代价、首章出现可验证异常；仅作为市场资料，不是故事规则。"
         }
@@ -1819,4 +1820,27 @@ fn b11_assistant_repair_capability_classification_is_fail_closed() {
         .as_array()
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn ld3_a_new_work_must_name_one_target_platform() {
+    // Owner decision 2026-10-26: the platform is chosen when the work is
+    // created, so chapter 1 is written to that platform's length.
+    let state = state();
+    for (index, platform) in ["", "待判断", "其他", "番茄或起点"].into_iter().enumerate()
+    {
+        let mut request = idea_request(&format!("cmd:ld3:platform:{index}"));
+        request["payload"]["platform"] = json!(platform);
+        assert_eq!(
+            execute_command_impl(&state, request).unwrap_err(),
+            "B11_PLATFORM_REQUIRED",
+            "{platform}"
+        );
+    }
+    let mut request = idea_request("cmd:ld3:platform:qimao");
+    request["payload"]["platform"] = json!("七猫小说");
+    assert_eq!(
+        execute_command_impl(&state, request).unwrap()["finalStatus"],
+        "committed"
+    );
 }

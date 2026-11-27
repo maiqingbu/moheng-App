@@ -1,0 +1,604 @@
+//! CRAFT v3 step 2b: deterministic r2 plan checks, the creation ledger and
+//! the skill → plan-field decisions (CRAFT_V3_DESIGN §4.2–4.3).
+
+use ai_novel_production_system_core::chapter_craft::plan_feedback;
+use ai_novel_production_system_core::craft_plan::{
+    check_craft_plan, creation_ledger, drop_unchosen_beats, is_repetition_problem,
+    last_appearances, plan_problems, shape_reminder, skill_decisions,
+};
+use serde_json::{json, Value};
+
+fn bible() -> Value {
+    let path = format!(
+        "{}/../contracts/fixtures/valid/narrative-story-bible-r1.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+fn person(name: &str) -> Value {
+    json!({"name":name,"wants":"要回被扣下的货款","hides":"自己也拿过一回回扣","whyHere":"每天这个时辰来码头对账"})
+}
+
+fn scene(place: &str) -> Value {
+    json!({"place":place,"people":[person("林满"),person("老董")],"conflict":"货单上的箱数和船上对不上",
+        "events":["林满和老董在船边为少了两箱货争起来"],"readerQuestion":"少的两箱去了哪里"})
+}
+
+/// A chapter-1 plan that passes every check against the fixture bible.
+fn plan() -> Value {
+    let mut plan = json!({"payloadSchema":"chapter-plan.r2","chapterGoal":"林满揪出调包货单","craft":{
+        "bigTurn":"林满发现货单是彭三的人连夜调包的",
+        "smallDiscovery":"老董自己也欠着彭三一笔钱",
+        "protagonistWin":"林满当着众人把调包的货单揪了出来",
+        "device":{"name":"听旧物","status":"NEW","howUsed":"摸到货箱上的麻绳，听见调包人的说话声"},
+        "warmth":"姑妈在灶上给他留了一碗热面",
+        "emotionalBeat":"他看见姑妈围裙上又多了一块新补丁",
+        "situationChange":{"before":"只管码头记账的小账房","after":"被彭三的人盯上的账房"},
+        "scenes":[scene("江边码头"),scene("姑妈的面馆")],
+        "newLosses":["前一天的记忆"],
+        "endHook":"面馆门板上贴了一张盖着红印的借据"
+    }});
+    // QC-1.2: a first chapter carries its imminent threat.
+    plan["craft"]["scenes"][0]["conflict"] =
+        json!("货单上的箱数和船上对不上；迫近的威胁：债主要收走面馆抵债（期限：三天后）");
+    plan
+}
+
+fn has(problems: &[String], needle: &str) -> bool {
+    problems.iter().any(|problem| problem.contains(needle))
+}
+
+#[test]
+fn an_added_clause_cannot_hide_a_repeated_action_from_a_recent_goal() {
+    let bible = bible();
+    let mut earlier = plan()["craft"].clone();
+    earlier["chapterGoal"] = json!(
+        "陆照将截流玉珏裹进紫穗草籽囊，塞进哑叔刚修好的丹炉风门夹层，完成对暗桩实物证据的隐蔽转移"
+    );
+    let ledger = creation_ledger(&[(5, earlier)], &bible);
+    let mut current = plan();
+    current["chapterGoal"] = json!("陆照在哑叔铁钳敲击节奏的掩护下，将截流玉珏裹进紫穗草籽囊塞入丹炉风门夹层，并确认玉珏背面无纹、棱角齐整——代价不是消耗寿元，而是确认真相后左耳垂灰线彻底凝固如旧疤。");
+    let problems = plan_problems(&current, 8, &bible, &ledger);
+    assert!(has(&problems, "重复第 5 章的动作"), "{problems:?}");
+}
+
+#[test]
+fn a_concrete_first_chapter_plan_passes() {
+    let problems = plan_problems(&plan(), 1, &bible(), &creation_ledger(&[], &bible()));
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+#[test]
+fn vague_decisions_and_an_unchanged_situation_are_reported() {
+    let mut plan = plan();
+    plan["craft"]["warmth"] = json!("温暖");
+    plan["craft"]["situationChange"] =
+        json!({"before":"被彭三盯上的账房","after":"被彭三盯上的账房"});
+    let problems = plan_problems(&plan, 1, &bible(), &creation_ledger(&[], &bible()));
+    assert!(has(&problems, "温度或幽默写得太空"), "{problems:?}");
+    assert!(has(&problems, "处境变化前后相同"), "{problems:?}");
+}
+
+#[test]
+fn devices_must_be_new_or_a_real_escalation_of_an_earlier_one() {
+    let mut earlier = plan()["craft"].clone();
+    for scene in earlier["scenes"].as_array_mut().unwrap() {
+        scene["events"] = json!(["林满在账房里对着灯核了一夜旧账"]);
+    }
+    let prior = [(1, earlier)];
+    let ledger = creation_ledger(&prior, &bible());
+    let repeated = plan_problems(&plan(), 2, &bible(), &ledger);
+    assert!(has(&repeated, "之前已经用过"), "{repeated:?}");
+    assert!(has(&repeated, "用法和之前一模一样"), "{repeated:?}");
+
+    let mut escalated = plan();
+    escalated["craft"]["device"] =
+        json!({"name":"听旧物","status":"ESCALATED","howUsed":"隔着一层木板也能听见旧物里的声音"});
+    escalated["craft"]["scenes"] = json!([scene("当铺后院"), scene("江边码头")]);
+    escalated["craft"]["situationChange"]["after"] = json!("拿到了彭三借据的漏洞");
+    escalated["craft"]["endHook"] = json!("当铺掌柜把一只旧表推到他面前");
+    let ok = plan_problems(&escalated, 2, &bible(), &ledger);
+    assert!(ok.is_empty(), "{ok:?}");
+
+    let mut fake = plan();
+    fake["craft"]["device"]["status"] = json!("ESCALATED");
+    assert!(has(
+        &plan_problems(&fake, 1, &bible(), &creation_ledger(&[], &bible())),
+        "之前没用过"
+    ));
+}
+
+#[test]
+fn reusing_every_place_or_an_ending_of_an_earlier_chapter_is_reported() {
+    let ledger = creation_ledger(&[(1, plan()["craft"].clone())], &bible());
+    let mut next = plan();
+    next["craft"]["device"] =
+        json!({"name":"读账本","status":"NEW","howUsed":"翻到旧账本时看见记账人当时的手"});
+    let problems = plan_problems(&next, 2, &bible(), &ledger);
+    assert!(has(&problems, "上一章都去过"), "{problems:?}");
+    assert!(
+        has(&problems, "结束的局面和之前某章完全相同"),
+        "{problems:?}"
+    );
+    assert!(has(&problems, "章末钩子和之前某章完全相同"), "{problems:?}");
+}
+
+#[test]
+fn a_chapter_may_return_to_earlier_places_when_one_place_is_new() {
+    // Owner decision (2026-10-25): a story set in one building keeps going
+    // back to the same rooms; one new place per chapter is enough.
+    let ledger = creation_ledger(&[(1, plan()["craft"].clone())], &bible());
+    let mut next = plan();
+    next["craft"]["scenes"] = json!([scene("江边码头"), scene("姑妈的面馆"), scene("当铺后院")]);
+    let problems = plan_problems(&next, 2, &bible(), &ledger);
+    assert!(!has(&problems, "地点"), "{problems:?}");
+}
+
+#[test]
+fn story_bible_cast_never_appears_before_its_chapter() {
+    let mut early = plan();
+    early["craft"]["scenes"][0]["people"][1] = person("阿秋");
+    let mut bible = bible();
+    bible["cast"][0]["firstAppears"] = json!(2);
+    let problems = plan_problems(&early, 1, &bible, &creation_ledger(&[], &bible));
+    assert!(
+        has(&problems, "人物「阿秋」在故事底稿里安排到第 2 章才出场"),
+        "{problems:?}"
+    );
+    assert!(plan_problems(&early, 2, &bible, &creation_ledger(&[], &bible)).is_empty());
+}
+
+#[test]
+fn a_walk_on_outside_the_story_bible_may_appear_and_counts_toward_the_scene() {
+    // Real run 2026-10-24: twelve chapter-1 plans were rejected, seven of
+    // them for a colleague, a guard or a neighbour the bible never names.
+    let mut crowded = plan();
+    crowded["craft"]["scenes"][1]["people"] = json!([person("林满"), person("保安乙")]);
+    assert!(plan_problems(&crowded, 1, &bible(), &creation_ledger(&[], &bible())).is_empty());
+    let ledger = creation_ledger(&[(1, crowded["craft"].clone())], &bible());
+    assert_eq!(ledger["introducedPeople"], json!(["林满", "老董"]));
+}
+
+#[test]
+fn quote_marks_are_taken_out_of_a_plan_instead_of_rejecting_it() {
+    use ai_novel_production_system_core::craft_plan::strip_plan_quotes;
+    let mut quoted = plan();
+    quoted["craft"]["smallDiscovery"] = json!("老董的账本上写着“查无此人”");
+    quoted["craft"]["scenes"][0]["events"][0] = json!("老董把写着「作废」的货单递过来");
+    quoted["chapterGoal"] = json!("林满查清“作废”货单");
+    strip_plan_quotes(&mut quoted);
+    assert_eq!(
+        quoted["craft"]["smallDiscovery"],
+        "老董的账本上写着查无此人"
+    );
+    assert_eq!(
+        quoted["craft"]["scenes"][0]["events"][0],
+        "老董把写着作废的货单递过来"
+    );
+    assert_eq!(
+        quoted["chapterGoal"], "林满查清“作废”货单",
+        "only craft is the writer's plan"
+    );
+    assert!(plan_problems(&quoted, 1, &bible(), &creation_ledger(&[], &bible())).is_empty());
+}
+
+#[test]
+fn chapter_three_must_name_what_changes_with_the_antagonist() {
+    let mut third = plan();
+    third["craft"]["bigTurn"] = json!("林满发现货单被人连夜调包了");
+    third["craft"]["situationChange"]["after"] = json!("被人盯上的账房");
+    third["craft"]["smallDiscovery"] = json!("老董自己也欠着别人一笔钱");
+    let problems = plan_problems(&third, 3, &bible(), &creation_ledger(&[], &bible()));
+    assert!(
+        has(&problems, "和对手「彭三」的关系怎么变了"),
+        "{problems:?}"
+    );
+    assert!(plan_problems(&plan(), 3, &bible(), &creation_ledger(&[], &bible())).is_empty());
+}
+
+#[test]
+fn similes_in_a_plan_are_not_a_problem() {
+    // Owner decision (2026-10-25): a plan is not prose; similes are checked
+    // and rewritten in the chapter body only.
+    let mut wordy = plan();
+    wordy["craft"]["emotionalBeat"] = json!("他记下这笔账，心像被攥紧了似的");
+    let problems = plan_problems(&wordy, 1, &bible(), &creation_ledger(&[], &bible()));
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+#[test]
+fn the_ledger_collects_devices_endings_people_losses_and_last_places() {
+    let mut second = plan()["craft"].clone();
+    second["scenes"] = json!([scene("当铺后院"), scene("渡口")]);
+    let ledger = creation_ledger(&[(1, plan()["craft"].clone()), (2, second)], &bible());
+    assert_eq!(ledger["devices"].as_array().unwrap().len(), 2);
+    assert_eq!(ledger["endings"][0]["chapter"], 1);
+    assert_eq!(ledger["introducedPeople"], json!(["林满", "老董"]));
+    assert_eq!(ledger["losses"][1]["chapter"], 2);
+    assert_eq!(ledger["lastChapterPlaces"], json!(["当铺后院", "渡口"]));
+}
+
+#[test]
+fn a_rejected_plan_returns_every_problem_to_the_planner() {
+    let mut bad = plan();
+    bad["craft"]["warmth"] = json!("温暖");
+    let error = check_craft_plan(&bad, 1, &bible(), &creation_ledger(&[], &bible())).unwrap_err();
+    assert!(error.starts_with("B08_PLAN_CRAFT:"), "{error}");
+    let feedback = plan_feedback(&error).unwrap();
+    assert_eq!(feedback["rejectedFor"], "B08_PLAN_CRAFT");
+    assert!(feedback["problems"][0]
+        .as_str()
+        .unwrap()
+        .contains("温度或幽默"));
+    check_craft_plan(&plan(), 1, &bible(), &creation_ledger(&[], &bible())).unwrap();
+}
+
+#[test]
+fn skill_decisions_name_the_plan_fields_each_selected_skill_decided() {
+    let decisions = skill_decisions(&plan(), &["S13".into(), "S22".into(), "S99".into()]);
+    let decisions = decisions.as_array().unwrap();
+    assert_eq!(decisions.len(), 2);
+    assert_eq!(decisions[0]["skillId"], "S13");
+    assert_eq!(
+        decisions[0]["decisions"]["protagonistWin"],
+        "林满当着众人把调包的货单揪了出来"
+    );
+    assert_eq!(
+        decisions[1]["decisions"]["readerQuestions"],
+        json!(["少的两箱去了哪里", "少的两箱去了哪里"])
+    );
+}
+
+#[test]
+fn an_unwritten_planned_ending_is_not_passed_to_the_next_planner_as_story_state() {
+    use ai_novel_production_system_core::craft_plan::prompt_ledger;
+    let mut craft = plan()["craft"].clone();
+    craft["chapterGoal"] = json!("确认纽扣的来源");
+    craft["situationChange"]["after"] = json!("东墙豁口深处的松枝震颤三次");
+    craft["endHook"] = json!("柳执事带着密信从门内走出");
+    let ledger = creation_ledger(&[(4, craft)], &bible());
+    let view = prompt_ledger(&ledger);
+    assert_eq!(
+        view["endings"][0],
+        json!({"chapter":4,"plannedGoal":"确认纽扣的来源"})
+    );
+    assert!(!view.to_string().contains("震颤三次"));
+    assert!(!view.to_string().contains("带着密信"));
+}
+
+#[test]
+fn the_planner_sees_a_bounded_ledger_while_checks_use_the_whole_history() {
+    use ai_novel_production_system_core::craft_plan::prompt_ledger;
+    let prior = (1..=15)
+        .map(|chapter| {
+            let mut craft = plan()["craft"].clone();
+            craft["device"]["howUsed"] = json!(format!("第{chapter}次的用法"));
+            craft["situationChange"]["after"] = json!(format!("第{chapter}章的局面"));
+            (chapter, craft)
+        })
+        .collect::<Vec<_>>();
+    let ledger = creation_ledger(&prior, &bible());
+    let view = prompt_ledger(&ledger);
+    assert_eq!(
+        view["devices"],
+        json!([{"chapter":15,"name":"听旧物","howUsed":"第15次的用法"}])
+    );
+    assert_eq!(view["endings"].as_array().unwrap().len(), 10);
+    assert_eq!(view["endings"][0]["chapter"], 6);
+    assert_eq!(view["losses"].as_array().unwrap().len(), 10);
+    let mut early = plan();
+    early["craft"]["device"] =
+        json!({"name":"听旧物","status":"ESCALATED","howUsed":"第2次的用法"});
+    assert!(has(
+        &plan_problems(&early, 16, &bible(), &ledger),
+        "用法和之前一模一样"
+    ));
+}
+
+#[test]
+fn scene_counts_people_and_events_outside_the_plan_shape_are_reported_for_a_replan() {
+    // Real run 2026-10-24: a scene with seven events and one with a single
+    // person failed the contract with no chance to replan.
+    let mut crowded = plan();
+    crowded["craft"]["scenes"][0]["events"] = json!(["一", "二", "三", "四", "五", "六", "七"]);
+    crowded["craft"]["scenes"][1]["people"] = json!([]);
+    let problems = plan_problems(&crowded, 1, &bible(), &creation_ledger(&[], &bible()));
+    assert!(has(&problems, "第 1 场写了 7 件事"), "{problems:?}");
+    assert!(has(&problems, "第 2 场没有人物"), "{problems:?}");
+    let mut four = plan();
+    four["craft"]["scenes"] = json!([
+        scene("江边码头"),
+        scene("姑妈的面馆"),
+        scene("当铺"),
+        scene("码头仓库")
+    ]);
+    four["craft"]["device"]["status"] = json!("OLD");
+    let problems = plan_problems(&four, 1, &bible(), &creation_ledger(&[], &bible()));
+    assert!(has(&problems, "需要 1 到 3 个场景"), "{problems:?}");
+    assert!(
+        has(&problems, "status 只能是 NEW 或 ESCALATED"),
+        "{problems:?}"
+    );
+}
+
+/// Round 10 (owner decision 2026-11-26): the plan gives a direction, not an
+/// outline. A scene is one event (a contest, a quarrel, an accident dealt
+/// with), never a list of actions, and the writer decides the actions and
+/// the length.
+#[test]
+fn round100_a_scene_holds_one_event_not_a_list_of_actions() {
+    let mut listed = plan();
+    listed["craft"]["scenes"][0]["events"] =
+        json!(["老董把货单递过来", "林满点出少了两箱", "两人在船边争起来"]);
+    let problems = plan_problems(&listed, 1, &bible(), &creation_ledger(&[], &bible()));
+    assert!(has(&problems, "第 1 场写了 3 件事"), "{problems:?}");
+    assert!(!has(&problems, "第 2 场"), "{problems:?}");
+}
+
+#[test]
+fn round100_an_event_or_an_ending_written_out_as_prose_is_sent_back() {
+    let mut detailed = plan();
+    detailed["craft"]["scenes"][1]["events"] = json!([
+        "林满把账本摊在灶台边上，手指压着第三页那行墨迹未干的数字，抬头看姑妈，姑妈正把面捞进碗里，热气糊住了他的眼镜，他摘下来擦了两下又戴上"
+    ]);
+    detailed["craft"]["endHook"] = json!(
+        "林满推开面馆的门板，门板上贴着一张盖着红印的借据，风把借据的一角掀起来，露出底下一行小字，写着他的名字和一个他从没见过的日期，墨迹还没干"
+    );
+    let problems = plan_problems(&detailed, 1, &bible(), &creation_ledger(&[], &bible()));
+    assert!(has(&problems, "第 2 场的事件写成了细节"), "{problems:?}");
+    assert!(
+        has(&problems, "章末钩子和正文一样写成了画面"),
+        "{problems:?}"
+    );
+    assert!(!has(&problems, "第 1 场"), "{problems:?}");
+}
+
+/// Real run round 13: chapter 4 carried out chapter 3's operation again
+/// (the negative into the reader, the sixteen-digit code, the footage).
+#[test]
+fn round131_an_event_redoing_one_of_the_last_two_chapters_is_sent_back() {
+    let mut earlier = plan()["craft"].clone();
+    earlier["scenes"][0]["events"] = json!(["林满在账房里对着灯核了一夜旧账"]);
+    earlier["scenes"][1]["events"] = json!(["林满输入十六位校验码，调出码头仓库当晚的监控片段"]);
+    let ledger = creation_ledger(&[(3, earlier)], &bible());
+    let mut redo = plan();
+    redo["craft"]["scenes"][0]["events"] =
+        json!(["林满再输入一遍十六位校验码，调出码头仓库当晚的监控片段"]);
+    let redone = plan_problems(&redo, 4, &bible(), &ledger);
+    assert!(
+        has(&redone, "第 1 场的事件重做了第 3 章已经做完的"),
+        "{redone:?}"
+    );
+    let problems = plan_problems(&plan(), 4, &bible(), &ledger);
+    assert!(!has(&problems, "已经做完的"), "{problems:?}");
+    // Left on the last round, it reaches the writer as what not to act out.
+    assert!(redone
+        .iter()
+        .any(|problem| problem.contains("已经做完的") && is_repetition_problem(problem)));
+    assert!(is_repetition_problem(
+        "异常手法「听旧物」的用法和之前一模一样，需要新的变化"
+    ));
+    assert!(!is_repetition_problem("需要 1 到 3 个场景，现在有 4 个"));
+}
+
+/// Real run round 12: chapter goals of 80-120 characters scripted each
+/// chapter (place, tool, the grey mark moving half an inch, what it proves).
+#[test]
+fn round130_a_chapter_goal_written_out_as_steps_is_sent_back() {
+    let mut scripted = plan();
+    scripted["chapterGoal"] = json!("沈砚在社区卫生站三号诊室当着吴医生的面完成体检报告备注栏四字书写，该文字未被系统抹除，并同步触发灰痕加速蔓延半寸");
+    let problems = plan_problems(&scripted, 1, &bible(), &creation_ledger(&[], &bible()));
+    assert!(has(&problems, "本章目标写成了步骤"), "{problems:?}");
+    let mut direction = plan();
+    direction["chapterGoal"] = json!("沈砚证实有人记得他时灰痕会退，吴医生成了知情人");
+    let problems = plan_problems(&direction, 1, &bible(), &creation_ledger(&[], &bible()));
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+#[test]
+fn ld8_a_chapter_shaped_like_the_two_before_it_is_a_reminder_not_a_replan() {
+    let earlier = plan()["craft"].clone();
+    let ledger = creation_ledger(&[(2, earlier.clone()), (3, earlier)], &bible());
+    let problems = plan_problems(&plan(), 4, &bible(), &ledger);
+    assert!(!has(&problems, "同一个形状"), "{problems:?}");
+    let reminder = shape_reminder(&plan(), &ledger).unwrap_or_default();
+    assert!(reminder.contains("和前两章是同一个形状"), "{reminder}");
+
+    let mut other = plan();
+    other["craft"].as_object_mut().unwrap().remove("warmth");
+    assert_eq!(shape_reminder(&other, &ledger), None);
+    let ledger = creation_ledger(&[(3, plan()["craft"].clone())], &bible());
+    assert_eq!(shape_reminder(&plan(), &ledger), None);
+}
+
+#[test]
+fn ld5_the_planner_sees_the_recent_chapters_shapes() {
+    let ledger = creation_ledger(&[(1, plan()["craft"].clone())], &bible());
+    assert_eq!(
+        ledger["shapes"],
+        json!([{"chapter":1,
+            "beats":["bigTurn","smallDiscovery","protagonistWin","device","warmth","emotionalBeat","newLosses"],
+            "scenes":2}])
+    );
+}
+
+/// LD-6 (owner decision 2026-11-01): the beats are chosen for the chapter;
+/// a chapter always changes the situation, has its scenes and its hook.
+const BEATS: [&str; 7] = [
+    "bigTurn",
+    "smallDiscovery",
+    "protagonistWin",
+    "device",
+    "warmth",
+    "emotionalBeat",
+    "newLosses",
+];
+
+fn without_beats(chapter_plan: Value, keep: &[&str]) -> Value {
+    let mut plan = chapter_plan;
+    let craft = plan["craft"].as_object_mut().unwrap();
+    for beat in BEATS.iter().filter(|beat| !keep.contains(beat)) {
+        craft.remove(*beat);
+    }
+    plan
+}
+
+#[test]
+fn ld6_a_chapter_with_none_of_the_beats_but_a_changed_situation_passes() {
+    let plan = without_beats(plan(), &[]);
+    let problems = plan_problems(&plan, 4, &bible(), &creation_ledger(&[], &bible()));
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+#[test]
+fn ld6_a_beat_the_plan_keeps_must_still_be_concrete() {
+    let mut plan = without_beats(plan(), &["bigTurn"]);
+    plan["craft"]["bigTurn"] = json!("转折");
+    let problems = plan_problems(&plan, 4, &bible(), &creation_ledger(&[], &bible()));
+    assert!(has(&problems, "大转折写得太空"), "{problems:?}");
+}
+
+#[test]
+fn ld6_the_first_three_chapters_keep_the_win_their_opening_arc_names() {
+    let plan = without_beats(plan(), &[]);
+    let problems = plan_problems(&plan, 2, &bible(), &creation_ledger(&[], &bible()));
+    assert!(has(&problems, "主角赢的一局"), "{problems:?}");
+}
+
+#[test]
+fn ld6_one_person_alone_is_a_scene() {
+    let mut plan = plan();
+    plan["craft"]["scenes"][1]["people"] = json!([person("林满")]);
+    plan["craft"]["scenes"][1]["conflict"] = json!("天亮前要在面馆的旧账里找出那张借据");
+    let problems = plan_problems(&plan, 1, &bible(), &creation_ledger(&[], &bible()));
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+#[test]
+fn ld6_a_beat_sent_empty_was_not_chosen() {
+    // Told the beats are optional, a model fills the shape with empty ones.
+    let mut plan = plan();
+    plan["craft"]["bigTurn"] = json!("");
+    plan["craft"]["warmth"] = Value::Null;
+    plan["craft"]["newLosses"] = json!([]);
+    plan["craft"]["device"] = json!({"name":"","status":"","howUsed":" "});
+    drop_unchosen_beats(&mut plan);
+    for beat in ["bigTurn", "warmth", "newLosses", "device"] {
+        assert!(plan["craft"].get(beat).is_none(), "{beat}: {plan}");
+    }
+    assert!(plan["craft"].get("smallDiscovery").is_some());
+    let problems = plan_problems(&plan, 4, &bible(), &creation_ledger(&[], &bible()));
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+#[test]
+fn ld6_the_win_the_opening_arc_names_is_reported_missing_not_vague() {
+    let plan = without_beats(plan(), &[]);
+    let problems = plan_problems(&plan, 2, &bible(), &creation_ledger(&[], &bible()));
+    assert!(has(&problems, "主角赢的一局没写"), "{problems:?}");
+}
+
+/// VD-1c: the planner sees when the antagonist and the cast were last on
+/// the page.
+#[test]
+fn vd1c_the_antagonist_and_cast_last_appearances_come_from_earlier_plans() {
+    let both = plan()["craft"].clone();
+    let mut alone = both.clone();
+    for scene in alone["scenes"].as_array_mut().unwrap() {
+        scene["people"] = json!([person("林满")]);
+    }
+    assert_eq!(
+        last_appearances(&[(4, both), (5, alone)], &bible()),
+        json!([
+            {"name":"彭三","role":"反派","lastChapter":null},
+            {"name":"阿秋","role":"配角","lastChapter":null},
+            {"name":"老董","role":"配角","lastChapter":4}
+        ])
+    );
+}
+
+/// VD-1e (real run round 14): chapters 4-8 planned nearly the same goal
+/// while their stage stayed open.
+#[test]
+fn vd1e_a_goal_close_to_a_recent_chapters_goal_is_sent_back() {
+    let earlier = |goal: &str| {
+        let mut craft = plan()["craft"].clone();
+        craft["chapterGoal"] = json!(goal);
+        craft["situationChange"]["after"] = json!(format!("{goal}之后"));
+        craft["endHook"] = json!(format!("{goal}的钩子"));
+        craft
+    };
+    let ledger = creation_ledger(
+        &[
+            (
+                4,
+                earlier(
+                    "陆照确认师父续骨汤药方无误，排除丹房内部失误可能，并首次将灰线展露给陈师伯",
+                ),
+            ),
+            (5, earlier("陆照把出入录拓片交给阿沅保管")),
+        ],
+        &bible(),
+    );
+    assert_eq!(
+        ledger["endings"][0]["goal"],
+        "陆照确认师父续骨汤药方无误，排除丹房内部失误可能，并首次将灰线展露给陈师伯"
+    );
+    let mut repeated = plan();
+    repeated["chapterGoal"] =
+        json!("陆照第三次点燃废丹残余，确认师父续骨汤药方无误，排除丹房内部失误可能，并首次让灰线在陈师伯眼前浮现");
+    let problems = plan_problems(&repeated, 6, &bible(), &ledger);
+    assert!(
+        has(&problems, "本章目标和第 4 章的目标几乎一样"),
+        "{problems:?}"
+    );
+    let mut fresh = plan();
+    fresh["chapterGoal"] = json!("陆照在申时查验前把出入录拓片换进周砚舟的账册");
+    let problems = plan_problems(&fresh, 6, &bible(), &ledger);
+    assert!(!has(&problems, "目标几乎一样"), "{problems:?}");
+}
+
+/// Real run 2026-11-25: chapter 5 planned the port probe and the line drawn
+/// under B-4 that chapter 4 had just written.
+#[test]
+fn a_plan_near_the_last_two_chapters_goal_or_ending_is_sent_back() {
+    let mut earlier = plan()["craft"].clone();
+    earlier["chapterGoal"] = json!("沈砚用铜书签刮擦A7扫描仪读卡槽金属边缘，复现14.2Hz共振频率使设备短暂脱网，诱使林砚声端口暴露未覆写握手包，并确认该端口具备物理服务器直连权限；同时左手小指彻底失去形态，仅余灰斑轮廓在灯下泛银光。");
+    earlier["situationChange"]["after"] = json!("端口的物理直连权限被确认");
+    earlier["endHook"] = json!("沈砚把便签纸从口袋里掏出来，他用中指指尖在‘B-4’下方划了一道横线，青灰底色在灯下泛起一点银光，像档案袋封口");
+    let mut repeated = plan();
+    repeated["chapterGoal"] = json!("沈砚将旧MP4播放器接入A7扫描仪USB口，用铜书签锈蚀层刮下的铜绿作为导电介质伪造生物识别信号，成功触发林砚声端口的物理直连响应并捕获REDUNDANT-1指令哈希值；同时左手小指灰斑彻底固化为不可逆的银色金属质感，失去全部形态与触感；林砚声端口已两次响应其试探，清除协议的物理执行路径正式暴露。");
+    repeated["craft"]["endHook"] = json!("沈砚把便签纸摊在膝盖上，用中指在‘B-4’下方划了一道竖线。这一次，青灰底色没泛银光——因为他的中指指尖，刚刚开始出现第一道透明带。");
+    let latest = creation_ledger(&[(4, earlier.clone())], &bible());
+    let problems = plan_problems(&repeated, 5, &bible(), &latest);
+    assert!(has(&problems, "本章目标和第 4 章的太接近"), "{problems:?}");
+    assert!(has(&problems, "章末钩子和第 4 章的太接近"), "{problems:?}");
+
+    // Two chapters later the same ground may be covered again.
+    let mut between = plan()["craft"].clone();
+    between["chapterGoal"] = json!("周稚烧掉值班表");
+    between["situationChange"]["after"] = json!("值班表没了");
+    between["endHook"] = json!("周稚站在雨里等最后一班公交");
+    let mut second = between.clone();
+    second["chapterGoal"] = json!("陈默搬走硬盘");
+    second["situationChange"]["after"] = json!("硬盘搬走了");
+    second["endHook"] = json!("陈默锁上面馆的铁门");
+    let older = creation_ledger(&[(4, earlier), (5, between), (6, second)], &bible());
+    let problems = plan_problems(&repeated, 7, &bible(), &older);
+    assert!(!has(&problems, "太接近"), "{problems:?}");
+}
+
+/// People's names alone do not make two goals the same.
+#[test]
+fn goals_that_share_only_their_people_are_not_near() {
+    let mut earlier = plan()["craft"].clone();
+    earlier["chapterGoal"] = json!("陆照求陈师伯放行");
+    earlier["situationChange"]["after"] = json!("师伯点头");
+    earlier["endHook"] = json!("山门的铜铃响了");
+    let mut fresh = plan();
+    fresh["chapterGoal"] = json!("陆照替陈师伯守夜");
+    let ledger = creation_ledger(&[(4, earlier)], &bible());
+    let problems = plan_problems(&fresh, 5, &bible(), &ledger);
+    assert!(!has(&problems, "太接近"), "{problems:?}");
+}

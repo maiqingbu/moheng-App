@@ -5,6 +5,7 @@ import ProjectOverview from '../ui/pages/ProjectOverview.vue'
 import MarketStrategy from '../ui/pages/MarketStrategy.vue'
 import PitchReview from '../ui/pages/PitchReview.vue'
 import StorySetup from '../ui/pages/StorySetup.vue'
+import CraftSetup from '../ui/pages/CraftSetup.vue'
 import OpeningReady from '../ui/pages/OpeningReady.vue'
 import ProductionCenter from '../ui/pages/ProductionCenter.vue'
 import VolumeManager from '../ui/pages/VolumeManager.vue'
@@ -28,6 +29,7 @@ export const router = createRouter({
     { path: '/projects/:id/market', name: 'market', component: MarketStrategy, meta: { scope: 'project' } },
     { path: '/projects/:id/directions', name: 'directions', component: PitchReview, meta: { scope: 'project' } },
     { path: '/projects/:id/setup', name: 'story-setup', component: StorySetup, meta: { scope: 'project' } },
+    { path: '/projects/:id/craft', name: 'craft-setup', component: CraftSetup, meta: { scope: 'project' } },
     { path: '/projects/:id/opening', name: 'opening-ready', component: OpeningReady, meta: { scope: 'project' } },
     // 兼容旧入口：助手现在由 AppShell 的右侧常驻 Dock 承载，不再渲染第二套独立页面。
     { path: '/projects/:id/assistant', name: 'assistant', redirect: to => `/projects/${String(to.params.id)}` },

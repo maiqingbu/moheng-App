@@ -1163,6 +1163,166 @@ fn b09_volume_close_blocks_unfinished_exit_without_partial_state() {
 }
 
 #[test]
+fn a_new_handoff_uses_the_current_final_evidence_after_volume_close() {
+    let fixture = fixture();
+    let chapter_scope = scope("CHAPTER", Some(("chapterId", "chapter:b09:1")));
+    let old_ref = insert_committed_artifact(
+        &fixture.connection,
+        "p-b09",
+        "final:b09:old",
+        "FinalChapter",
+        "CHAPTER",
+        &chapter_scope,
+        &json!({"body":"旧版结尾"}),
+    );
+    let set_final_pointer = |reference: &Value| {
+        fixture.connection.execute(
+            "UPDATE chapters SET final_artifact_id=?1, final_version=?2 WHERE chapter_id='chapter:b09:1'",
+            libsql_rusqlite::params![reference["artifactId"].as_str().unwrap(), reference["version"].as_i64().unwrap()],
+        ).unwrap();
+        fixture.connection.execute(
+            "INSERT INTO canon_evidence(evidence_id,project_id,final_chapter_id,source_artifact_id,source_version,evidence_type,quote,range_start,range_end,created_at) VALUES (?1,'p-b09','chapter:b09:1',?1,?2,'CANON_FACT',?3,0,4,?4)",
+            libsql_rusqlite::params![reference["artifactId"].as_str().unwrap(), reference["version"].as_i64().unwrap(),
+                if reference == &old_ref { "旧版结尾" } else { "新版结尾" }, NOW],
+        ).unwrap();
+    };
+    set_final_pointer(&old_ref);
+    fixture.connection.execute(
+        "UPDATE state_deltas SET value_json=json_set(value_json,'$.status','SATISFIED') WHERE state_id='task:b09:required'",
+        [],
+    ).unwrap();
+    VolumeLifecycleOwner::close_volume(
+        &fixture.connection,
+        VolumeCloseRequest {
+            project_id: "p-b09".into(),
+            volume_id: fixture.volume_id.clone(),
+            expected_revision: 0,
+            command_id: "close-before-retcon".into(),
+            idempotency_key: "key:close-before-retcon".into(),
+            reason: "完成卷一".into(),
+            fault_injection: None,
+            now: NOW.into(),
+        },
+    )
+    .unwrap();
+    fixture.connection.execute(
+        "DELETE FROM canonical_heads WHERE project_id='p-b09' AND artifact_type='FinalChapter' AND scope_key=?1",
+        [&chapter_scope],
+    ).unwrap();
+    let new_ref = insert_committed_artifact(
+        &fixture.connection,
+        "p-b09",
+        "final:b09:new",
+        "FinalChapter",
+        "CHAPTER",
+        &chapter_scope,
+        &json!({"body":"新版结尾"}),
+    );
+    set_final_pointer(&new_ref);
+
+    let handoff = VolumeLifecycleOwner::handoff_next_volume(
+        &fixture.connection,
+        NextVolumeHandoffRequest {
+            project_id: "p-b09".into(),
+            current_volume_id: fixture.volume_id.clone(),
+            next_volume_id: "vol:57fe64b1a257d3a7df137438".into(),
+            expected_revision: 1,
+            command_id: "handoff-after-retcon".into(),
+            idempotency_key: "key:handoff-after-retcon".into(),
+            title: "第二卷".into(),
+            chapter_start: 4,
+            chapter_end: 6,
+            target_words: 3000,
+            now: NOW.into(),
+        },
+    )
+    .unwrap();
+    let exit = current_payload_for_scope(
+        &fixture.connection,
+        "VolumeExitState",
+        &scope("VOLUME", Some(("volumeId", &fixture.volume_id))),
+    );
+    assert!(exit["handoffEvidenceRefs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|evidence| evidence["artifactId"] == old_ref["artifactId"]));
+    let evidence = handoff["inputRefs"]["compiledInput"]["exactEvidenceRefs"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        evidence
+            .iter()
+            .find(|value| value["artifactId"] == new_ref["artifactId"]),
+        Some(
+            &json!({"artifactId":"final:b09:new","version":1,"rangeStart":0,"rangeEnd":4,"quote":"新版结尾"})
+        ),
+    );
+    assert!(!evidence
+        .iter()
+        .any(|value| value["artifactId"] == old_ref["artifactId"]));
+    let intent = current_payload_for_scope(
+        &fixture.connection,
+        "VolumeIntent",
+        &scope("VOLUME", Some(("volumeId", "vol:57fe64b1a257d3a7df137438"))),
+    );
+    let constraints = intent["mustNotBreak"].to_string();
+    assert!(constraints.contains("final:b09:new"), "{constraints}");
+    assert!(!constraints.contains("final:b09:old"), "{constraints}");
+}
+
+#[test]
+fn a_closed_volume_cannot_handoff_after_a_required_task_reopens() {
+    let fixture = fixture();
+    let set_task = |status| {
+        fixture.connection.execute("UPDATE state_deltas SET value_json=?1 WHERE state_id='task:b09:required'",
+            [json!({"taskId":"task:b09:required","status":status,"evidenceRefs":[],"remainingConditions":[]}).to_string()]).unwrap();
+    };
+    set_task("SATISFIED");
+    VolumeLifecycleOwner::close_volume(
+        &fixture.connection,
+        VolumeCloseRequest {
+            project_id: "p-b09".into(),
+            volume_id: fixture.volume_id.clone(),
+            expected_revision: 0,
+            command_id: "b09:stale-exit:close".into(),
+            idempotency_key: "key:b09:stale-exit:close".into(),
+            reason: "卷退出条件当时成立".into(),
+            fault_injection: None,
+            now: NOW.into(),
+        },
+    )
+    .unwrap();
+    set_task("ACTIVE");
+    let result = VolumeLifecycleOwner::handoff_next_volume(
+        &fixture.connection,
+        NextVolumeHandoffRequest {
+            project_id: "p-b09".into(),
+            current_volume_id: fixture.volume_id.clone(),
+            next_volume_id: "vol:57fe64b1a257d3a7df137438".into(),
+            expected_revision: 1,
+            command_id: "b09:stale-exit:handoff".into(),
+            idempotency_key: "key:b09:stale-exit:handoff".into(),
+            title: "第二卷".into(),
+            chapter_start: 4,
+            chapter_end: 6,
+            target_words: 3000,
+            now: NOW.into(),
+        },
+    );
+    assert_eq!(result.unwrap_err(), "NEXT_VOLUME_BLOCKED_ELIGIBILITY");
+    let count: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT count(*) FROM volumes WHERE project_id='p-b09'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[test]
 fn b09_volume_close_is_atomic_and_unlocks_next_volume_handoff() {
     let fixture = fixture();
     fixture.connection.execute("UPDATE state_deltas SET value_json=?1 WHERE state_id='task:b09:required'", [json!({"taskId":"task:b09:required","status":"SATISFIED","evidenceRefs":[],"remainingConditions":[]}).to_string()]).unwrap();

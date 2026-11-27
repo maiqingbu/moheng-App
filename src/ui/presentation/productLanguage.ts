@@ -68,10 +68,36 @@ const statusLabels: Record<string, string> = {
 }
 
 const errorLabels: Record<string, string> = {
+  STORY_BIBLE_READY_SENTENCE: '故事底稿的风格描述里写了带引号的台词，这类句子会被原样抄进正文。请改成对说话方式的描述后重试。',
+  STORY_BIBLE_CONTRACT: '故事底稿内容不完整：开篇走向需要正好 3 章，规则 2 到 5 条，配角 2 到 8 人。',
+  STORY_BIBLE_COUNT_INVALID: '这次没有得到完整的 3 版故事底稿，请重新生成。',
+  STYLE_CARD_CONTRACT: '风格卡内容不完整：写法规则需要 4 到 10 条，禁用写法至少 1 条。',
+  STYLE_SAMPLE_TOO_SHORT: '范文太短，至少需要 800 字才能测量写法。',
+  STYLE_SAMPLE_MISSING: '还没有保存范文，请先粘贴并保存范文。',
+  STYLE_SAMPLE_TOO_LARGE: '范文过长，请控制在 2 万字以内。',
+  STYLE_SAMPLE_REQUIRED: '请先粘贴范文再保存。',
+  CRAFT_CANDIDATE_NOT_SELECTABLE: '这一版候选已不可选，请刷新后重新选择。',
+  B11_STORY_SETUP_REQUIRED: '请先保存故事核心，再生成故事底稿。',
+  B11_PLATFORM_REQUIRED: '请先选择目标平台：每章字数按平台确定。',
   COMMAND_RESULT_UNCONFIRMED: '正式回执已返回，结果待确认。请重新读取结果，不要重复提交。',
   REVISION_CONFLICT: '作品记录在提交前发生变化，请重新读取并检查本次操作。',
   PROJECT_BUSY: '项目正在处理后台任务，请稍后再试。',
   PROJECT_WRITE_LOCKED: '本作品正在生成，暂时只读；生成完成或暂停后即可修改。',
+  READ_POOL_BUSY: '作品正在被读取，请稍后再恢复备份。',
+  'restore integrity failed': '备份校验未通过，作品没有任何改动。',
+  CHAPTER_LENGTH_RANGE_INVALID: '字数区间无效：最少 500 字、最多 10000 字，且最少字数要小于最多字数。',
+  B08_PLAN_LENGTH_OUT_OF_RANGE: '本章规划的篇幅与字数区间不符，未写入；请重新生成本章（会重新规划），或调整字数区间。',
+  B08_PLAN_GOAL_REPEATED: '本章目标与已完成的章节重复。请重新规划，从前文的结果推进新的行动或后果。',
+  B08_NARRATIVE_REVIEW_REQUIRED: '已保存草稿并暂停续写。请查看前后文证据，复核后可以重新生成本章。',
+  B07_BOOK_DIRECTION_REQUIRED: '第一卷的阶段与小步尚未通过校验。请重新生成并确认全书方向，再开始卷一。',
+  BOOK_PLAN_SIGNING_REAPPROVAL_REQUIRED: '签约回执已更新。请先在生产中心更新正式总纲，再继续长篇创作。',
+  B07_VOLUME_DIRECTION_ROUTE_REQUIRED: '卷一规划还未包含已通过校验的小步。请按当前总纲重新生成卷一规划。',
+  B08_RENDER_LENGTH_OUT_OF_RANGE: '正文仍不在字数区间，本章尚未提交。重试会优先沿用与当前章纲匹配的底稿，也可调整字数区间。',
+  B08_RENDER_DUPLICATE_SPAN: '正文有连续重复达到 100 字。本章尚未提交，可重新生成后核对。',
+  B08_RENDER_PRIOR_CHAPTER_COPY: '模型整篇复用了已提交的前文，本章尚未提交。可重试写本章的新情节。',
+  B08_RENDER_SIGNING_REPETITION: '本章有短语超过开篇签约的重复次数，本章尚未提交。可重试修整。',
+  B08_OPENING_HISTORY_SIGNING_REPETITION: '已提交的开篇有短语超过签约的重复次数。请先核对前文。',
+  B08_RENDER_REPEATED_PHRASES: '补写重复了原有整句或超限短语。底稿已保存，可从底稿继续补写。',
   PROJECT_TRASH_TARGET_EXISTS: '回收站里已有同名作品，请先处理回收站中的同名作品后再删除。',
   CONTEXT_HARD_BUDGET_EXCEEDED: '本章必需资料超出预算，请调整当前任务范围后重新准备；不能省略硬性约束。',
   CONTEXT_INCOMPLETE: '本章必需资料不完整，暂时不能继续生产。',
@@ -89,11 +115,12 @@ const errorLabels: Record<string, string> = {
   GATE_POLICY_CANON_SCAN_INCOMPLETE: '现有事实数量超出本次检查范围，规则未保存；请检查相关正式事实后重试。',
   GATE_POLICY_RULE_NOT_FOUND: '没有找到要停用的谓词规则，请刷新当前规则后重试。',
   MODEL_PRICE_REQUIRED: '已设置作品预算，但当前模型没有价格。请先填写该模型价格，未发送请求。',
-  BUDGET_EXCEEDED: '本次模型调用会超出剩余预算，未发送请求。',
+  BUDGET_EXCEEDED: '本次模型调用会超出本章额度或剩余预算，未发送请求。如果是本章调用次数已用完，可在写作页“重置本章额度”后重新生成。',
   FUTURE_RESERVATION_VIOLATION: '本章提前使用了后续保留的剧情内容，需要调整当前计划或正文。',
   CONTINUITY_BRIDGE_REQUIRED: '当前剧情线缺少衔接说明，暂时不能继续提交。',
   EVIDENCE_QUOTE_NOT_UNIQUE: '没有在该责任的来源正文中找到唯一引文，请补充一段更长、更有辨识度的原文。',
   UNKNOWN_REMOTE_OUTCOME: '远程请求的结果尚未确认，请先核对现有记录，不要重复发起请求。',
+  AUDIT_REMINDER_NOT_OPEN: '这条提醒已经关闭，刷新后可以在“已处理”里查看。',
   PLAN_STALE: '当前规划已与最新内容不一致，需要重新确认或更新。',
   AUTHORIZATION_STALE: '作品状态已经变化，请重新确认修复方案。',
   EVIDENCE_GAP: '现有信息不足，暂时无法给出可靠结论。请补充对应章节或设定依据。',
@@ -117,6 +144,7 @@ const errorLabels: Record<string, string> = {
   P01_PROVIDER_EMPTY_CONTENT: '模型服务返回内容为空，请重试。',
   P01_MALFORMED_RESPONSE: '模型服务连接成功，但响应内容不是预期的 {"ok":true} JSON。',
   P01_MODEL_JSON_INVALID: '模型服务返回的内容不是有效的结构化结果，请重试。',
+  P01_MODEL_OUTPUT_SPEC: '模型返回的内容缺少必填项或格式不对，已自动重试一次仍不合格，请重试。',
   P01_MODEL_PAYLOAD_INVALID: '模型服务返回的内容无法识别，请重试。',
   B11_STORY_DIRECTION_OUTPUT_INVALID: '模型返回的故事方向格式不完整，请重试。',
   B11_STORY_DIRECTION_COUNT_INVALID: '模型没有返回完整的三个故事方向，请重试。',
@@ -376,6 +404,11 @@ export function selectEvidenceByIdentity<T extends ProductEvidenceLookup>(items:
   return items.find(item => item.artifactId === identity.artifactId
     && item.version === identity.version
     && (identity.payloadHash === undefined || item.payloadHash === identity.payloadHash))
+}
+
+/** A command that was sent and has not settled yet. */
+export function isInFlight(status: unknown): boolean {
+  return status === 'submitting' || status === 'accepted' || status === 'processing'
 }
 
 export function commandMessage(state: { status?: unknown; message?: unknown } | unknown): string {

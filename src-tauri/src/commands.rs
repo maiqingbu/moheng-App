@@ -3,10 +3,9 @@ use crate::commit::CommitService;
 use crate::generated::types::ProjectCommandReceipt;
 use crate::generated::types::{ArtifactEnvelope, CommitBundle};
 use crate::harness::{
-    grounded_finding, plan_support, registry_digest_map, resolve_project_scope,
-    BoundedCapabilityExecutor, CapabilityCallEnvelope, CapabilityRegistry, DiagnosticEngine,
-    EvidenceLedgerEntry, ReadCapabilityAdapter, RequestedBounds, SupportCheckpoint,
-    SupportSessionReceipt,
+    grounded_finding, registry_digest_map, resolve_project_scope, BoundedCapabilityExecutor,
+    CapabilityCallEnvelope, CapabilityRegistry, DiagnosticEngine, EvidenceLedgerEntry,
+    ReadCapabilityAdapter, RequestedBounds, SupportCheckpoint, SupportSessionReceipt,
 };
 use crate::hash::sha256_canonical;
 use crate::narrative::{
@@ -27,6 +26,11 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tauri::State;
+
+/// The required route tasks ahead a chapter's context carries by default: the
+/// current step only (real run 2026-11-25: shown four, chapter 4 wrote step 3,
+/// and chapter 5 wrote it again).
+const CONTEXT_REQUIRED_TASKS_AHEAD: usize = 1;
 
 #[derive(Clone)]
 pub struct KernelState {
@@ -655,6 +659,97 @@ pub fn query_story_setup_impl(state: &KernelState, request: Value) -> Result<Val
         .map_err(|error| error.to_string())
 }
 
+pub fn query_craft_setup_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let request = request.get("request").cloned().unwrap_or(request);
+    let project_id = required_string(&request, "projectId")?;
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            crate::craft_setup::query_craft_setup(connection, project_id)
+                .map_err(ManagerError::ProjectCommand)
+        })
+        .map_err(|error| error.to_string())
+}
+
+/// WM-2a: the owner's corrections in force, oldest first.
+pub fn query_owner_corrections_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let request = request.get("request").cloned().unwrap_or(request);
+    let project_id = required_string(&request, "projectId")?;
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            crate::repositories::work_memory::corrections(connection, project_id)
+                .map(|items| json!({"items":items}))
+                .map_err(ManagerError::ProjectCommand)
+        })
+        .map_err(|error| error.to_string())
+}
+
+/// WM-2a (WORK_MEMORY_DESIGN §6.2): records or revokes one of the owner's
+/// corrections: a writing rule for the whole work, or a remembered
+/// reminder for the person or thing it names. Kept on this machine with the
+/// work like the style sample: not an artifact, no revision.
+fn execute_owner_correction(
+    state: &KernelState,
+    request: &Value,
+    command_type: &str,
+    project_id: &str,
+    command_id: &str,
+    requested_at: &str,
+) -> Result<Value, String> {
+    let payload = request.get("payload").cloned().unwrap_or(Value::Null);
+    let text = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    };
+    let handle = state
+        .manager
+        .open(project_id, "", requested_at)
+        .map_err(|error| error.to_string())?;
+    let (message, correction_id) = if command_type == "memory_correction_revoke" {
+        let correction_id =
+            text("correctionId").ok_or_else(|| "IPC_INVALID:payload.correctionId".to_string())?;
+        if !crate::repositories::work_memory::revoke_correction(
+            &handle,
+            project_id,
+            &correction_id,
+            requested_at,
+        )? {
+            return Err("WM2_CORRECTION_NOT_FOUND".into());
+        }
+        ("已撤销这条纠正，之后的章节不再按它写。", correction_id)
+    } else {
+        let content =
+            text("content").ok_or_else(|| "WM2_CORRECTION_CONTENT_REQUIRED".to_string())?;
+        let correction = crate::work_memory::Correction {
+            // From the command, so a retried command records it once.
+            correction_id: format!(
+                "correction:{}",
+                &sha256_canonical(&json!(command_id)).map_err(|error| error.to_string())?[..24]
+            ),
+            subject: (command_type == "memory_correction_add")
+                .then(|| text("subject"))
+                .flatten(),
+            content,
+            source_decision_id: text("decisionId"),
+            created_at: requested_at.into(),
+        };
+        crate::repositories::work_memory::add_correction(&handle, project_id, &correction)?;
+        (
+            "已记住。之后每一章的规划和写作都会照这条来，和其他内容冲突时以它为准。",
+            correction.correction_id,
+        )
+    };
+    Ok(json!({
+        "commandId":command_id,"projectId":project_id,"resultProjectId":project_id,
+        "finalStatus":"committed","message":message,"correctionId":correction_id
+    }))
+}
+
 pub fn query_opening_ready_impl(state: &KernelState, request: Value) -> Result<Value, String> {
     let request = request.get("request").cloned().unwrap_or(request);
     let project_id = required_string(&request, "projectId")?;
@@ -678,13 +773,75 @@ pub fn query_assistant_repair_plan_impl(
         .get("requestedAt")
         .and_then(Value::as_str)
         .unwrap_or("2026-01-01T00:00:00Z");
-    state
+    let intent = crate::assistant_intent::resolve_intent(
+        state,
+        project_id,
+        crate::assistant_intent::AssistantEntry::Repair,
+        question,
+        now,
+    );
+    let mut plan = state
         .manager
         .with_read_connection(project_id, now, |connection| {
-            crate::project_entry::assistant_repair_plan(connection, project_id, question, now)
-                .map_err(ManagerError::ProjectCommand)
+            crate::project_entry::assistant_repair_plan_for_kind(
+                connection,
+                project_id,
+                question,
+                &intent.intent,
+                now,
+            )
+            .map_err(ManagerError::ProjectCommand)
         })
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    plan["intent"] = intent.to_json();
+    Ok(plan)
+}
+
+/// FX-22: the work's backups, newest first, with the revision each was taken
+/// at (read from the backup file itself; a restore expects it).
+pub fn query_backups_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let request = request.get("request").cloned().unwrap_or(request);
+    let project_id = required_string(&request, "projectId")?;
+    let backups = state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            crate::repositories::ops::list_backups(connection, project_id, 50)
+                .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(json!({"projectId":project_id,"backups":backups}))
+}
+
+/// FX-21: how the project assistant understands a question for one entry.
+pub fn classify_assistant_intent_impl(
+    state: &KernelState,
+    request: Value,
+) -> Result<Value, String> {
+    let request = request.get("request").cloned().unwrap_or(request);
+    let project_id = required_string(&request, "projectId")?;
+    let question = required_string(&request, "question")?;
+    let entry =
+        crate::assistant_intent::AssistantEntry::from_code(required_string(&request, "entry")?)?;
+    let now = request
+        .get("requestedAt")
+        .and_then(Value::as_str)
+        .unwrap_or("2026-01-01T00:00:00Z");
+    Ok(crate::assistant_intent::resolve_intent(state, project_id, entry, question, now).to_json())
+}
+
+/// P3: the story bible change the owner's words ask for, as a draft the
+/// owner reviews before any change request is made.
+pub fn draft_setup_change_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let request = request.get("request").cloned().unwrap_or(request);
+    let project_id = required_string(&request, "projectId")?;
+    let question = required_string(&request, "question")?;
+    let now = request
+        .get("requestedAt")
+        .and_then(Value::as_str)
+        .unwrap_or("2026-01-01T00:00:00Z");
+    Ok(crate::assistant_intent::draft_setup_change(
+        state, project_id, question, now,
+    ))
 }
 
 /// B08 production projection.  This is a bounded read projection assembled
@@ -922,14 +1079,6 @@ fn execute_decision_submit(
         .pointer("/payload/choice")
         .and_then(Value::as_str)
         .unwrap_or("recommended");
-    let action = match choice {
-        "recommended" => "RETRY_REMOTE",
-        "RETRY_REMOTE" | "MARK_FAILED" | "CANCEL_JOB" => choice,
-        _ => return Err("UNKNOWN_REMOTE_OUTCOME requires an explicit supported action".into()),
-    };
-    if action == "RETRY_REMOTE" {
-        state.production_gateway.resolve_profile()?;
-    }
     let spec = project_command_spec(
         project_id,
         project_id,
@@ -941,6 +1090,32 @@ fn execute_decision_submit(
         requested_at,
         true,
     );
+    if choice == "ACKNOWLEDGE" {
+        let outcome = state
+            .manager
+            .commit_project_command(spec, |connection| {
+                crate::repositories::runtime::acknowledge_audit_reminder(
+                    connection,
+                    project_id,
+                    decision_id,
+                    requested_at,
+                )
+                .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+            })
+            .map_err(|error| error.to_string())?;
+        let mut response = project_command_response(&outcome_receipt(outcome));
+        response["message"] = json!("提醒已关闭。");
+        response["result"] = json!({"action":"ACKNOWLEDGE"});
+        return Ok(response);
+    }
+    let action = match choice {
+        "recommended" => "RETRY_REMOTE",
+        "RETRY_REMOTE" | "MARK_FAILED" | "CANCEL_JOB" => choice,
+        _ => return Err("UNKNOWN_REMOTE_OUTCOME requires an explicit supported action".into()),
+    };
+    if action == "RETRY_REMOTE" {
+        state.production_gateway.resolve_profile()?;
+    }
     let outcome = state
         .manager
         .commit_project_command(spec, |connection| {
@@ -1407,7 +1582,7 @@ fn narrative_state_from_request(
             connection,
             project_id,
             &entity_refs,
-            100,
+            crate::narrative::STATE_SOURCE_LIMIT,
         ),
         ContextHardSource::Canon,
         &scope,
@@ -1417,7 +1592,7 @@ fn narrative_state_from_request(
             connection,
             project_id,
             &entity_refs,
-            100,
+            crate::narrative::STATE_SOURCE_LIMIT,
         ),
         ContextHardSource::Canon,
         &scope,
@@ -1427,7 +1602,7 @@ fn narrative_state_from_request(
             connection,
             project_id,
             &entity_refs,
-            100,
+            crate::narrative::STATE_SOURCE_LIMIT,
         ),
         ContextHardSource::Knowledge,
         &scope,
@@ -1449,7 +1624,7 @@ fn narrative_state_from_request(
             connection,
             project_id,
             &entity_refs,
-            100,
+            crate::narrative::STATE_SOURCE_LIMIT,
         ),
         ContextHardSource::Canon,
         &scope,
@@ -3058,7 +3233,7 @@ pub(crate) fn context_input_from_authority(
             goal_contract_refs.push(gate_policy_ref);
         }
     }
-    let (route_task_refs, route_task_contracts) = if let Some(volume_id) =
+    let (route_task_refs, route_task_contracts, route_payload) = if let Some(volume_id) =
         volume_id.filter(|_| !opening_bootstrap)
     {
         let route = map_context_query(
@@ -3101,9 +3276,9 @@ pub(crate) fn context_input_from_authority(
                     .map(|task_id| (task_id.to_owned(), item.clone()))
             })
             .collect::<BTreeMap<_, _>>();
-        (references, contracts)
+        (references, contracts, payload)
     } else {
-        (Vec::new(), BTreeMap::new())
+        (Vec::new(), BTreeMap::new(), Value::Null)
     };
     let explicit_task_scope = scope_selection
         .as_ref()
@@ -3114,10 +3289,62 @@ pub(crate) fn context_input_from_authority(
             "CONTEXT_HARD_INCOMPLETE|sources=TASK|scope={scope}"
         ));
     }
-    let plan_task_refs = scope_selection
+    let plan_task_refs = match scope_selection
         .as_ref()
         .and_then(|selection| selection.task_refs.clone())
-        .unwrap_or_else(|| route_task_refs.iter().take(100).cloned().collect());
+    {
+        Some(task_refs) => task_refs,
+        None => {
+            // Real run round 25: a volume of steps made every chapter's
+            // context carry the whole route. A chapter sees the tasks still
+            // open, and of the required ones the next few in route order.
+            let route_refs = route_task_refs
+                .iter()
+                .take(100)
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            let passed = map_context_query(
+                crate::planning::route_task_states(
+                    connection,
+                    project_id,
+                    volume_id.unwrap_or_default(),
+                    &route_payload,
+                ),
+                ContextHardSource::Task,
+                &scope,
+            )?
+            .into_iter()
+            .filter(|task| crate::planning::dependency_met(&task.value))
+            .map(|task| task.state_id)
+            .collect::<BTreeSet<_>>();
+            let mut required_ahead = 0;
+            route_refs
+                .into_iter()
+                .filter(|task_ref| !passed.contains(*task_ref))
+                .filter(|task_ref| {
+                    let required = route_task_contracts
+                        .get(*task_ref)
+                        .and_then(|task| task.get("class"))
+                        .and_then(Value::as_str)
+                        == Some("REQUIRED");
+                    required_ahead += usize::from(required);
+                    let ready = route_task_contracts
+                        .get(*task_ref)
+                        .and_then(|task| task["dependsOnTaskIds"].as_array())
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .all(|dependency| passed.contains(dependency));
+                    if required {
+                        required_ahead <= CONTEXT_REQUIRED_TASKS_AHEAD
+                    } else {
+                        ready
+                    }
+                })
+                .map(ToOwned::to_owned)
+                .collect()
+        }
+    };
     if plan_task_refs.len() > 100
         || plan_task_refs
             .iter()
@@ -3137,8 +3364,29 @@ pub(crate) fn context_input_from_authority(
                 .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=TASK|scope={scope}"))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    // Real run round 26: a task's readiness is read from the states of the
+    // tasks it depends on, which the default selection leaves out once they
+    // are satisfied; a chosen selection is taken as it is.
+    let default_selection = scope_selection
+        .as_ref()
+        .and_then(|selection| selection.task_refs.as_ref())
+        .is_none();
+    let dependency_refs = plan_task_refs
+        .iter()
+        .filter(|_| default_selection)
+        .filter_map(|task_ref| route_task_contracts.get(task_ref))
+        .flat_map(|task| {
+            task["dependsOnTaskIds"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter_map(|dependency| dependency.as_str().map(ToOwned::to_owned))
+        .filter(|dependency| !plan_task_refs.contains(dependency))
+        .collect::<BTreeSet<_>>();
     let task_ref_slices = plan_task_refs
         .iter()
+        .chain(&dependency_refs)
         .map(String::as_str)
         .collect::<Vec<_>>();
     let task_states = map_context_query(
@@ -3247,7 +3495,13 @@ pub(crate) fn context_input_from_authority(
         hard_tokens: 0,
         soft_tokens: 0,
     };
-    input.hard_tokens = crate::narrative::measure_context_hard_budget(&input)?.estimated_tokens;
+    // QC-1 (owner decision 2026-10-26): a context over budget leaves out the
+    // oldest and least binding facts instead of failing.
+    input.hard_tokens = crate::narrative::fit_context_hard_budget(&mut input, &|ids| {
+        crate::repositories::ops::source_chapter_numbers(connection, project_id, ids)
+            .map_err(|error| error.to_string())
+    })?
+    .estimated_tokens;
     crate::narrative::validate_context_hard_completeness(&input)?;
     Ok(input)
 }
@@ -3578,12 +3832,12 @@ pub fn query_volume_lifecycle_impl(state: &KernelState, request: Value) -> Resul
     state
         .manager
         .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
-            let planning_state = crate::repositories::volume_lifecycle::VolumeLifecycleRepository::planning_projection(
+            let planning_state = crate::volume_lifecycle::VolumeLifecycleOwner::read_planning_state(
                 connection,
                 project_id,
                 volume_id,
             )
-            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?
+            .map_err(ManagerError::ProjectCommand)?
             .unwrap_or_else(|| json!({
                 "status": "NOT_MATERIALIZED",
                 "projectId": project_id,
@@ -5164,6 +5418,175 @@ impl ReadCapabilityAdapter for RepositoryReadAdapter<'_> {
     }
 }
 
+/// The support steps for planned calls, numbered after `offset`.
+fn planned_support_steps(
+    planned: &[crate::assistant_answer::PlannedCall],
+    offset: usize,
+) -> Vec<crate::harness::SupportTaskStep> {
+    planned
+        .iter()
+        .enumerate()
+        .map(|(index, call)| crate::harness::SupportTaskStep {
+            step_id: format!("step:{}", offset + index + 1),
+            capability_id: call.capability_id.clone(),
+            status: crate::harness::SupportStepStatus::PENDING,
+            typed_args: call.input.clone(),
+        })
+        .collect()
+}
+
+/// What a support session's queries returned so far.
+#[derive(Default)]
+struct SupportRun {
+    calls: Vec<crate::harness::CapabilityResultEnvelope>,
+    /// Each call's capability and input, in the order of `calls`.
+    asked: Vec<(String, Value)>,
+    evidence_ledger: Vec<EvidenceLedgerEntry>,
+    source_refs: BTreeSet<String>,
+    result_digests: Vec<String>,
+    evidence_found: bool,
+}
+
+impl SupportRun {
+    fn nothing_found(&self) -> bool {
+        self.calls
+            .iter()
+            .all(|call| crate::assistant_answer::is_empty_result(&call.result))
+    }
+
+    /// The results so far as the follow-up planner reads them.
+    fn prompt_views(&self) -> Vec<Value> {
+        self.calls
+            .iter()
+            .zip(&self.asked)
+            .map(|(call, (capability, input))| {
+                json!({"capabilityId":capability,"input":input,
+                    "empty":crate::assistant_answer::is_empty_result(&call.result),"truncated":call.truncated})
+            })
+            .collect()
+    }
+
+    /// The results as the composer reads them.
+    fn result_views(&self) -> Vec<Value> {
+        self.calls
+            .iter()
+            .zip(&self.asked)
+            .map(|(call, (capability, _))| {
+                crate::assistant_answer::result_prompt_view(
+                    &call.call_id,
+                    capability,
+                    &call.result,
+                    &call.source_refs,
+                    call.truncated,
+                )
+            })
+            .collect()
+    }
+}
+
+/// Runs support steps through the bounded executor on one read connection.
+struct SupportRunner<'a> {
+    state: &'a KernelState,
+    project_id: &'a str,
+    requested_at: &'a str,
+    registry: &'a CapabilityRegistry,
+    executor: &'a BoundedCapabilityExecutor,
+    mode: &'a str,
+    revision: i64,
+    model_planned: bool,
+    request: &'a Value,
+}
+
+impl SupportRunner<'_> {
+    fn run(
+        &self,
+        steps: &mut [crate::harness::SupportTaskStep],
+        run: &mut SupportRun,
+    ) -> Result<(), String> {
+        let (project_id, requested_at, revision) =
+            (self.project_id, self.requested_at, self.revision);
+        self.state
+            .manager
+            .with_read_connection(project_id, requested_at, |connection| {
+                let adapter = RepositoryReadAdapter {
+                    connection,
+                    project_id,
+                };
+                for step in steps.iter_mut() {
+                    step.status = crate::harness::SupportStepStatus::RUNNING;
+                    let spec = self
+                        .registry
+                        .specs
+                        .get(&step.capability_id)
+                        .ok_or_else(|| ManagerError::ProjectCommand("CAPABILITY_UNKNOWN".into()))?;
+                    let call_input = if self.model_planned {
+                        step.typed_args.clone()
+                    } else if step.capability_id == "query_knowledge" {
+                        json!({"entityIds":request_strings(self.request,"entityIds")})
+                    } else {
+                        self.request.clone()
+                    };
+                    let call = CapabilityCallEnvelope {
+                        call_id: format!("call:{}", step.step_id),
+                        capability_id: spec.capability_id.clone(),
+                        capability_version: spec.version.clone(),
+                        spec_digest: spec.spec_digest.clone(),
+                        mode: self.mode.into(),
+                        project_id: project_id.into(),
+                        project_revision: revision,
+                        input_digest: sha256_canonical(&call_input)
+                            .map_err(|e| ManagerError::ProjectCommand(e.to_string()))?,
+                        input: call_input,
+                        requested_bounds: RequestedBounds {
+                            max_results: 100,
+                            max_serialized_bytes: 65_536,
+                        },
+                    };
+                    let result = match self.executor.execute(&adapter, &call) {
+                        Ok(result) => result,
+                        // A planned step the capability cannot take is skipped,
+                        // not the whole session.
+                        Err(_) if self.model_planned => {
+                            step.status = crate::harness::SupportStepStatus::SKIPPED;
+                            continue;
+                        }
+                        Err(error) => return Err(ManagerError::ProjectCommand(error)),
+                    };
+                    run.source_refs.extend(result.source_refs.clone());
+                    run.result_digests.push(result.result_digest.clone());
+                    if step.capability_id == "query_evidence" {
+                        run.evidence_found = result
+                            .result
+                            .as_array()
+                            .is_some_and(|items| !items.is_empty());
+                    }
+                    run.evidence_ledger.push(EvidenceLedgerEntry {
+                        call_id: result.call_id.clone(),
+                        capability_id: step.capability_id.clone(),
+                        capability_version: spec.version.clone(),
+                        spec_digest: spec.spec_digest.clone(),
+                        project_id: project_id.into(),
+                        project_revision: revision,
+                        input_digest: call.input_digest.clone(),
+                        source_refs: result.source_refs.clone(),
+                        result_digest: result.result_digest.clone(),
+                        truncated: result.truncated,
+                        bounds_applied: result.bounds_applied.clone(),
+                        started_at: requested_at.into(),
+                        finished_at: requested_at.into(),
+                        status: result.status.clone(),
+                    });
+                    run.asked
+                        .push((step.capability_id.clone(), call.input.clone()));
+                    run.calls.push(result);
+                    step.status = crate::harness::SupportStepStatus::DONE;
+                }
+                Ok::<(), ManagerError>(())
+            })
+            .map_err(|e| e.to_string())
+    }
+}
+
 pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value, String> {
     let project_id = required_string(&request, "projectId")?;
     let question = required_string(&request, "question")?;
@@ -5184,87 +5607,119 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
         .project_revision(project_id)
         .map_err(|e| e.to_string())?;
     let scope = resolve_project_scope(project_id, revision, question, mode, requested_scope)?;
-    let mut plan = plan_support(&scope, question, requested_at)?;
     let registry = CapabilityRegistry::read_only_r1();
     let executor = BoundedCapabilityExecutor {
         registry: registry.clone(),
     };
     let input = request.clone();
-    for step in &mut plan.steps {
-        step.typed_args = input.clone();
-    }
-    let mut calls = Vec::new();
-    let mut evidence_ledger = Vec::new();
-    let mut source_refs = BTreeSet::new();
-    let mut result_digests = Vec::new();
-    let mut evidence_found = false;
-    state
-        .manager
-        .with_read_connection(project_id, requested_at, |connection| {
-            let adapter = RepositoryReadAdapter {
-                connection,
-                project_id,
-            };
-            for step in &mut plan.steps {
-                step.status = crate::harness::SupportStepStatus::RUNNING;
-                let spec = registry
-                    .specs
-                    .get(&step.capability_id)
-                    .ok_or_else(|| ManagerError::ProjectCommand("CAPABILITY_UNKNOWN".into()))?;
-                let call_input = if step.capability_id == "query_knowledge" {
-                    json!({"entityIds":request_strings(&input,"entityIds")})
-                } else {
-                    input.clone()
-                };
-                let call = CapabilityCallEnvelope {
-                    call_id: format!("call:{}", step.step_id),
-                    capability_id: spec.capability_id.clone(),
-                    capability_version: spec.version.clone(),
-                    spec_digest: spec.spec_digest.clone(),
-                    mode: mode.into(),
-                    project_id: project_id.into(),
-                    project_revision: revision,
-                    input_digest: sha256_canonical(&call_input)
-                        .map_err(|e| ManagerError::ProjectCommand(e.to_string()))?,
-                    input: call_input,
-                    requested_bounds: RequestedBounds {
-                        max_results: 100,
-                        max_serialized_bytes: 65_536,
-                    },
-                };
-                let result = executor
-                    .execute(&adapter, &call)
-                    .map_err(ManagerError::ProjectCommand)?;
-                source_refs.extend(result.source_refs.clone());
-                result_digests.push(result.result_digest.clone());
-                if step.capability_id == "query_evidence" {
-                    evidence_found = result
-                        .result
-                        .as_array()
-                        .is_some_and(|items| !items.is_empty());
-                }
-                evidence_ledger.push(EvidenceLedgerEntry {
-                    call_id: result.call_id.clone(),
-                    capability_id: step.capability_id.clone(),
-                    capability_version: spec.version.clone(),
-                    spec_digest: spec.spec_digest.clone(),
-                    project_id: project_id.into(),
-                    project_revision: revision,
-                    input_digest: call.input_digest.clone(),
-                    source_refs: result.source_refs.clone(),
-                    result_digest: result.result_digest.clone(),
-                    truncated: result.truncated,
-                    bounds_applied: result.bounds_applied.clone(),
-                    started_at: requested_at.into(),
-                    finished_at: requested_at.into(),
-                    status: result.status.clone(),
-                });
-                calls.push(result);
-                step.status = crate::harness::SupportStepStatus::DONE;
-            }
-            Ok::<(), ManagerError>(())
+    // Owner decision 2026-11-27 (H00 HFR-002/003): a configured model plans
+    // the queries over the planner menu; without one, or without a usable
+    // plan, the fixed plan for the question's kind stays.
+    let directory = state
+        .production_gateway
+        .plans_assistant_answers()
+        .then(|| {
+            state
+                .manager
+                .with_read_connection(project_id, requested_at, |connection| {
+                    crate::repositories::narrative::NarrativeRepository::assistant_directory(
+                        connection, project_id, 120,
+                    )
+                    .map_err(|e| ManagerError::ProjectCommand(e.to_string()))
+                })
+                .ok()
+                .map(|(entities, chapters)| {
+                    crate::assistant_answer::Directory { entities, chapters }
+                        .for_question(question, 40, 30)
+                })
         })
-        .map_err(|e| e.to_string())?;
+        .flatten();
+    let model_planned = directory.as_ref().and_then(|directory| {
+        crate::assistant_answer::plan_with_model(
+            state,
+            project_id,
+            question,
+            directory,
+            None,
+            requested_at,
+        )
+        .ok()
+    });
+    // A plan the model made needs no separate guess at the question's kind.
+    let intent = if model_planned.is_some() {
+        crate::assistant_intent::IntentResolution::keyword(
+            crate::assistant_intent::AssistantEntry::Diagnose,
+            question,
+            "MODEL_PLANNED",
+        )
+    } else {
+        crate::assistant_intent::resolve_intent(
+            state,
+            project_id,
+            crate::assistant_intent::AssistantEntry::Diagnose,
+            question,
+            requested_at,
+        )
+    };
+    let mut plan = crate::harness::plan_support_for_context(
+        &scope,
+        &intent.intent,
+        request.get("chapterId").and_then(Value::as_str).is_some(),
+        requested_at,
+    )?;
+    match &model_planned {
+        Some(planned) => plan.steps = planned_support_steps(planned, 0),
+        None => {
+            for step in &mut plan.steps {
+                step.typed_args = input.clone();
+            }
+        }
+    }
+    let runner = SupportRunner {
+        state,
+        project_id,
+        requested_at,
+        registry: &registry,
+        executor: &executor,
+        mode,
+        revision,
+        model_planned: model_planned.is_some(),
+        request: &input,
+    };
+    let mut run = SupportRun::default();
+    runner.run(&mut plan.steps, &mut run)?;
+    // HFR-007: one follow-up round, at most two steps, when the planned
+    // queries all came back empty.
+    if let (Some(directory), Some(_)) = (&directory, &model_planned) {
+        if run.nothing_found() {
+            let earlier = run.prompt_views();
+            if let Ok(more) = crate::assistant_answer::plan_with_model(
+                state,
+                project_id,
+                question,
+                directory,
+                Some(&earlier),
+                requested_at,
+            ) {
+                let mut extra = planned_support_steps(&more, plan.steps.len());
+                runner.run(&mut extra, &mut run)?;
+                plan.steps.extend(extra);
+            }
+        }
+    }
+    let nothing_found = run.nothing_found();
+    let conflicting_result = run.calls.iter().any(|call| {
+        call.result.get("supportStatus").and_then(Value::as_str) == Some("CONFLICTING")
+    });
+    let result_views = run.result_views();
+    let SupportRun {
+        calls,
+        evidence_ledger,
+        source_refs,
+        result_digests,
+        evidence_found,
+        ..
+    } = run;
     let requires_evidence = question.contains("知道") || question.contains("承诺");
     let planning_question = [
         "高潮",
@@ -5282,7 +5737,10 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
     ]
     .iter()
     .any(|term| question.to_lowercase().contains(term));
-    let diagnostic_finding = if question.contains("知道") {
+    // A model-planned answer rests on its own queries, not the keyword checks.
+    let diagnostic_finding = if model_planned.is_some() {
+        None
+    } else if question.contains("知道") {
         state
             .manager
             .with_read_connection(project_id, requested_at, |connection| {
@@ -5379,7 +5837,7 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
     } else {
         None
     };
-    let finding = diagnostic_finding.unwrap_or_else(|| {
+    let mut finding = diagnostic_finding.unwrap_or_else(|| {
         grounded_finding(
             &scope,
             if requires_evidence && !evidence_found {
@@ -5396,6 +5854,54 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
             Vec::new(),
         )
     });
+    // HFR-004 (owner decision 2026-11-27): the answer is written from the
+    // results alone; a sentence citing no returned record is dropped, and the
+    // support is the system's, not the model's.
+    let mut answer = Value::Null;
+    if model_planned.is_some() {
+        // Nothing came back: the answer is that, without asking the model.
+        let reply = if nothing_found {
+            Ok(json!({"sentences":[]}))
+        } else {
+            crate::assistant_answer::compose_with_model(
+                state,
+                project_id,
+                question,
+                &result_views,
+                requested_at,
+            )
+        };
+        if let Ok(reply) = reply {
+            let available = source_refs
+                .iter()
+                .cloned()
+                .chain(
+                    calls
+                        .iter()
+                        .filter(|call| !crate::assistant_answer::is_empty_result(&call.result))
+                        .map(|call| call.call_id.clone()),
+                )
+                .collect::<BTreeSet<_>>();
+            let (sentences, status) =
+                crate::assistant_answer::grounded_answer(&reply, &available, conflicting_result);
+            finding.claim = if sentences.is_empty() {
+                "现有作品记录里查不到能回答这个问题的内容。".into()
+            } else {
+                sentences
+                    .iter()
+                    .map(|sentence| sentence.text.as_str())
+                    .collect::<String>()
+            };
+            finding.support_status = status;
+            finding.source_refs = sentences
+                .iter()
+                .flat_map(|sentence| sentence.sources.iter().cloned())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            answer = json!({"planner":"MODEL","sentences":sentences});
+        }
+    }
     let plan_digest = sha256_canonical(&serde_json::to_value(&plan).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
     let checkpoint = SupportCheckpoint {
@@ -5440,7 +5946,7 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
         finished_at: requested_at.into(),
     };
     Ok(
-        json!({"plan":plan,"calls":calls,"evidenceLedger":evidence_ledger,"finding":finding,"receipt":receipt}),
+        json!({"plan":plan,"calls":calls,"evidenceLedger":evidence_ledger,"finding":finding,"receipt":receipt,"intent":intent.to_json(),"answer":answer}),
     )
 }
 
@@ -6571,7 +7077,24 @@ fn execute_volume_lifecycle_command(
         )?,
         _ => return Err("B09_UNSUPPORTED_LIFECYCLE_COMMAND".into()),
     };
+    drop(handle);
+    // VD-2: a volume that opens is planned from what the one before did.
+    let volume_direction = match command_type {
+        // The handoff is committed: planning the volume only improves it,
+        // so a failure is reported, never the command's.
+        "volume_handoff" if result.get("replayed") != Some(&json!(true)) => direct_volume(
+            state,
+            project_id,
+            required_string(payload, "nextVolumeId")?,
+            command_id,
+            idempotency_key,
+            requested_at,
+        )
+        .unwrap_or_else(|error| json!({"status":"FAILED","error":error})),
+        _ => Value::Null,
+    };
     Ok(json!({
+        "volumeDirection": volume_direction,
         "commandId": command_id,
         "projectId": project_id,
         "finalStatus": "committed",
@@ -6585,6 +7108,96 @@ fn execute_volume_lifecycle_command(
         "afterRevision": result.get("projectRevision"),
         "result": result,
     }))
+}
+
+/// VD-2 (VOLUME_DIRECTION_DESIGN §7): plans volume `volume_id` once it is
+/// open. A planned direction becomes a new BookPlan version, and the
+/// volume's intent and route are compiled again from it; otherwise the
+/// handoff's plan stays, with a reminder when planning failed. Returns
+/// `PLANNED`, `TEMPLATE` or null (a gateway that plans no directions).
+#[doc(hidden)]
+pub fn direct_volume(
+    state: &KernelState,
+    project_id: &str,
+    volume_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    requested_at: &str,
+) -> Result<Value, String> {
+    if !state.production_gateway.plans_book_direction() {
+        return Ok(Value::Null);
+    }
+    let handle = state
+        .manager
+        .open(project_id, "", requested_at)
+        .map_err(|error| error.to_string())?;
+    use crate::repositories::narrative::NarrativeRepository;
+    let revision = NarrativeRepository::project_revision(&handle, project_id)
+        .map_err(|error| error.to_string())?;
+    let current = crate::signing::approved_book_plan_ref(&handle, project_id)?
+        .ok_or("GOAL_CONTRACT_BOOK_PLAN_APPROVED_REQUIRED")?;
+    crate::signing::require_current_signing_for_long_form_if_present(&handle, project_id)?;
+    let planned = crate::book_direction::plan_volume(
+        &handle,
+        state.production_gateway.as_ref(),
+        project_id,
+        volume_id,
+        (command_id, idempotency_key, requested_at),
+    )?;
+    let commit_id = format!("{command_id}:volume-direction");
+    let Some(book_plan) = planned.direction else {
+        let Some(reminder) = planned.reminder else {
+            return Ok(Value::Null);
+        };
+        let bundle: CommitBundle = serde_json::from_value(json!({"commitId":format!("commit:{commit_id}"),"projectId":project_id,"commandId":commit_id,"idempotencyKey":format!("{idempotency_key}:volume-direction"),"expectedProjectRevision":revision,"contractVersion":"m0a.v1","createdAt":requested_at,"artifacts":[],"decisionUpdates":[reminder]})).map_err(|e| e.to_string())?;
+        CommitService::commit(&handle, &bundle, requested_at).map_err(|e| e.to_string())?;
+        return Ok(json!("TEMPLATE"));
+    };
+    crate::generated::validators::validate_book_plan_r1(&book_plan)
+        .map_err(|error| format!("BOOK_PLAN_CONTRACT:{error}"))?;
+    let artifact_id = format!("plan:bookplan:{project_id}");
+    let version = crate::repositories::narrative::NarrativeRepository::next_artifact_version(
+        &handle,
+        project_id,
+        &artifact_id,
+    )
+    .map_err(|e| e.to_string())?;
+    let hash = sha256_canonical(&book_plan).map_err(|e| e.to_string())?;
+    // The rewritten book plan keeps its mysteries in step.
+    let mysteries = crate::planning::book_mystery_deltas_for(
+        &handle,
+        project_id,
+        &book_plan,
+        &artifact_id,
+        version,
+    )?;
+    let artifact: ArtifactEnvelope = serde_json::from_value(json!({"artifactId":artifact_id,"projectId":project_id,"artifactType":"BookPlan","scope":{"level":"PROJECT"},"version":version,"schemaVersion":"m0a.artifact.v1","artifactStatus":"CANDIDATE","payload":book_plan,"payloadHash":hash,"dependencyRefs":[current],"provenance":{"createdBy":"B07::PlanningOwner","commandId":commit_id,"modelRunId":planned.model_run_id},"createdAt":requested_at})).map_err(|e| e.to_string())?;
+    let bundle: CommitBundle = serde_json::from_value(json!({"commitId":format!("commit:{commit_id}"),"projectId":project_id,"commandId":commit_id,"idempotencyKey":format!("{idempotency_key}:volume-direction"),"expectedProjectRevision":revision,"contractVersion":"m0a.v1","createdAt":requested_at,"artifacts":[artifact],"headUpdates":[{"artifactType":"BookPlan","scope":{"level":"PROJECT"},"artifactId":artifact_id,"version":version,"payloadHash":hash}],"obligationDelta":(!mysteries.is_empty()).then_some(mysteries)})).map_err(|e| e.to_string())?;
+    let mut expected = CommitService::commit(&handle, &bundle, requested_at)
+        .map_err(|e| e.to_string())?
+        .after_revision;
+    // The planning commands open the project themselves.
+    drop(handle);
+    for (step, command_type) in [
+        ("volume-intent", "planning_create_volume_intent"),
+        ("volume-plan", "planning_create_volume_plan"),
+    ] {
+        let committed = execute_planning_command_with_observer(
+            state,
+            &json!({"payload":{"volumeId":volume_id}}),
+            command_type,
+            project_id,
+            &format!("{command_id}:{step}"),
+            &format!("{idempotency_key}:{step}"),
+            requested_at,
+            Some(expected),
+            &mut |_| {},
+        )?;
+        expected = committed["receipt"]["afterRevision"]
+            .as_i64()
+            .ok_or_else(|| "VD2_PLANNING_REVISION_MISSING".to_string())?;
+    }
+    Ok(json!("PLANNED"))
 }
 
 fn production_control_response(
@@ -6883,6 +7496,13 @@ fn compile_current_chapter_plan(
     if execution_mode != "LONG_FORM" {
         return Err("B08_EXECUTION_MODE_MISMATCH".into());
     }
+    crate::book_direction::require_first_volume_direction(
+        &handle,
+        state.production_gateway.as_ref(),
+        project_id,
+        &volume_id,
+        true,
+    )?;
     let budget_id = DurableModelRunner::chapter_budget_id(&handle, project_id, chapter_id)
         .map_err(|error| error.to_string())?;
     let authority = {
@@ -6924,10 +7544,20 @@ fn compile_current_chapter_plan(
         requested_at,
     )?;
     let planning_revision = context_receipt.after_revision;
-    let profile = state.production_gateway.resolve_profile()?;
     let planning_run_id =
         StableIdentityFactory::from_command(StableIdKind::ModelRun, &format!("{command_id}:plan"))?;
     let state_digest = crate::narrative::relevant_state_digest(&context_input)?;
+    let history = crate::repositories::ops::chapter_history(&handle, project_id, chapter_id, 3)
+        .map_err(|error| error.to_string())?;
+    let planner = crate::craft_plan::ChapterPlanner::for_chapter(
+        &handle,
+        project_id,
+        chapter_id,
+        history.number(),
+    )?;
+    let profile = state
+        .production_gateway
+        .resolve_step_profile(planner.capability())?;
     let planning_spec = crate::repositories::runtime::ModelRunSpec {
         model_run_id: planning_run_id.clone(),
         job_id: None,
@@ -6935,7 +7565,7 @@ fn compile_current_chapter_plan(
         provider: profile.provider.clone(),
         model: profile.model.clone(),
         idempotency_key: format!("{idempotency_key}:plan"),
-        capability: "PLAN_STRATEGY".into(),
+        capability: planner.capability().into(),
         prompt_ref: None,
         context_manifest_ref: Some(context_ref.artifact_id.clone()),
         budget_id: Some(budget_id),
@@ -6960,6 +7590,34 @@ fn compile_current_chapter_plan(
                 .is_some_and(|task_id| selected_task_refs.contains(task_id))
         });
     }
+    // FX-18: long-form chapters are sized for their length range when planned.
+    let project_settings = crate::repositories::provider::ProviderSettingsRepository::read_project(
+        &handle, project_id,
+    )
+    .map_err(|error| error.to_string())?;
+    let chosen_range = crate::chapter_length::ChapterLengthRange::from_payload(
+        request.get("payload").unwrap_or(&Value::Null),
+    )?;
+    let length_range = crate::chapter_length::ChapterLengthRange::resolve(
+        chosen_range,
+        crate::repositories::provider::ProviderSettingsRepository::chapter_length_range(
+            &handle, project_id, chapter_id,
+        )
+        .map_err(|error| error.to_string())?
+        .as_ref(),
+        project_settings.get("chapterLengthRange"),
+        crate::chapter_length::work_platform(&handle, project_id, &project_settings)?.as_deref(),
+    )?;
+    if let Some(range) = chosen_range {
+        crate::repositories::provider::ProviderSettingsRepository::save_chapter_length_range(
+            &handle,
+            project_id,
+            chapter_id,
+            &range.to_json(),
+            requested_at,
+        )
+        .map_err(|error| error.to_string())?;
+    }
     let planning_input = json!({
         "projectId":project_id,
         "chapterId":chapter_id,
@@ -6971,46 +7629,139 @@ fn compile_current_chapter_plan(
         "authorityContext":serde_json::to_value(&context_input).map_err(|error| error.to_string())?,
         "volumePlanRoute":scoped_route_payload,
         "horizonPreviewCapacity":crate::planning::horizon_capacity_after_chapter(&handle, project_id, chapter_id)?,
+        "chapterLengthRange":length_range.to_json(),
         "chapterGoalHint":request.pointer("/payload/chapterGoalHint").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).unwrap_or("推进当前卷任务，并让真实选择产生可核对后果。")
     });
-    let planning_result = crate::production::execute_production_model_with_profile(
+    // Craft v2: the planner sees what the recent chapters did and the
+    // selected planning skills.
+    let mut planning_input = planning_input;
+    crate::chapter_craft::extend_planning_input(
+        &mut planning_input,
+        history.number(),
+        &history.recent,
+        length_range,
+    )?;
+    planner.extend_input(&mut planning_input);
+    if planner.capability() == crate::craft_plan::PLAN_CHAPTER_CRAFT {
+        history.extend_continuation_input(&mut planning_input);
+    }
+    let triggered_threads = context_input
+        .continuity_threads
+        .iter()
+        .filter(|thread| matches!(thread.authority_level.as_str(), "A" | "B"))
+        .map(|thread| thread.thread_id.clone())
+        .collect::<Vec<_>>();
+    let enforces_length = state.production_gateway.enforces_chapter_length();
+    let hard_scope = crate::narrative::context_hard_scope(&context_input);
+    let explicit_scope = request
+        .pointer("/payload/scopeSelection")
+        .is_some_and(|value| !value.is_null());
+    // Check the full dependency chain locally. The model still sees the
+    // selected context window, including its immediate dependencies.
+    let route_states =
+        crate::planning::route_task_states(&handle, project_id, &volume_id, &route_payload)?;
+    let task_states = route_states
+        .iter()
+        .map(|state| {
+            (
+                state.state_id.as_str(),
+                state
+                    .value
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("NOT_STARTED"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let accept = |raw: Value, lenient: bool| -> Result<(Value, Vec<String>), String> {
+        let mut problems = Vec::new();
+        let mut plan = crate::planning::normalize_chapter_plan_model_output(
+            raw,
+            &triggered_threads,
+            &planning_input,
+        );
+        plan["compiledFromProjectRevision"] = json!(planning_revision);
+        plan["compiledFromStateDigest"] = json!(state_digest);
+        plan["contextManifestRef"] =
+            serde_json::to_value(&context_ref).map_err(|error| error.to_string())?;
+        plan["activeTaskRefs"] = hard_scope["taskRefs"].clone();
+        plan["entityRefs"] = hard_scope["entityRefs"].clone();
+        plan["reservationRefs"] = hard_scope["reservationRefs"].clone();
+        plan["hardScope"] = hard_scope.clone();
+        if !explicit_scope {
+            // Without a chosen scope the chapter works only on the tasks it
+            // can work on now; later tasks wait for their dependencies.
+            let ready = json!(hard_scope["taskRefs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter(|task_ref| {
+                    crate::planning::task_ready(task_ref, &route_payload, &task_states).is_ok()
+                })
+                .collect::<Vec<_>>());
+            plan["activeTaskRefs"] = ready.clone();
+            plan["hardScope"]["taskRefs"] = ready;
+        }
+        // Checked here, not only at commit, so the planner gets the reason
+        // and one more try.
+        let horizon_capacity = planning_input["horizonPreviewCapacity"]
+            .as_i64()
+            .unwrap_or(0);
+        let craft = planner.check_craft(&plan, horizon_capacity);
+        crate::production::note_if_lenient(lenient, &mut problems, craft)?;
+        problems.extend(planner.reminders(&plan));
+        if lenient {
+            problems.extend(crate::planning::fit_lenient_plan_shape(
+                &mut plan,
+                horizon_capacity,
+            ));
+        }
+        let mut soft = |result| crate::production::note_if_lenient(lenient, &mut problems, result);
+        // r2 plans had their horizon checked with the craft problems; r1 here.
+        soft(crate::planning::validate_chapter_plan_horizon(
+            &plan,
+            horizon_capacity,
+        ))?;
+        soft(planner.check_r1(|| {
+            if enforces_length {
+                crate::chapter_craft::check_plan(&plan, length_range, &history.recent)
+            } else {
+                Ok(())
+            }
+        }))?;
+        // The contract is checked here too, not only at commit, so a
+        // violation goes back to the planner (QC-1).
+        crate::planning::validate_chapter_plan(&plan)?;
+        Ok((plan, problems))
+    };
+    let (plan, planning_run_id, plan_problems) = crate::production::plan_chapter_with_feedback(
         &handle,
         state.production_gateway.as_ref(),
         &profile,
         &planning_spec,
-        "PLAN_STRATEGY",
         planning_input.clone(),
         requested_at,
+        &accept,
     )?;
-    let raw_plan = planning_result
-        .parsed
-        .ok_or_else(|| "B05_PLANNING_OUTPUT_INVALID".to_string())?;
-    let bindings = json!({
-        "chapterId":chapter_id,
-        "compiledFromProjectRevision":planning_revision,
-        "compiledFromStateDigest":state_digest,
-        "contextManifestRef":context_ref
-    });
-    let mut plan = crate::planning::normalize_chapter_plan_model_output(
-        raw_plan,
-        &context_input
-            .continuity_threads
-            .iter()
-            .filter(|thread| matches!(thread.authority_level.as_str(), "A" | "B"))
-            .map(|thread| thread.thread_id.clone())
-            .collect::<Vec<_>>(),
-        &bindings,
-    );
-    plan["compiledFromProjectRevision"] = json!(planning_revision);
-    plan["compiledFromStateDigest"] = json!(state_digest);
-    plan["contextManifestRef"] =
-        serde_json::to_value(&context_ref).map_err(|error| error.to_string())?;
-    let hard_scope = crate::narrative::context_hard_scope(&context_input);
-    plan["activeTaskRefs"] = hard_scope["taskRefs"].clone();
-    plan["entityRefs"] = hard_scope["entityRefs"].clone();
-    plan["reservationRefs"] = hard_scope["reservationRefs"].clone();
-    plan["hardScope"] = hard_scope;
-    let receipt = crate::planning::recompile_chapter_plan_owner(
+    // The plan's own scope (its tasks and entities) selects state that the
+    // context compiled before planning did not hold; the plan binds the
+    // digest of that state, as the owner and production recompute it.
+    let mut plan = plan;
+    let mut plan_authority = authority.clone();
+    plan_authority["executionMode"] = json!(execution_mode);
+    plan_authority["chapterPlan"] = plan.clone();
+    let plan_context =
+        context_input_from_authority(&handle, &plan_authority, project_id, planning_revision)?;
+    plan["compiledFromStateDigest"] =
+        json!(crate::narrative::relevant_state_digest(&plan_context)?);
+    let decisions = crate::production::plan_reminder_decision(
+        command_id,
+        chapter_id,
+        history.number(),
+        &plan_problems,
+    )?;
+    let receipt = crate::planning::recompile_chapter_plan_owner_with_decisions(
         &handle,
         project_id,
         chapter_id,
@@ -7021,6 +7772,7 @@ fn compile_current_chapter_plan(
         planning_revision,
         requested_at,
         Some(&planning_run_id),
+        &decisions,
     )?;
     let plan_ref = receipt
         .committed_artifact_refs
@@ -7131,6 +7883,10 @@ fn execute_planning_command_with_observer(
         .unwrap_or(Value::Null);
     let mut book_plan_dependencies: Vec<crate::generated::types::ArtifactRef> = Vec::new();
     let mut b02_plan_job: Option<String> = None;
+    // VD-1a: the run that wrote the book's direction, or the reminder that
+    // it kept the template.
+    let mut direction_run_id: Option<String> = None;
+    let mut direction_reminder: Option<Value> = None;
     let mut b03_volume_job: Option<(String, String)> = None;
     let b02_plan_worker = "b02-book-plan-worker";
     let (artifact_type, scope, scope_key) = match command_type {
@@ -7554,12 +8310,38 @@ fn execute_planning_command_with_observer(
                 observer,
             )?;
         }
+        let planned = match crate::book_direction::plan(
+            &handle,
+            state.production_gateway.as_ref(),
+            project_id,
+            command_id,
+            idempotency_key,
+            requested_at,
+        ) {
+            Ok(planned) => planned,
+            Err(error) => {
+                if let Some(job_id) = b02_plan_job.as_deref() {
+                    DurableJobService::fail_b02_phase_job(
+                        &handle,
+                        project_id,
+                        job_id,
+                        &error,
+                        requested_at,
+                    )
+                    .map_err(|failure| failure.to_string())?;
+                }
+                return Err(error);
+            }
+        };
+        direction_run_id = planned.model_run_id;
+        direction_reminder = planned.reminder;
         payload = crate::planning::approve_book_plan(
             &payload,
             true,
             &canon_refs,
             &evidence_refs,
             &opening_actual_state,
+            planned.direction.as_ref(),
         )?;
         if let Some(job_id) = b02_plan_job.as_deref() {
             notify_b02_planning_phase(
@@ -7573,6 +8355,13 @@ fn execute_planning_command_with_observer(
         }
     }
     if artifact_type == "VolumePlan" {
+        crate::book_direction::require_first_volume_direction(
+            &handle,
+            state.production_gateway.as_ref(),
+            project_id,
+            &scope_key,
+            false,
+        )?;
         let intent = crate::repositories::narrative::NarrativeRepository::canonical_head_ref(
             &handle,
             project_id,
@@ -7643,7 +8432,15 @@ fn execute_planning_command_with_observer(
             &intent_payload,
         )?;
         let candidate_payload = if payload.is_null() {
+            let volume_no =
+                crate::repositories::volume_lifecycle::VolumeLifecycleRepository::volume_metadata(
+                    &handle, project_id, &scope_key,
+                )
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "VOLUME_NOT_FOUND".to_string())?
+                .volume_no;
             crate::planning::compile_volume_plan_from_authority(
+                volume_no,
                 &intent,
                 &intent_payload,
                 &goal_contract,
@@ -7757,16 +8554,8 @@ fn execute_planning_command_with_observer(
             .filter(|thread| matches!(thread.authority_level.as_str(), "A" | "B"))
             .map(|thread| thread.thread_id.clone())
             .collect::<Vec<_>>();
-        let route_states = crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
-            &handle,
-            project_id,
-            &route_task_ids
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            100,
-        )
-        .map_err(|e| e.to_string())?;
+        let route_states =
+            crate::planning::route_task_states(&handle, project_id, &volume_id, &route)?;
         let task_states = route_states
             .iter()
             .map(|state| {
@@ -7944,9 +8733,22 @@ fn execute_planning_command_with_observer(
     let model_run_id = request
         .pointer("/payload/modelRunId")
         .and_then(Value::as_str)
-        .map(ToOwned::to_owned);
+        .map(ToOwned::to_owned)
+        .or(direction_run_id);
     let artifact: ArtifactEnvelope = serde_json::from_value(json!({"artifactId":artifact_id,"projectId":project_id,"artifactType":artifact_type,"scope":scope,"version":version,"schemaVersion":"m0a.artifact.v1","artifactStatus":"CANDIDATE","payload":payload,"payloadHash":hash,"dependencyRefs":book_plan_dependencies,"provenance":{"createdBy":"B07::PlanningOwner","commandId":command_id,"modelRunId":model_run_id},"createdAt":requested_at})).map_err(|e| e.to_string())?;
-    let bundle: CommitBundle = serde_json::from_value(json!({"commitId":format!("commit:{}",command_id),"projectId":project_id,"commandId":command_id,"idempotencyKey":idempotency_key,"expectedProjectRevision":expected_revision,"contractVersion":"m0a.v1","createdAt":requested_at,"artifacts":[artifact],"headUpdates":[{"artifactType":artifact_type,"scope":scope,"artifactId":artifact_id,"version":version,"payloadHash":hash}]})).map_err(|e| e.to_string())?;
+    // P1: an approved book plan keeps its mysteries in step.
+    let mysteries = if artifact_type == "BookPlan" {
+        crate::planning::book_mystery_deltas_for(
+            &handle,
+            project_id,
+            &payload,
+            &artifact_id,
+            version,
+        )?
+    } else {
+        Vec::new()
+    };
+    let bundle: CommitBundle = serde_json::from_value(json!({"commitId":format!("commit:{}",command_id),"projectId":project_id,"commandId":command_id,"idempotencyKey":idempotency_key,"expectedProjectRevision":expected_revision,"contractVersion":"m0a.v1","createdAt":requested_at,"artifacts":[artifact],"headUpdates":[{"artifactType":artifact_type,"scope":scope,"artifactId":artifact_id,"version":version,"payloadHash":hash}],"decisionUpdates":direction_reminder.map(|reminder| vec![reminder]),"obligationDelta":(!mysteries.is_empty()).then_some(mysteries)})).map_err(|e| e.to_string())?;
     if let Some(job_id) = b02_plan_job.as_deref() {
         notify_b02_planning_phase(
             &handle,
@@ -8310,6 +9112,19 @@ fn execute_b11_command(
         response["startCreating"] = start;
         return Ok(response);
     }
+    if command_type == "style_sample_save" {
+        // Local-only: the sample is not an artifact and has no revision.
+        let handle = state
+            .manager
+            .open(project_id, "", requested_at)
+            .map_err(|error| error.to_string())?;
+        let digest =
+            crate::craft_setup::save_style_sample(&handle, project_id, requested_at, request)?;
+        return Ok(json!({
+            "commandId":command_id,"projectId":project_id,"resultProjectId":project_id,
+            "finalStatus":"committed","message":"范文已保存在本机，只用于测量写法指标。","sampleDigest":digest
+        }));
+    }
     let expected_revision = expected_revision
         .ok_or_else(|| "IPC_INVALID:expectedRevision required for B11 command".to_string())?;
     let handle = state
@@ -8355,6 +9170,43 @@ fn execute_b11_command(
             requested_at,
             request,
         ),
+        "story_bible_generate" => crate::craft_setup::commit_story_bible_candidates(
+            &handle,
+            project_id,
+            command_id,
+            idempotency_key,
+            expected_revision,
+            requested_at,
+            request,
+            state.production_gateway.as_ref(),
+        ),
+        "story_bible_confirm" => crate::craft_setup::commit_story_bible_confirmation(
+            &handle,
+            project_id,
+            command_id,
+            idempotency_key,
+            expected_revision,
+            requested_at,
+            request,
+        ),
+        "style_card_generate" => crate::craft_setup::commit_style_card_candidates(
+            &handle,
+            project_id,
+            command_id,
+            idempotency_key,
+            expected_revision,
+            requested_at,
+            request,
+        ),
+        "style_card_confirm" => crate::craft_setup::commit_style_card_confirmation(
+            &handle,
+            project_id,
+            command_id,
+            idempotency_key,
+            expected_revision,
+            requested_at,
+            request,
+        ),
         "opening_ready" => crate::project_entry::commit_opening_ready(
             &handle,
             project_id,
@@ -8373,7 +9225,7 @@ fn execute_b11_command(
         "projectId":project_id,
         "resultProjectId":project_id,
         "finalStatus":"committed",
-        "message":match command_type { "story_directions_generate" => "故事方向已生成，请选择。", "pitch_regenerate" => "新的故事方向已生成，请由你选择。", "pitch_select" => "故事方向已由你确认，进入故事核心。", "story_setup_save" => "故事核心已保存，等待你批准开篇准备。", "opening_ready" => "开篇准备已完成，已生成第一章的最小规划。", _ => "B11 操作已完成。" },
+        "message":match command_type { "story_directions_generate" => "故事方向已生成，请选择。", "pitch_regenerate" => "新的故事方向已生成，请由你选择。", "pitch_select" => "故事方向已由你确认，进入故事核心。", "story_setup_save" => "故事核心已保存，等待你批准开篇准备。", "story_bible_generate" => "已生成 3 版故事底稿，请选择并编辑。", "story_bible_confirm" => "故事底稿已由你确认。", "style_card_generate" => "已生成 3 版风格卡，请选择并编辑。", "style_card_confirm" => "风格卡已由你确认。", "opening_ready" => "开篇准备已完成，已生成第一章的最小规划。", _ => "B11 操作已完成。" },
         "receiptId":receipt["receiptId"],
         "beforeRevision":receipt["beforeRevision"],
         "afterRevision":receipt["afterRevision"],
@@ -8434,6 +9286,43 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
             requested_at,
             &digest,
         ),
+        "production_reset_chapter_quota" => {
+            let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
+            let chapter_id = request
+                .pointer("/payload/chapterId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "B08_CHAPTER_REQUIRED".to_string())?;
+            let spec = project_command_spec(
+                id,
+                id,
+                command_id,
+                idempotency_key,
+                command_type,
+                &digest,
+                expected_revision,
+                requested_at,
+                true,
+            );
+            let outcome = state
+                .manager
+                .commit_project_command(spec, |connection| {
+                    crate::repositories::production::ProductionRepository::reset_chapter_quota(
+                        connection,
+                        id,
+                        chapter_id,
+                        requested_at,
+                    )
+                    .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+                })
+                .map_err(|error| error.to_string())?;
+            let (quota, receipt) = match outcome {
+                ProjectCommandOutcome::Committed { value, receipt } => (value, receipt),
+                ProjectCommandOutcome::Replayed(receipt) => (Value::Null, receipt),
+            };
+            let mut response = project_command_response(&receipt);
+            response["result"] = json!({"chapterQuota":quota});
+            Ok(response)
+        }
         "decision_submit" => {
             let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
             execute_decision_submit(
@@ -8494,6 +9383,11 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
         | "pitch_regenerate"
         | "pitch_select"
         | "story_setup_save"
+        | "story_bible_generate"
+        | "story_bible_confirm"
+        | "style_card_generate"
+        | "style_card_confirm"
+        | "style_sample_save"
         | "opening_ready"
         | "opening_start_creating" => {
             let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
@@ -8508,6 +9402,10 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                 expected_revision,
                 &digest,
             )
+        }
+        "writing_rule_add" | "memory_correction_add" | "memory_correction_revoke" => {
+            let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
+            execute_owner_correction(state, &request, command_type, id, command_id, requested_at)
         }
         "market_refresh" => {
             let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
@@ -8651,7 +9549,6 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                 return crate::production::run_chapter_production(
                     &state.manager,
                     state.production_gateway.as_ref(),
-                    &state.skill_bundle_loader,
                     &request,
                 );
             }
@@ -9280,16 +10177,60 @@ pub fn query_story_setup(state: State<'_, KernelState>, request: Value) -> Resul
 }
 
 #[tauri::command]
+pub fn query_craft_setup(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
+    query_craft_setup_impl(&state, request)
+}
+
+#[tauri::command]
+pub fn query_owner_corrections(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    query_owner_corrections_impl(&state, request)
+}
+
+#[tauri::command]
 pub fn query_opening_ready(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
     query_opening_ready_impl(&state, request)
 }
 
 #[tauri::command]
-pub fn query_assistant_repair_plan(
+pub async fn query_assistant_repair_plan(
     state: State<'_, KernelState>,
     request: Value,
 ) -> Result<Value, String> {
-    query_assistant_repair_plan_impl(&state, request)
+    // FX-21: may wait for the model that classifies the question.
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || query_assistant_repair_plan_impl(&state, request))
+        .await
+        .map_err(|_| "ASSISTANT_WORKER_FAILED".to_string())?
+}
+
+#[tauri::command]
+pub fn query_backups(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
+    query_backups_impl(&state, request)
+}
+
+#[tauri::command]
+pub async fn classify_assistant_intent(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || classify_assistant_intent_impl(&state, request))
+        .await
+        .map_err(|_| "ASSISTANT_WORKER_FAILED".to_string())?
+}
+
+#[tauri::command]
+pub async fn draft_setup_change(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || draft_setup_change_impl(&state, request))
+        .await
+        .map_err(|_| "ASSISTANT_WORKER_FAILED".to_string())?
 }
 
 #[tauri::command]
@@ -9551,8 +10492,15 @@ pub fn query_volume_lifecycle(
 }
 
 #[tauri::command]
-pub fn support_session(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
-    support_session_impl(&state, request)
+pub async fn support_session(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    // FX-21: may wait for the model that classifies the question.
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || support_session_impl(&state, request))
+        .await
+        .map_err(|_| "ASSISTANT_WORKER_FAILED".to_string())?
 }
 
 #[tauri::command]
@@ -9745,6 +10693,15 @@ pub async fn test_provider(
     run_provider_test_on_blocking_worker(move || test_provider_sync(settings)).await
 }
 
+#[tauri::command]
+pub async fn provider_list_models(
+    _state: State<'_, KernelState>,
+    settings: Value,
+) -> Result<Value, String> {
+    let settings = settings.get("settings").cloned().unwrap_or(settings);
+    run_provider_test_on_blocking_worker(move || Ok(provider_list_models_sync(settings))).await
+}
+
 async fn run_provider_test_on_blocking_worker<T, F>(work: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -9767,12 +10724,10 @@ fn validate_test_provider_response(raw_response: &str) -> Result<Value, String> 
     Ok(output)
 }
 
-fn test_provider_sync(settings: Value) -> Result<Value, String> {
-    let config = provider_config(&settings)?;
-    if !config.enabled || config.endpoint.is_empty() {
-        return Err("P01_PROVIDER_NOT_CONFIGURED".into());
-    }
-    let secret = settings
+/// The API key typed in the form, else the one saved in the keychain; never
+/// returned or printed.
+fn provider_secret(settings: &Value, provider_id: &str) -> Result<String, String> {
+    settings
         .get("apiKey")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty() && !value.starts_with('•'))
@@ -9782,10 +10737,44 @@ fn test_provider_sync(settings: Value) -> Result<Value, String> {
                 "com.moheng.ai-novel-production",
                 "provider-api-key",
             )
-            .get(&config.provider_id)
+            .get(provider_id)
             .ok()
         })
-        .ok_or_else(|| "P01_AUTHENTICATION_ERROR:provider secret unavailable".to_string())?;
+        .ok_or_else(|| "P01_AUTHENTICATION_ERROR:provider secret unavailable".to_string())
+}
+
+/// P4: the models the provider lists; empty with a reason when it cannot be
+/// read, and the settings page falls back to typing the model name.
+fn provider_list_models_sync(settings: Value) -> Value {
+    // No model is needed yet: the list is how one is chosen.
+    let text = |key: &str| {
+        settings
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+    };
+    let listed = if text("providerId").is_empty() || text("endpoint").is_empty() {
+        Err("P01_PROVIDER_NOT_CONFIGURED".to_string())
+    } else {
+        provider_secret(&settings, text("providerId")).and_then(|secret| {
+            crate::provider::OpenAiCompatibleProvider::new(text("endpoint"))
+                .list_models(&secret)
+                .map_err(|error| format!("P01_{}:{}", error.kind.code(), error.detail))
+        })
+    };
+    match listed {
+        Ok(models) => json!({"models":models}),
+        Err(reason) => json!({"models":[],"reason":reason}),
+    }
+}
+
+fn test_provider_sync(settings: Value) -> Result<Value, String> {
+    let config = provider_config(&settings)?;
+    if !config.enabled || config.endpoint.is_empty() {
+        return Err("P01_PROVIDER_NOT_CONFIGURED".into());
+    }
+    let secret = provider_secret(&settings, &config.provider_id)?;
     let response = crate::provider::OpenAiCompatibleProvider::new(config.endpoint.clone())
         .invoke(
             &crate::provider::ProviderRequest {
@@ -9793,6 +10782,7 @@ fn test_provider_sync(settings: Value) -> Result<Value, String> {
                 model_id: config.model_id,
                 prompt: "Return JSON {\"ok\":true} without explanation.".into(),
                 timeout_ms: config.timeout_ms,
+                thinking: None,
             },
             &secret,
         )
@@ -9825,6 +10815,8 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         query_market_strategy,
         query_story_directions,
         query_story_setup,
+        query_craft_setup,
+        query_owner_corrections,
         query_opening_ready,
         query_assistant_repair_plan,
         query_production_center,
@@ -9857,6 +10849,9 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         query_plan_route,
         query_volume_lifecycle,
         support_session,
+        classify_assistant_intent,
+        draft_setup_change,
+        query_backups,
         support_checkpoint_resume,
         query_endgame_status,
         query_completion_status,
@@ -9867,6 +10862,7 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         query_global_settings,
         query_project_settings,
         test_provider,
+        provider_list_models,
         query_market_opportunities,
     ]
 }
@@ -9988,7 +10984,19 @@ mod rv30_opening_canon_tests {
 
 #[cfg(test)]
 mod rv17_provider_test_response_tests {
-    use super::{run_provider_test_on_blocking_worker, validate_test_provider_response};
+    use super::{
+        provider_list_models_sync, run_provider_test_on_blocking_worker,
+        validate_test_provider_response,
+    };
+
+    #[test]
+    fn p4_an_unconfigured_provider_lists_no_models_and_says_why() {
+        // The settings page then lets the owner type the model name.
+        let listed =
+            provider_list_models_sync(serde_json::json!({"providerId":"x","endpoint":" "}));
+        assert_eq!(listed["models"], serde_json::json!([]));
+        assert_eq!(listed["reason"], "P01_PROVIDER_NOT_CONFIGURED");
+    }
 
     #[test]
     fn provider_connection_test_runs_provider_io_on_blocking_worker() {
