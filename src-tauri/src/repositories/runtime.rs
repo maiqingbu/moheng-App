@@ -124,6 +124,36 @@ pub struct UnknownDecisionResolution {
     pub capability: String,
 }
 
+/// Round 13: the plan problems committed as a chapter's plan reminder
+/// (LD-1 step 2), open or read, newest reminder first.
+pub fn plan_reminder_items(
+    connection: &Connection,
+    project_id: &str,
+    chapter_id: &str,
+) -> Result<Vec<String>, RuntimeError> {
+    let mut statement = connection.prepare(
+        "SELECT payload_json FROM decisions WHERE project_id=?1 AND source_ref=?2 AND decision_type='AUDIT_REMINDER' ORDER BY created_at DESC, rowid DESC",
+    )?;
+    let payloads = statement
+        .query_map(libsql_rusqlite::params![project_id, chapter_id], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(payloads
+        .iter()
+        .filter_map(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+        .filter(|payload| payload["category"] == "计划提醒")
+        .flat_map(|payload| {
+            payload["heldBack"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|held| held["item"].as_str().map(ToOwned::to_owned))
+                .collect::<Vec<_>>()
+        })
+        .collect())
+}
+
 /// Closes an open audit reminder (LD-1 step 2) once the user has read it.
 pub fn acknowledge_audit_reminder(
     connection: &Connection,

@@ -3,7 +3,7 @@
 
 use ai_novel_production_system_core::chapter_craft::plan_feedback;
 use ai_novel_production_system_core::craft_plan::{
-    check_craft_plan, creation_ledger, done_in_recent_chapters, drop_unchosen_beats,
+    check_craft_plan, creation_ledger, drop_unchosen_beats, is_repetition_problem,
     last_appearances, plan_problems, shape_reminder, skill_decisions,
 };
 use serde_json::{json, Value};
@@ -365,21 +365,21 @@ fn round131_an_event_redoing_one_of_the_last_two_chapters_is_sent_back() {
     let mut redo = plan();
     redo["craft"]["scenes"][0]["events"] =
         json!(["林满再输入一遍十六位校验码，调出码头仓库当晚的监控片段"]);
-    let problems = plan_problems(&redo, 4, &bible(), &ledger);
+    let redone = plan_problems(&redo, 4, &bible(), &ledger);
     assert!(
-        has(&problems, "第 1 场的事件重做了第 3 章已经做完的"),
-        "{problems:?}"
+        has(&redone, "第 1 场的事件重做了第 3 章已经做完的"),
+        "{redone:?}"
     );
     let problems = plan_problems(&plan(), 4, &bible(), &ledger);
     assert!(!has(&problems, "已经做完的"), "{problems:?}");
-    // The writer is told what the latest chapters already carried out.
-    let done = done_in_recent_chapters(&ledger);
-    assert_eq!(done[0]["chapter"], 3);
-    assert!(done[0]["events"]
-        .as_array()
-        .unwrap()
+    // Left on the last round, it reaches the writer as what not to act out.
+    assert!(redone
         .iter()
-        .any(|event| event == "林满输入十六位校验码，调出码头仓库当晚的监控片段"));
+        .any(|problem| problem.contains("已经做完的") && is_repetition_problem(problem)));
+    assert!(is_repetition_problem(
+        "异常手法「听旧物」的用法和之前一模一样，需要新的变化"
+    ));
+    assert!(!is_repetition_problem("需要 1 到 3 个场景，现在有 4 个"));
 }
 
 /// Real run round 12: chapter goals of 80-120 characters scripted each

@@ -298,6 +298,25 @@ fn chosen_beats(craft: &Value) -> Vec<&'static str> {
         .collect()
 }
 
+/// The events a plan's scenes name, in order.
+pub(crate) fn scene_events(craft: &Value) -> impl Iterator<Item = &str> {
+    scenes(craft)
+        .iter()
+        .filter_map(|scene| scene["events"].as_array())
+        .flatten()
+        .filter_map(Value::as_str)
+}
+
+/// Round 13: whether a plan problem says the plan repeats an earlier
+/// chapter (a device used the same way, an event done again, a goal or
+/// ending like a recent one). Left on the last round, these reach the writer.
+pub fn is_repetition_problem(problem: &str) -> bool {
+    problem.contains("一模一样")
+        || problem.contains(REDONE_LIKE)
+        || is_repeated_goal(problem)
+        || (problem.starts_with(HOOK_LIKE) && problem.contains("太接近"))
+}
+
 /// The creation ledger (CRAFT_V3_DESIGN §4.3): what the committed chapters
 /// already used, rebuilt from their r2 plans in chapter order.
 /// `prior` holds `(chapter_no, craft)` pairs; r1 chapters have no craft and
@@ -319,7 +338,7 @@ pub fn creation_ledger(prior: &[(i64, Value)], bible: &Value) -> Value {
             devices.push(json!({"chapter":chapter,"name":text(&craft["device"]["name"]),"howUsed":text(&craft["device"]["howUsed"])}));
         }
         endings.push(json!({"chapter":chapter,"goal":text(&craft["chapterGoal"]),"after":text(&craft["situationChange"]["after"]),"endHook":text(&craft["endHook"]),
-            "events":scenes(craft).iter().filter_map(|scene| scene["events"].as_array()).flatten().filter_map(Value::as_str).collect::<Vec<_>>()}));
+            "events":scene_events(craft).collect::<Vec<_>>()}));
         people.extend(scene_people(craft).map(|person| text(&person["name"]).to_string()));
         losses.extend(
             craft["newLosses"]
@@ -443,6 +462,8 @@ fn shared_goal_passage(earlier: &str, current: &str) -> Option<String> {
 
 /// How the problems of a repeated goal or ending start.
 const GOAL_LIKE: &str = "本章目标和第";
+/// What a problem says after an event the last two chapters already did.
+const REDONE_LIKE: &str = "章已经做完的「";
 const GOAL_ACTION_LIKE: &str = "本章目标可能重复第";
 const HOOK_LIKE: &str = "章末钩子和";
 
@@ -645,21 +666,21 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
     // Real run round 13: an event the last two chapters already carried out
     // is not done again; the plan builds on its result.
     for (index, scene) in scene_list.iter().enumerate() {
-        let Some(event) = scene["events"][0].as_str() else {
-            continue;
-        };
-        let pairs = crate::chapter_craft::telling_pairs(event);
-        if let Some((chapter, earlier)) = near.iter().find_map(|ending| {
-            ending["events"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .find(|earlier| nearly_repeats(earlier, &pairs))
-                .map(|earlier| (ending["chapter"].clone(), earlier))
-        }) {
+        let pairs = crate::chapter_craft::telling_pairs(text(&scene["events"][0]));
+        let redone = near
+            .iter()
+            .flat_map(|ending| {
+                ending["events"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(move |earlier| (&ending["chapter"], earlier))
+            })
+            .find(|(_, earlier)| nearly_repeats(earlier, &pairs));
+        if let Some((chapter, earlier)) = redone {
             problems.push(format!(
-                "第 {} 场的事件重做了第 {chapter} 章已经做完的「{earlier}」：把它当作已经发生，写它带来的后果",
+                "第 {} 场的事件重做了第 {chapter} {REDONE_LIKE}{earlier}」：把它当作已经发生，写它带来的后果",
                 index + 1
             ));
         }
@@ -802,28 +823,6 @@ pub fn skill_decisions(plan: &Value, skill_ids: &[String]) -> Value {
 /// The ledger as the planner sees it: each device once with its latest use,
 /// the recent endings and losses, everyone introduced and the last places.
 /// It stays bounded however long the book gets.
-/// Round 13: what the latest two chapters carried out, for the writer not
-/// to act out again: their planned events and their uses of a device.
-pub fn done_in_recent_chapters(ledger: &Value) -> Value {
-    let endings = ledger["endings"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    json!(endings[endings.len().saturating_sub(NEAR_CHAPTERS)..]
-        .iter()
-        .map(|ending| {
-            let devices = ledger["devices"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|device| device["chapter"] == ending["chapter"])
-                .map(|device| format!("{}：{}", text(&device["name"]), text(&device["howUsed"])))
-                .collect::<Vec<_>>();
-            json!({"chapter":ending["chapter"],"events":ending["events"],"deviceUses":devices})
-        })
-        .collect::<Vec<_>>())
-}
-
 pub fn prompt_ledger(ledger: &Value) -> Value {
     let recent = |key: &str| {
         let items = ledger[key].as_array().map(Vec::as_slice).unwrap_or(&[]);
@@ -970,8 +969,6 @@ pub struct WritingContext {
     pub bible: Value,
     pub style_card: Option<Value>,
     memories: Vec<crate::work_memory::Memory>,
-    /// Round 13: what the latest two chapters carried out.
-    done: Value,
     /// WM-2a: the owner's corrections, as the writer is told them.
     corrections: Vec<Value>,
     chapter: u32,
@@ -1006,11 +1003,6 @@ impl WritingContext {
             .ok_or_else(|| "B08_STORY_BIBLE_REQUIRED".to_string())?;
         let style_card =
             confirmed_content(connection, project_id, "StyleCard", STYLE_CARD_CONTENT)?;
-        let done = done_in_recent_chapters(&creation_ledger(
-            &crate::repositories::craft::prior_plan_crafts(connection, project_id, chapter_id)
-                .map_err(|error| error.to_string())?,
-            &bible,
-        ));
         Ok(Self {
             bible,
             style_card,
@@ -1019,7 +1011,6 @@ impl WritingContext {
             )?,
             corrections: owner_corrections(connection, project_id)?,
             chapter: chapter_number.unwrap_or(1),
-            done,
         })
     }
 
@@ -1046,7 +1037,6 @@ impl WritingContext {
         }
         input["chapterNumber"] = json!(self.chapter);
         input["recentChapters"] = json!(recent_chapters);
-        input["doneInRecentChapters"] = self.done.clone();
         // Who the story names as a person: their own traits come in only
         // when they are in the chapter.
         let (_, people) = self.chapter_people(&input["chapterPlan"]);

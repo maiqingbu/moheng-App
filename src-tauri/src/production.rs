@@ -3303,6 +3303,17 @@ fn run_chapter_production_inner(
         plan.remove("horizonPreview");
     }
     let mut render_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":writer_plan,"contextManifestRef":context_ref,"contextManifest":context_payload,"authorityContext":authority_context.clone(),"chapterLengthRange":length_range.to_json()});
+    // Round 13 (owner decision 2026-11-27): repetitions the planner left on
+    // its last round reach the writer as what not to act out again.
+    let must_not_replay =
+        crate::repositories::runtime::plan_reminder_items(connection, &project_id, &chapter_id)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|problem| crate::craft_plan::is_repetition_problem(problem))
+            .collect::<Vec<_>>();
+    if !must_not_replay.is_empty() {
+        render_input["mustNotReplay"] = json!(must_not_replay);
+    }
     if let Some(stage) = &stage_step {
         render_input["stageStep"] = stage.input();
     }
