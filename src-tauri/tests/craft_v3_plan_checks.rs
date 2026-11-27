@@ -82,7 +82,11 @@ fn vague_decisions_and_an_unchanged_situation_are_reported() {
 
 #[test]
 fn devices_must_be_new_or_a_real_escalation_of_an_earlier_one() {
-    let prior = [(1, plan()["craft"].clone())];
+    let mut earlier = plan()["craft"].clone();
+    for scene in earlier["scenes"].as_array_mut().unwrap() {
+        scene["events"] = json!(["林满在账房里对着灯核了一夜旧账"]);
+    }
+    let prior = [(1, earlier)];
     let ledger = creation_ledger(&prior, &bible());
     let repeated = plan_problems(&plan(), 2, &bible(), &ledger);
     assert!(has(&repeated, "之前已经用过"), "{repeated:?}");
@@ -355,6 +359,7 @@ fn round100_an_event_or_an_ending_written_out_as_prose_is_sent_back() {
 #[test]
 fn round131_an_event_redoing_one_of_the_last_two_chapters_is_sent_back() {
     let mut earlier = plan()["craft"].clone();
+    earlier["scenes"][0]["events"] = json!(["林满在账房里对着灯核了一夜旧账"]);
     earlier["scenes"][1]["events"] = json!(["林满输入十六位校验码，调出码头仓库当晚的监控片段"]);
     let ledger = creation_ledger(&[(3, earlier)], &bible());
     let mut redo = plan();

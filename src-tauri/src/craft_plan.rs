@@ -839,7 +839,7 @@ pub fn prompt_ledger(ledger: &Value) -> Value {
         "sourceKind":"PRIOR_CHAPTER_PLANS",
         "devices":devices,
         "endings":endings.as_array().into_iter().flatten().map(|item| {
-            json!({"chapter":item["chapter"],"plannedGoal":item["goal"],"doneEvents":item["events"]})
+            json!({"chapter":item["chapter"],"plannedGoal":item["goal"]})
         }).collect::<Vec<_>>(),
         "introducedPeople":ledger["introducedPeople"],
         "losses":recent("losses"),
