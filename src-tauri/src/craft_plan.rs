@@ -298,6 +298,25 @@ fn chosen_beats(craft: &Value) -> Vec<&'static str> {
         .collect()
 }
 
+/// The events a plan's scenes name, in order.
+pub(crate) fn scene_events(craft: &Value) -> impl Iterator<Item = &str> {
+    scenes(craft)
+        .iter()
+        .filter_map(|scene| scene["events"].as_array())
+        .flatten()
+        .filter_map(Value::as_str)
+}
+
+/// Round 13: whether a plan problem says the plan repeats an earlier
+/// chapter (a device used the same way, an event done again, a goal or
+/// ending like a recent one). Left on the last round, these reach the writer.
+pub fn is_repetition_problem(problem: &str) -> bool {
+    problem.contains("一模一样")
+        || problem.contains(REDONE_LIKE)
+        || is_repeated_goal(problem)
+        || (problem.starts_with(HOOK_LIKE) && problem.contains("太接近"))
+}
+
 /// The creation ledger (CRAFT_V3_DESIGN §4.3): what the committed chapters
 /// already used, rebuilt from their r2 plans in chapter order.
 /// `prior` holds `(chapter_no, craft)` pairs; r1 chapters have no craft and
@@ -318,7 +337,8 @@ pub fn creation_ledger(prior: &[(i64, Value)], bible: &Value) -> Value {
         if craft.get("device").is_some() {
             devices.push(json!({"chapter":chapter,"name":text(&craft["device"]["name"]),"howUsed":text(&craft["device"]["howUsed"])}));
         }
-        endings.push(json!({"chapter":chapter,"goal":text(&craft["chapterGoal"]),"after":text(&craft["situationChange"]["after"]),"endHook":text(&craft["endHook"])}));
+        endings.push(json!({"chapter":chapter,"goal":text(&craft["chapterGoal"]),"after":text(&craft["situationChange"]["after"]),"endHook":text(&craft["endHook"]),
+            "events":scene_events(craft).collect::<Vec<_>>()}));
         people.extend(scene_people(craft).map(|person| text(&person["name"]).to_string()));
         losses.extend(
             craft["newLosses"]
@@ -442,6 +462,8 @@ fn shared_goal_passage(earlier: &str, current: &str) -> Option<String> {
 
 /// How the problems of a repeated goal or ending start.
 const GOAL_LIKE: &str = "本章目标和第";
+/// What a problem says after an event the last two chapters already did.
+const REDONE_LIKE: &str = "章已经做完的「";
 const GOAL_ACTION_LIKE: &str = "本章目标可能重复第";
 const HOOK_LIKE: &str = "章末钩子和";
 
@@ -638,6 +660,28 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
             problems.push(format!(
                 "{GOAL_LIKE} {} 章的太接近（{earlier}）：那一章做到的当作已经发生，这一章写它带来的后果或下一步，不再做一次同类的试探、确认或取证",
                 ending["chapter"],
+            ));
+        }
+    }
+    // Real run round 13: an event the last two chapters already carried out
+    // is not done again; the plan builds on its result.
+    for (index, scene) in scene_list.iter().enumerate() {
+        let pairs = crate::chapter_craft::telling_pairs(text(&scene["events"][0]));
+        let redone = near
+            .iter()
+            .flat_map(|ending| {
+                ending["events"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(move |earlier| (&ending["chapter"], earlier))
+            })
+            .find(|(_, earlier)| nearly_repeats(earlier, &pairs));
+        if let Some((chapter, earlier)) = redone {
+            problems.push(format!(
+                "第 {} 场的事件重做了第 {chapter} {REDONE_LIKE}{earlier}」：把它当作已经发生，写它带来的后果",
+                index + 1
             ));
         }
     }

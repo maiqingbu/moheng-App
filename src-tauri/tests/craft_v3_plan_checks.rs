@@ -3,8 +3,8 @@
 
 use ai_novel_production_system_core::chapter_craft::plan_feedback;
 use ai_novel_production_system_core::craft_plan::{
-    check_craft_plan, creation_ledger, drop_unchosen_beats, last_appearances, plan_problems,
-    shape_reminder, skill_decisions,
+    check_craft_plan, creation_ledger, drop_unchosen_beats, is_repetition_problem,
+    last_appearances, plan_problems, shape_reminder, skill_decisions,
 };
 use serde_json::{json, Value};
 
@@ -82,7 +82,11 @@ fn vague_decisions_and_an_unchanged_situation_are_reported() {
 
 #[test]
 fn devices_must_be_new_or_a_real_escalation_of_an_earlier_one() {
-    let prior = [(1, plan()["craft"].clone())];
+    let mut earlier = plan()["craft"].clone();
+    for scene in earlier["scenes"].as_array_mut().unwrap() {
+        scene["events"] = json!(["林满在账房里对着灯核了一夜旧账"]);
+    }
+    let prior = [(1, earlier)];
     let ledger = creation_ledger(&prior, &bible());
     let repeated = plan_problems(&plan(), 2, &bible(), &ledger);
     assert!(has(&repeated, "之前已经用过"), "{repeated:?}");
@@ -348,6 +352,34 @@ fn round100_an_event_or_an_ending_written_out_as_prose_is_sent_back() {
         "{problems:?}"
     );
     assert!(!has(&problems, "第 1 场"), "{problems:?}");
+}
+
+/// Real run round 13: chapter 4 carried out chapter 3's operation again
+/// (the negative into the reader, the sixteen-digit code, the footage).
+#[test]
+fn round131_an_event_redoing_one_of_the_last_two_chapters_is_sent_back() {
+    let mut earlier = plan()["craft"].clone();
+    earlier["scenes"][0]["events"] = json!(["林满在账房里对着灯核了一夜旧账"]);
+    earlier["scenes"][1]["events"] = json!(["林满输入十六位校验码，调出码头仓库当晚的监控片段"]);
+    let ledger = creation_ledger(&[(3, earlier)], &bible());
+    let mut redo = plan();
+    redo["craft"]["scenes"][0]["events"] =
+        json!(["林满再输入一遍十六位校验码，调出码头仓库当晚的监控片段"]);
+    let redone = plan_problems(&redo, 4, &bible(), &ledger);
+    assert!(
+        has(&redone, "第 1 场的事件重做了第 3 章已经做完的"),
+        "{redone:?}"
+    );
+    let problems = plan_problems(&plan(), 4, &bible(), &ledger);
+    assert!(!has(&problems, "已经做完的"), "{problems:?}");
+    // Left on the last round, it reaches the writer as what not to act out.
+    assert!(redone
+        .iter()
+        .any(|problem| problem.contains("已经做完的") && is_repetition_problem(problem)));
+    assert!(is_repetition_problem(
+        "异常手法「听旧物」的用法和之前一模一样，需要新的变化"
+    ));
+    assert!(!is_repetition_problem("需要 1 到 3 个场景，现在有 4 个"));
 }
 
 /// Real run round 12: chapter goals of 80-120 characters scripted each

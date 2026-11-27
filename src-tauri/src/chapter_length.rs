@@ -204,12 +204,7 @@ pub(crate) fn planned_events(plan: &Value) -> PlannedEvents {
         .filter_map(|person| person["name"].as_str())
         .flat_map(telling_pairs)
         .collect::<BTreeSet<_>>();
-    let events = crate::craft_plan::scenes(craft)
-        .iter()
-        .filter_map(|scene| scene["events"].as_array())
-        .flatten()
-        .filter_map(Value::as_str)
-        .collect::<Vec<_>>();
+    let events = crate::craft_plan::scene_events(craft).collect::<Vec<_>>();
     PlannedEvents {
         pairs: events
             .iter()
