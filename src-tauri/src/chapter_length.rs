@@ -126,6 +126,13 @@ impl ChapterLengthRange {
         characters * 20 > self.max * 23
     }
 
+    /// Round 13 (owner decision 2026-11-27): what the writer aims for, the
+    /// range's minimum: the deepseek writer runs two or three tenths past
+    /// it. A writer that hits its aim lands near the minimum.
+    pub fn aim(&self) -> i64 {
+        self.min
+    }
+
     /// The length a chapter aims for: the middle of the range.
     pub fn target(&self) -> i64 {
         (self.min + self.max) / 2

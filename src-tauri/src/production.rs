@@ -3302,7 +3302,8 @@ fn run_chapter_production_inner(
     if let Some(plan) = writer_plan.as_object_mut() {
         plan.remove("horizonPreview");
     }
-    let mut render_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":writer_plan,"contextManifestRef":context_ref,"contextManifest":context_payload,"authorityContext":authority_context.clone(),"chapterLengthRange":length_range.to_json()});
+    let mut render_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":writer_plan,"contextManifestRef":context_ref,"contextManifest":context_payload,"authorityContext":authority_context.clone(),"chapterLengthRange":length_range.to_json(),
+        "aimChars":length_range.aim()});
     // Round 13 (owner decision 2026-11-27): repetitions the planner left on
     // its last round reach the writer as what not to act out again.
     let must_not_replay =
@@ -3643,8 +3644,8 @@ fn run_chapter_production_inner(
                 json!({
                     "rejectedFor":length_error(&body),
                     "instruction":format!(
-                        "上一稿有 {length} 字，要求 {}–{} 字（不算空格和换行）。重写这一章：{how}。",
-                        length_range.min, length_range.max
+                        "上一稿有 {length} 字，要求 {}–{} 字（不算空格和换行），按 {} 字左右写。重写这一章：{how}。",
+                        length_range.min, length_range.max, length_range.aim()
                     )
                 }),
             ))
@@ -3738,15 +3739,15 @@ fn run_chapter_production_inner(
         if length_range.is_far_too_long(length) {
             // Round 13 (owner decision 2026-11-27): cutting a fifth or more
             // of a redraw left lines without their setup (real run round
-            // 12), so the writer shortens its own draft once; one still far
-            // too long fails.
+            // 12), so the writer shortens its own draft once. It cut only 5%
+            // (real run round 13), so what is still too long is cut below.
             let mut input = render_input;
             input["outputFeedback"] = json!({
                 "rejectedFor":length_error(&body),
                 "previousDraft":body,
                 "instruction":format!(
                     "上一稿有 {length} 字，要求 {}–{} 字（不算空格和换行）。把 previousDraft 压缩到 {} 字左右：每件事、每段对话的来回和结尾都留下，删走路、等待、重复确认和不改变局面的描写，不加新内容。",
-                    length_range.min, length_range.max, length_range.target()
+                    length_range.min, length_range.max, length_range.aim()
                 )
             });
             let (run_id, outcome) = craft_call(
@@ -3759,7 +3760,8 @@ fn run_chapter_production_inner(
             prose_run_ids.push(run_id);
             body = tidy(&rendered_body(&outcome)?);
             length = character_count(&body);
-            if length_range.is_far_too_long(length) {
+            // Owner decision 2026-11-25: a draft still this long is not cut down.
+            if length_range.is_too_long_to_cut(length) {
                 return Err(length_error(&body));
             }
             save_draft(&body, &prose_run_ids, &craft_skills)?;

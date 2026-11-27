@@ -366,7 +366,7 @@ fn round110_a_draft_far_off_the_range_is_written_again_with_its_count() {
 }
 
 #[test]
-fn round130_a_redraw_still_far_too_long_is_shortened_by_the_writer_not_cut() {
+fn round130_a_redraw_still_far_too_long_is_shortened_by_the_writer_then_cut() {
     // Real run round 12: redraws of 2749-2997 characters (range 1800-2200)
     // were cut by 20%-27% and left lines without their setup.
     let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[3600, 3500, 2900]));
@@ -386,11 +386,26 @@ fn round130_a_redraw_still_far_too_long_is_shortened_by_the_writer_not_cut() {
     assert!(gateway.inputs("CUT_CHAPTER").is_empty());
     assert_eq!(committed_word_count(&state, project_id, &chapter_id), 2900);
 
-    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[3600, 3500, 3480]));
-    let (_temp, _state, _chapter_id, result) = produce(gateway.clone(), "p-compressed-too-long");
+    // Real run round 13: the writer shortened 2823 characters to 2695 only;
+    // what is still too long is cut to the range instead of failing.
+    let mut gateway = CraftGateway::new(vec![good_plan()], &[3600, 3500, 3480]);
+    gateway.inject = vec![String::new(), String::new(), distinct_cuttable_sentences()];
+    let gateway = Arc::new(gateway);
+    let project_id = "p-compressed-then-cut";
+    let (_temp, state, chapter_id, result) = produce(gateway.clone(), project_id);
+    result.unwrap();
+    assert_eq!(gateway.inputs("CUT_CHAPTER")[0]["currentChars"], 3480);
+    let committed = committed_word_count(&state, project_id, &chapter_id);
+    assert!((2000..=3300).contains(&committed), "{committed}");
+    // The writer aims for the range's minimum: it runs past what it aims for.
+    assert_eq!(gateway.inputs("RENDER_CHAPTER")[0]["aimChars"], 2000);
+    // One still past 1.3 times the ceiling is not cut down (owner 2026-11-25).
+    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[3600, 3500, 4400]));
+    let (_temp, _state, _chapter_id, result) =
+        produce(gateway.clone(), "p-compressed-far-too-long");
     assert!(result
         .unwrap_err()
-        .starts_with("B08_RENDER_LENGTH_OUT_OF_RANGE:3480"));
+        .starts_with("B08_RENDER_LENGTH_OUT_OF_RANGE:4400"));
     assert!(gateway.inputs("CUT_CHAPTER").is_empty());
 }
 
