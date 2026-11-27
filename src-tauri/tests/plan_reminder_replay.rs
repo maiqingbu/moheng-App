@@ -18,8 +18,18 @@ fn round131_a_chapters_plan_reminder_items_are_read_back() {
         )
         .unwrap();
     };
-    insert("dec:1", "计划提醒", "chap:4", "异常手法「协议」的用法和之前一模一样，需要新的变化");
-    insert("dec:2", "审计提醒", "chap:4", "审计：引用的原文在正文里找不到");
+    insert(
+        "dec:1",
+        "计划提醒",
+        "chap:4",
+        "异常手法「协议」的用法和之前一模一样，需要新的变化",
+    );
+    insert(
+        "dec:2",
+        "审计提醒",
+        "chap:4",
+        "审计：引用的原文在正文里找不到",
+    );
     insert("dec:3", "计划提醒", "chap:5", "别的章");
     assert_eq!(
         plan_reminder_items(&db, "p1", "chap:4").unwrap(),
